@@ -142,7 +142,8 @@ The Frontend's CameraHealth + Dashboard tiles read these states.
 - **Recording upload** — multipart for >5 MB files (the GoP-merged MP4s ffmpeg writes). Retries on `ECONNRESET / ETIMEDOUT / EPIPE / ENOTFOUND`.
 - **Playback URLs** — `getSignedUrl(GetObjectCommand, …, expiresIn:3600)`. The frontend opens these directly; backend never proxies the bytes.
 - **Snapshot upload** — small-blob `putObject` from `/api/internal/ai/events`.
-- **Bucket layout** — `recordings/{userId}/{group}/{camera}/{YYYY-MM-DD}/{filename}` for clips, `ai/events/{userId}/{monitorId}/{ts}.jpg` for snapshots, `watchlist-datasets/{userId}/…` for dataset uploads.
+- **Bucket layout** — `recordings/{userId}/{group}/{camera}/{YYYY-MM-DD}/{filename}` for clips, `ai/events/{userId}/{monitorId}/{ts}.jpg` for snapshots, `snapshots/{userId}/{monitorId}/latest.jpg` for each camera's saved reference picture (one object, overwritten in place), `watchlist-datasets/{userId}/…` for dataset uploads.
+- **Reference-picture expiry** — the hourly sweep in `liveSnapshot.service` replaces or deletes saved pictures older than `SNAPSHOT_MAX_AGE_DAYS` (14). Ops backstop: a lifecycle rule expiring `snapshots/` after 15 days. Run `node scripts/s3-snapshot-lifecycle.js` (dry run) then `--apply` — it merges into the bucket's existing rules rather than replacing them. If the provider's console manages lifecycle, add the same rule there.
 
 The endpoint defaults to `https://s3.10pb.com` (NetForChoice 10PB). Override via `S3_ENDPOINT` for local MinIO or AWS.
 

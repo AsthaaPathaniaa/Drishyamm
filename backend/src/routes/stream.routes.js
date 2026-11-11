@@ -2,6 +2,7 @@ const { Router } = require('express');
 const router = Router();
 const streamController = require('../controllers/stream.controller');
 const authenticate = require('../middleware/authenticate');
+const requireFeature = require('../middleware/requireFeature');
 
 router.get('/start/:monitorId',  authenticate, streamController.startStream);
 router.get('/stop/:monitorId',   authenticate, streamController.stopStream);
@@ -9,6 +10,11 @@ router.get('/status/:monitorId', authenticate, streamController.getStreamStatus)
 // A still for the Monitor Wall editor's tiles (cached, at most one extra
 // session per recorder). See services/liveSnapshot.service.js.
 router.get('/snapshot/:monitorId', authenticate, streamController.getSnapshot);
+// Re-take the camera's saved reference picture — for whoever may save zones:
+// restricted zones, head-count rooms and gates, or AI Feed detection areas.
+// The app's ZONE_EDIT_KEYS mirrors this list.
+router.post('/snapshot/:monitorId/refresh', authenticate,
+  requireFeature('restricted_zone', 'headcount', 'ai_feed'), streamController.refreshSnapshot);
 router.post('/watchdog/run',     authenticate, streamController.runWatchdog);
 // App heartbeat while a user is logged in: keeps their cameras' grid streams
 // running so tiles open instantly. See services/streamWarm.service.js.
