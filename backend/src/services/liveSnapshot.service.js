@@ -66,6 +66,12 @@ const GRAB_TIMEOUT_MS = 9000;
 const MAX_ENTRIES = 1000;
 const MAX_SAVED_ENTRIES = 300;
 const WIDTH = 640;
+// Saved pictures stand in for live in the editors, so they are taken from the
+// main stream at up to this width (never upscaled) and better quality: no
+// jump in sharpness when live fades in over them.
+const SAVE_WIDTH = int(process.env.SNAPSHOT_SAVE_WIDTH, 1280);
+// Live playing in an editor re-saves a picture older than this (freshen).
+const FRESHEN_MS = int(process.env.SNAPSHOT_FRESHEN_HOURS, 6) * 3600 * 1000;
 
 const cache = new Map();       // monitorId → { jpeg, at, source }
 const saved = new Map();       // monitorId → { jpeg, at, key }  (saved pictures read back from S3)
@@ -111,14 +117,18 @@ async function readyPathsOnNvr(host) {
   return items.filter((it) => it.ready && names.has(it.name)).length;
 }
 
-async function pickSource(camera, { persist = false, skipRecording = false } = {}) {
+async function pickSource(camera, { persist = false, skipRecording = false, liveOnly = false } = {}) {
   const { monitorId } = camera;
-  if (await isPathReady(streamingService.subPathName(monitorId))) {
-    return { kind: 'live', url: streamingService.getRtspEgressUrl(monitorId, true) };
+  // A picture to be saved prefers the main stream (it stands in for live in
+  // the editors, which play main); a passing still is fine from the sub.
+  const order = persist ? [false, true] : [true, false];
+  for (const sub of order) {
+    // eslint-disable-next-line no-await-in-loop -- two cheap API reads, in order
+    if (await isPathReady(sub ? streamingService.subPathName(monitorId) : streamingService.pathName(monitorId))) {
+      return { kind: 'live', url: streamingService.getRtspEgressUrl(monitorId, sub) };
+    }
   }
-  if (await isPathReady(streamingService.pathName(monitorId))) {
-    return { kind: 'live', url: streamingService.getRtspEgressUrl(monitorId, false) };
-  }
+  if (liveOnly) return { kind: 'none' };
   if (persist && !skipRecording) {
     const seg = await localRecordings.latestSegment(monitorId).catch(() => null);
     if (seg && Date.now() - seg.mtimeMs < RECORDING_FRESH_MS) {
@@ -143,7 +153,7 @@ async function pickSource(camera, { persist = false, skipRecording = false } = {
   };
 }
 
-function grabFrame(input, { file = false } = {}) {
+function grabFrame(input, { file = false, sharp = false } = {}) {
   return new Promise((resolve, reject) => {
     const ff = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
@@ -157,8 +167,8 @@ function grabFrame(input, { file = false } = {}) {
       '-skip_frame', 'nokey',
       '-i', input,
       '-frames:v', '1', '-an',
-      '-vf', `scale=${WIDTH}:-2`,
-      '-q:v', '5', '-f', 'image2', '-c:v', 'mjpeg', 'pipe:1',
+      '-vf', sharp ? `scale='min(${SAVE_WIDTH},iw)':-2` : `scale=${WIDTH}:-2`,
+      '-q:v', sharp ? '3' : '5', '-f', 'image2', '-c:v', 'mjpeg', 'pipe:1',
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
     const chunks = [];
@@ -266,12 +276,14 @@ async function loadSaved(camera) {
 
 // ── Grabbing ─────────────────────────────────────────────────────────────────
 
-async function runGrab(source) {
+async function runGrab(source, { sharp = false } = {}) {
   const lock = source.kind === 'direct' ? hostLock(source.host) : null;
   if (lock) await lock.acquire();
   await ffmpegSlots.acquire();
   try {
-    return await (source.kind === 'recording' ? grabFrame(source.file, { file: true }) : grabFrame(source.url));
+    return await (source.kind === 'recording'
+      ? grabFrame(source.file, { file: true, sharp })
+      : grabFrame(source.url, { sharp }));
   } finally {
     ffmpegSlots.release();
     if (lock) lock.release();
@@ -306,7 +318,7 @@ async function refresh(camera, { reason, fromQueue = false } = {}) {
     let jpeg;
     try {
       // eslint-disable-next-line no-await-in-loop
-      jpeg = await runGrab(source);
+      jpeg = await runGrab(source, { sharp: persistIt });
     } catch (err) {
       logger.warn('live snapshot failed', { monitorId: camera.monitorId, source: source.kind, error: scrub(err.message) });
       // An in-progress segment can have no fragment yet; move on down the order.
@@ -343,7 +355,7 @@ async function fromLatestRecording(camera) {
   const seg = await localRecordings.latestSegment(camera.monitorId).catch(() => null);
   if (!seg || Date.now() - seg.startedAtMs > MAX_AGE_MS) return null;
   try {
-    const jpeg = await runGrab({ kind: 'recording', file: seg.file });
+    const jpeg = await runGrab({ kind: 'recording', file: seg.file }, { sharp: true });
     await persist(camera, jpeg, { at: seg.startedAtMs, source: 'recording', reason: 'fallback' })
       .catch((err) => logger.warn('snapshot save failed', { monitorId: camera.monitorId, error: err.message }));
     return { jpeg, at: seg.startedAtMs, source: 'recording' };
@@ -422,6 +434,26 @@ async function getSnapshot(camera, { cachedOnly = false } = {}) {
   }
   const { saved: _saved, ...shot } = result;
   return { ...shot, stale: false };
+}
+
+/**
+ * Live is playing in a zone editor: re-save the camera's picture from Stream
+ * Service when the saved one is FRESHEN_MS old or missing, so the next opening
+ * shows a picture that matches live (day vs night). Only ever from a path that
+ * is already live -- never a recording, never the NVR.
+ * @returns {Promise<'saved'|'recent'|'offline'|'not_live'|'not_saved'>}
+ */
+async function freshen(camera) {
+  if (camera.status !== 'online') return 'offline';
+  const meta = usableSaved(camera);
+  if (meta && Date.now() - Date.parse(meta.capturedAt) < FRESHEN_MS) return 'recent';
+  return once(`${camera.monitorId}#freshen`, async () => {
+    const source = await pickSource(camera, { persist: true, liveOnly: true });
+    if (source.kind !== 'live') return 'not_live';
+    const jpeg = await runGrab(source, { sharp: true });
+    const entry = await keep(camera, jpeg, source, { persistIt: true, trigger: 'freshen' });
+    return entry.saved ? 'saved' : 'not_saved';
+  });
 }
 
 /**
@@ -597,10 +629,11 @@ module.exports = {
   getSnapshot,
   refresh,
   refreshByHand,
+  freshen,
   persist,
   queueOnline,
   sweep,
   startSweep,
   stopSweep,
-  _internals: { pickSource, scrub, jpegSize, runJob, expire, cache, saved, queued, FRESH_MS, STALE_MS, MAX_AGE_MS, MANUAL_MIN_MS, NVR_VIEW_BUDGET, FLAP_MIN_MS, RETRY_MS, MAX_TRIES },
+  _internals: { pickSource, scrub, jpegSize, runJob, expire, cache, saved, queued, FRESH_MS, STALE_MS, MAX_AGE_MS, MANUAL_MIN_MS, NVR_VIEW_BUDGET, FLAP_MIN_MS, RETRY_MS, MAX_TRIES, FRESHEN_MS },
 };

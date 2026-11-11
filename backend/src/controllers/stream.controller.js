@@ -141,6 +141,28 @@ const getSnapshot = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Live is playing in a zone editor: re-save the camera's picture from the live
+ * stream if the saved one is old (see liveSnapshot.freshen). Never touches the
+ * NVR, so any owner of the camera may call it.
+ * POST /api/stream/snapshot/:monitorId/freshen
+ *   200 { result: 'saved' | 'recent' | 'offline' | 'not_live' | 'not_saved' | 'failed' }
+ */
+const freshenSnapshot = asyncHandler(async (req, res) => {
+  const { monitorId } = req.params;
+
+  const camera = await Camera.findOne({ where: { userId: req.user.id, monitorId } });
+  if (!camera) throw new AppError('Camera not found', 404);
+
+  let result;
+  try {
+    result = await liveSnapshot.freshen(camera);
+  } catch {
+    result = 'failed';
+  }
+  res.json({ ok: true, monitorId, result });
+});
+
+/**
  * Operator's "update picture": a fresh grab, saved as the camera's reference
  * picture (restarts its expiry). Pictures only ever come from the camera or
  * its recording — there is no upload.
@@ -347,4 +369,4 @@ const liveTicket = asyncHandler(async (req, res) => {
   res.json({ ticket, path, variant, transcode });
 });
 
-module.exports = { liveTicket, warmStreams, startStream, stopStream, getStreamStatus, getSnapshot, refreshSnapshot, runWatchdog, getMasterPlaylist, verifyStreamAccess, adminStartStream };
+module.exports = { liveTicket, warmStreams, startStream, stopStream, getStreamStatus, getSnapshot, refreshSnapshot, freshenSnapshot, runWatchdog, getMasterPlaylist, verifyStreamAccess, adminStartStream };

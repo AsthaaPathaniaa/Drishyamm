@@ -15,6 +15,8 @@ router.get('/snapshot/:monitorId', authenticate, streamController.getSnapshot);
 // The app's ZONE_EDIT_KEYS mirrors this list.
 router.post('/snapshot/:monitorId/refresh', authenticate,
   requireFeature('restricted_zone', 'headcount', 'ai_feed'), streamController.refreshSnapshot);
+// Live is playing in an editor: re-save an old picture from the live stream.
+router.post('/snapshot/:monitorId/freshen', authenticate, streamController.freshenSnapshot);
 router.post('/watchdog/run',     authenticate, streamController.runWatchdog);
 // App heartbeat while a user is logged in: keeps their cameras' grid streams
 // running so tiles open instantly. See services/streamWarm.service.js.

@@ -390,6 +390,52 @@ describe('cached only (an editor opening)', () => {
   });
 });
 
+describe('freshen (live playing in an editor)', () => {
+  const spawnArgs = () => require('child_process').spawn.mock.calls.at(-1)[1];
+
+  test('a picture saved within 6 hours is left alone', async () => {
+    mockReady.add('cam_a');
+    expect(await snapshots.freshen(cam('a', { settings: savedPicture(2 * 60 * MIN) }))).toBe('recent');
+    expect(mockSpawned).toHaveLength(0);
+  });
+
+  test('an older picture is re-saved from the live main stream, sharp', async () => {
+    mockReady.add('cam_a'); mockReady.add('cam_a_sub');
+    const p = snapshots.freshen(cam('a', { settings: savedPicture(7 * 60 * MIN) }));
+    await flush();
+    const args = spawnArgs();
+    expect(args[args.indexOf('-i') + 1]).toBe('rtsp://stream-service:8554/cam_a');
+    expect(args).toEqual(expect.arrayContaining(["scale='min(1280,iw)':-2", '-q:v', '3']));
+    finish(mockSpawned[0], 'fresh');
+    expect(await p).toBe('saved');
+    expect(logger.info).toHaveBeenCalledWith('snapshot saved', { monitorId: 'a', source: 'live', reason: 'freshen' });
+  });
+
+  test('never reaches for the NVR or a recording when live is not ready', async () => {
+    mockSegment = { file: '/rec.mp4', mtimeMs: Date.now(), startedAtMs: Date.now() };
+    expect(await snapshots.freshen(cam('a'))).toBe('not_live');
+    expect(mockSpawned).toHaveLength(0);
+  });
+
+  test('an offline camera is not touched', async () => {
+    expect(await snapshots.freshen(cam('a', { status: 'offline' }))).toBe('offline');
+    expect(mockSpawned).toHaveLength(0);
+  });
+});
+
+describe('picture quality', () => {
+  test('a passing viewer still stays small and comes from the sub-stream', async () => {
+    mockReady.add('cam_a'); mockReady.add('cam_a_sub');
+    const p = snapshots.getSnapshot(cam('a', { settings: savedPicture(DAY) }));
+    await flush();
+    const args = require('child_process').spawn.mock.calls.at(-1)[1];
+    expect(args[args.indexOf('-i') + 1]).toBe('rtsp://stream-service:8554/cam_a_sub');
+    expect(args).toEqual(expect.arrayContaining(['scale=640:-2', '-q:v', '5']));
+    finish(mockSpawned[0]);
+    await p;
+  });
+});
+
 describe('refreshByHand', () => {
   test('takes and saves a new picture, restarting its clock', async () => {
     const p = snapshots.refreshByHand(cam('a', { settings: savedPicture(10 * DAY) }));

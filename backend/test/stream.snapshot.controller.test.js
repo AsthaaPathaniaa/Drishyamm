@@ -4,7 +4,7 @@
 jest.mock('../src/models', () => ({ Camera: { findOne: jest.fn() } }));
 jest.mock('../src/services/stream.service', () => ({}));
 jest.mock('../src/services/recordingSync.service', () => ({}));
-jest.mock('../src/services/liveSnapshot.service', () => ({ getSnapshot: jest.fn(), refreshByHand: jest.fn() }));
+jest.mock('../src/services/liveSnapshot.service', () => ({ getSnapshot: jest.fn(), refreshByHand: jest.fn(), freshen: jest.fn() }));
 
 const { Camera } = require('../src/models');
 const liveSnapshot = require('../src/services/liveSnapshot.service');
@@ -60,6 +60,15 @@ test('GET ?cached=1 asks the service not to grab, and says not_cached when nothi
   expect(liveSnapshot.getSnapshot).toHaveBeenCalledWith(expect.anything(), { cachedOnly: true });
   expect(res.statusCode).toBe(404);
   expect(res.body.reason).toBe('not_cached');
+});
+
+test('POST /freshen reports what happened and never fails the page', async () => {
+  liveSnapshot.freshen.mockResolvedValue('saved');
+  expect((await call(ctrl.freshenSnapshot)).res.body.result).toBe('saved');
+  liveSnapshot.freshen.mockRejectedValue(new Error('ffmpeg exited 1'));
+  const { res } = await call(ctrl.freshenSnapshot);
+  expect(res.statusCode).toBe(200);
+  expect(res.body.result).toBe('failed');
 });
 
 describe('POST /snapshot/:monitorId/refresh', () => {
