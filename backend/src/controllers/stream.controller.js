@@ -110,6 +110,10 @@ function sendOffline(res, err) {
  * and an older still was served. 409 { reason: 'never_connected' | 'expired',
  * lastSeenAt } when there is nothing to show. See liveSnapshot.service for why
  * this never opens more than one extra session per recorder.
+ *
+ * ?cached=1 never grabs: only a picture already held (memory or saved), else
+ * 404 { reason: 'not_cached' }. Editors use it to show a picture instantly
+ * while their live view is still starting.
  */
 const getSnapshot = asyncHandler(async (req, res) => {
   const { monitorId } = req.params;
@@ -119,9 +123,10 @@ const getSnapshot = asyncHandler(async (req, res) => {
 
   let shot;
   try {
-    shot = await liveSnapshot.getSnapshot(camera);
+    shot = await liveSnapshot.getSnapshot(camera, { cachedOnly: req.query.cached === '1' });
   } catch (err) {
     if (err.code === 'OFFLINE') return sendOffline(res, err);
+    if (err.code === 'NOT_CACHED') return res.status(404).json({ ok: false, message: 'No picture held yet.', reason: 'not_cached' });
     throw new AppError('Could not get a still from this camera. It will be retried.', 502);
   }
 

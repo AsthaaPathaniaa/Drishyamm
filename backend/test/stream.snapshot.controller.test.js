@@ -10,7 +10,7 @@ const { Camera } = require('../src/models');
 const liveSnapshot = require('../src/services/liveSnapshot.service');
 const ctrl = require('../src/controllers/stream.controller');
 
-function call(handler) {
+function call(handler, query = {}) {
   const res = {
     statusCode: 200, headers: {}, body: undefined,
     status(c) { this.statusCode = c; return this; },
@@ -23,7 +23,7 @@ function call(handler) {
     const done = res.json.bind(res);
     res.json = (b) => { done(b); resolve({ res }); return res; };
     res.send = (b) => { res.body = b; resolve({ res }); return res; };
-    handler({ params: { monitorId: 'a' }, user: { id: 'u1' } }, res, next);
+    handler({ params: { monitorId: 'a' }, user: { id: 'u1' }, query }, res, next);
   });
 }
 
@@ -52,6 +52,14 @@ describe('GET /snapshot/:monitorId', () => {
     expect(res.statusCode).toBe(409);
     expect(res.body).toMatchObject({ reason: 'expired', lastSeenAt: '2026-10-01T00:00:00.000Z' });
   });
+});
+
+test('GET ?cached=1 asks the service not to grab, and says not_cached when nothing is held', async () => {
+  liveSnapshot.getSnapshot.mockRejectedValue(Object.assign(new Error('none'), { code: 'NOT_CACHED' }));
+  const { res } = await call(ctrl.getSnapshot, { cached: '1' });
+  expect(liveSnapshot.getSnapshot).toHaveBeenCalledWith(expect.anything(), { cachedOnly: true });
+  expect(res.statusCode).toBe(404);
+  expect(res.body.reason).toBe('not_cached');
 });
 
 describe('POST /snapshot/:monitorId/refresh', () => {

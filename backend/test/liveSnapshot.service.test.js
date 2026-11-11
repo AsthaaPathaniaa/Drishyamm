@@ -361,6 +361,35 @@ describe('saved picture', () => {
   });
 });
 
+describe('cached only (an editor opening)', () => {
+  test('an online camera with a saved picture gets it at once, without a grab', async () => {
+    mockS3.set('snapshots/u1/a/latest.jpg', Buffer.from('saved'));
+    const shot = await snapshots.getSnapshot(cam('a', { settings: savedPicture(2 * DAY) }), { cachedOnly: true });
+    expect(shot).toMatchObject({ stale: true, source: 'saved' });
+    expect(shot.jpeg.toString()).toBe('saved');
+    expect(mockSpawned).toHaveLength(0);
+  });
+
+  test('the memory copy is used even when it is minutes old', async () => {
+    cache.set('a', { jpeg: Buffer.from('mem'), at: Date.now() - 10 * MIN, source: 'live' });
+    const shot = await snapshots.getSnapshot(cam('a'), { cachedOnly: true });
+    expect(shot.jpeg.toString()).toBe('mem');
+    expect(shot.stale).toBe(true);
+    expect(mockSpawned).toHaveLength(0);
+  });
+
+  test('an online camera with nothing held says so instead of grabbing', async () => {
+    await expect(snapshots.getSnapshot(cam('a'), { cachedOnly: true })).rejects.toMatchObject({ code: 'NOT_CACHED' });
+    expect(mockSpawned).toHaveLength(0);
+    expect(s3.putObject).not.toHaveBeenCalled();
+  });
+
+  test('an offline camera answers as usual', async () => {
+    await expect(snapshots.getSnapshot(cam('a', { status: 'offline', lastSeenAt: null }), { cachedOnly: true }))
+      .rejects.toMatchObject({ code: 'OFFLINE', reason: 'never_connected' });
+  });
+});
+
 describe('refreshByHand', () => {
   test('takes and saves a new picture, restarting its clock', async () => {
     const p = snapshots.refreshByHand(cam('a', { settings: savedPicture(10 * DAY) }));

@@ -373,15 +373,31 @@ async function lastKnown(camera, cause) {
 /**
  * @param {object} camera  Camera row (id, userId, monitorId, host, port, path,
  *                         username, password, status, lastSeenAt, settings)
+ * @param {object} [opts]
+ * @param {boolean} [opts.cachedOnly]  never grab; only what is already held
  * @returns {Promise<{ jpeg: Buffer, at: number, source: string, stale: boolean }>}
  * @throws  Error with code 'OFFLINE' (and reason, lastSeenAt) when there is
- *          nothing to show for an offline camera
+ *          nothing to show for an offline camera; 'NOT_CACHED' when
+ *          cachedOnly and an online camera has no picture held yet
  */
-async function getSnapshot(camera) {
+async function getSnapshot(camera, { cachedOnly = false } = {}) {
   const { monitorId } = camera;
   const hit = cache.get(monitorId);
   const age = hit ? Date.now() - hit.at : Infinity;
   if (age < FRESH_MS) return { ...hit, stale: false };
+
+  // Cached only: a picture already in hand (the memory copy, then the saved
+  // one), never a grab. An editor asks this the moment it opens, while live
+  // is still starting on the same NVR — a grab then would be a second session.
+  if (cachedOnly) {
+    if (age < MAX_AGE_MS) return { ...hit, stale: true };
+    if (camera.status !== 'online') return lastKnown(camera);
+    const kept = await loadSaved(camera);
+    if (kept) return { ...kept, stale: true };
+    const err = new Error('no picture in hand');
+    err.code = 'NOT_CACHED';
+    throw err;
+  }
 
   // An unreachable camera would hold its recorder's lock for the whole
   // timeout and stall every other still on that NVR. Don't try.
