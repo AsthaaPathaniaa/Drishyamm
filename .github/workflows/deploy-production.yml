@@ -1,0 +1,87 @@
+# Deploy the `production` branch to the PRODUCTION server (self-hosted runner,
+# label `production`, user `deploy` on that machine).
+#
+#   push to production   → deploy that commit (after approval: environment `production`)
+#   Run workflow         → deploy any commit on production (`sha`): redeploy or roll back
+#                          `dry_run` builds and compares only; nothing restarts
+#
+# Only `push` and `workflow_dispatch` trigger it, never pull requests, so code from
+# forks of this public repo can't reach the prod runner. Runbook and server setup:
+# deploy/production/README.md.
+name: Deploy production
+
+on:
+  push:
+    branches: [production]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit on production to deploy (blank = latest production). An older SHA rolls back."
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run: build images and compare with the live containers; restart nothing"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to production server
+    if: github.repository == 'systoolspc-dev/Drishyamm'
+    runs-on: [self-hosted, production]
+    # Required reviewers on this environment are the approval gate
+    # (Settings → Environments → production).
+    environment: production
+    timeout-minutes: 60
+    steps:
+      - name: Resolve commit
+        id: sha
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+          PUSH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_SHA" ]; then
+            echo "sha=$INPUT_SHA" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "sha=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" refs/heads/production | cut -f1)" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$PUSH_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.sha.outputs.sha }}
+          fetch-depth: 0
+          lfs: false
+          clean: true
+
+      - name: Deploy
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          DEPLOY_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            bash scripts/deploy-production.sh "$SHA" --dry-run
+          else
+            bash scripts/deploy-production.sh "$SHA"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Production deploy"
+            if [ -f /data/deploy/last-deployed ]; then echo '```'; cat /data/deploy/last-deployed; echo '```'; fi
+            echo "Last deploys:"
+            echo '```'; tail -n 5 /data/deploy/history.log 2>/dev/null || echo "(none yet)"; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
