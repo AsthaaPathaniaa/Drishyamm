@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Activity, AlertTriangle, BarChart3, Bell, SearchX, ShieldCheck } from 'lucide-react';
 import {
   OperationsPage,
@@ -91,7 +92,10 @@ export default function CameraHealth() {
   // and no Apply button: the controls now sit in the header toolbar, and a
   // dropdown you close with nothing happening reads as a broken control rather
   // than as a change waiting to be committed.
-  const [query, setQuery] = useState('');
+  // ?q= opens the page already searched — a zone editor links here with a
+  // camera's id ("Check in Camera health") so it lands on that one camera.
+  const [searchParams] = useSearchParams();
+  const [query, setQuery] = useState(() => searchParams.get('q') || '');
   const [filter, setFilter] = useState(EMPTY_FILTER);
 
   const prefs = useRef(loadPrefs()).current;

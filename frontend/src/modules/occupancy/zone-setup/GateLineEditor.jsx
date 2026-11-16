@@ -45,6 +45,7 @@ export default function GateLineEditor({
       <GateCanvas
         direction={draft.direction}
         label={`Counting line for ${cameraName}`}
+        legacyNote={gate?.enabled ? { camera: cameraName, zones: ['counting line'] } : null}
         line={draft.line}
         media={monitorId ? <CleanFeed monitorId={monitorId} /> : null}
         onChange={(line) => set({ line })}

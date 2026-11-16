@@ -39,6 +39,7 @@ export default function HLSPlayer({
   aiOverlay = true,
   digitalZoom = true,
   fit = 'contain',
+  onState,               // (state, error) — see PlayerFrame
 }) {
   const videoRef = useRef(null);
   const hlsRef   = useRef(null);
@@ -110,12 +111,16 @@ export default function HLSPlayer({
   }, [monitorId, activeQuality]);
 
   function startHLS(hlsUrl, hls, fresh, mounted) {
-    // Safari: native HLS
+    // Native HLS: Safari, and current Chrome/Edge too. Without the error
+    // listener a stream that never loads sat on "Connecting…" for ever.
     if (videoRef.current?.canPlayType('application/vnd.apple.mpegurl')) {
       videoRef.current.src = hlsUrl;
       videoRef.current.addEventListener('loadedmetadata', () => {
         if (mounted) { setState('playing'); videoRef.current.play().catch(() => {}); }
-      });
+      }, { once: true });
+      videoRef.current.addEventListener('error', () => {
+        if (mounted) { setState('error'); setError('Camera stream unavailable. Check camera is online.'); }
+      }, { once: true });
       return;
     }
 
@@ -202,6 +207,7 @@ export default function HLSPlayer({
       state={state}
       error={error}
       onRetry={handleRetry}
+      onState={onState}
       muted={userMuted}
       controls={controls}
       aiOverlay={aiOverlay}

@@ -532,6 +532,13 @@ function ZoneEditorPage({
     .map((z) => ({ ...z, points: boundaryOn(working[z.id], activeCam) }));
   const activeColor = colors[draft.id];
   const points = boundaryOn(draft, activeCam);
+  // Shapes already SAVED on this view: listed in the console if its picture
+  // turns out not to be 16:9, since they were drawn on the old 16:9 box.
+  const legacyNote = useMemo(() => ({
+    camera: nameOf(activeCam),
+    zones: zonesOnCamera(saved, activeCam).filter((z) => hasShape(boundaryOn(z, activeCam))).map((z) => z.name),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- nameOf reads the same lists
+  }), [saved, activeCam, cameras, camByMonitor]);
   // A zone just made with "Add zone" and not drawn anywhere yet: the canvas is
   // the only thing that matters until it has a shape, so it is highlighted and
   // the secondary rules wait.
@@ -777,6 +784,7 @@ function ZoneEditorPage({
                       // Remounted per view: the canvas picks its starting tool from
                       // whether a shape exists, and each view has its own.
                       key={activeCam}
+                      legacyNote={legacyNote}
                       media={activeCam ? <CleanFeed monitorId={activeCam} /> : null}
                       onChange={setBoundary}
                       others={others}

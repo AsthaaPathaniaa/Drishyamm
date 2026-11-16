@@ -17,6 +17,7 @@ const aiLifecycle      = require('./services/aiLifecycle.service');
 const aiEventRetention = require('./services/aiEventRetention.service');
 const s3Retention      = require('./services/s3Retention.service');
 const recordingBackfill = require('./services/recordingBackfill.service');
+const liveSnapshot     = require('./services/liveSnapshot.service');
 const transcoder       = require('./services/transcoder.service');
 const streamingService = require('./services/drishyamStreaming.service');
 const { bus, EVENTS }  = require('./events/bus');
@@ -121,6 +122,9 @@ async function startServer() {
       // Fill cloud-recording gaps (site link outages) from the NVR's own HDD
       // once the camera is back. BACKFILL_ENABLED=0 turns it off.
       recordingBackfill.start();
+      // Hourly: replace or delete saved reference pictures older than
+      // SNAPSHOT_MAX_AGE_DAYS. Leader-only. See liveSnapshot.service.
+      liveSnapshot.startSweep();
 
       // When a camera is deleted (any route), drop its in-memory supervisor +
       // quality state so the maps don't leak and a recycled monitorId can't
@@ -157,6 +161,7 @@ async function startServer() {
         recordingBackfill.stop();
         aiLifecycle.stop();
         streamReconcile.stop();
+        liveSnapshot.stopSweep();
         await streamSupervisor.stop().catch(() => {});
         await streamBus.stop().catch(() => {});
         await queues.shutdown();

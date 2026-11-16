@@ -20,9 +20,12 @@
  * The camera's zones, if any, are drawn faintly for context only: a gate
  * across a queue zone's mouth is placed against that zone.
  */
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowRight } from 'lucide-react';
 import { pointsToSvg } from '@/modules/headcount/zone-geometry';
+import { MediaChromeSlot } from '@/core/players/MediaChrome';
+import { MediaChromeScope, useMediaChromeSlot } from '@/core/players/media-chrome';
+import { LEGACY_ASPECT, MediaAspectContext, boxStyle, noteLegacyZones, useMediaAspect } from '@/core/players/media-aspect';
 import {
   MIN_LENGTH, clampPoint, distToLine, inSidePolygon, lineLength, lineMarkers, moveLine, nudgePoint, orderedLine,
 } from '../gate-model';
@@ -36,11 +39,19 @@ const GRAB = 0.03;
 
 const pct = ([x, y]) => ({ left: `${x * 100}%`, top: `${y * 100}%` });
 
-export default function GateCanvas({ line, direction, onChange, media, others = [], label = 'Counting line' }) {
+// `legacyNote`: { camera, zones: [names] } of what is already saved on this view,
+// listed in the console when the picture turns out not to be 16:9.
+export default function GateCanvas({ line, direction, onChange, media, others = [], label = 'Counting line', legacyNote = null }) {
   const boxRef = useRef(null);
   // null | { kind: 'a' | 'b' } | { kind: 'move', start, from } | { kind: 'draw', start }
   const [drag, setDrag] = useState(null);
   const [overLine, setOverLine] = useState(false);
+  // The media's own buttons (Retry live, Update saved picture) sit above the line.
+  const [chromeEl, setChromeEl] = useMediaChromeSlot();
+  // The box takes the picture's shape, so the stored line is in the picture's
+  // own fractions (see media-aspect.js).
+  const [mediaAspect, setMediaAspect] = useMediaAspect();
+  useEffect(() => { if (legacyNote) noteLegacyZones(mediaAspect, legacyNote); }, [mediaAspect, legacyNote]);
 
   const at = useCallback((e) => {
     const r = boxRef.current.getBoundingClientRect();
@@ -87,16 +98,22 @@ export default function GateCanvas({ line, direction, onChange, media, others = 
 
   return (
     <div
-      className={`relative w-full select-none overflow-hidden rounded-lg bg-black ${cursor}`}
+      className={`relative mx-auto w-full select-none overflow-hidden rounded-lg bg-black ${cursor}`}
       onPointerCancel={onUp}
       onPointerDown={onDown}
       onPointerLeave={() => setOverLine(false)}
       onPointerMove={onMove}
       onPointerUp={onUp}
       ref={boxRef}
-      style={{ aspectRatio: '16 / 9', touchAction: 'none' }}
+      style={{ ...boxStyle(mediaAspect, LEGACY_ASPECT), touchAction: 'none' }}
     >
-      {media ? <div className="pointer-events-none absolute inset-0">{media}</div> : (
+      {media ? (
+        <div className="pointer-events-none absolute inset-0">
+          <MediaAspectContext.Provider value={setMediaAspect}>
+            <MediaChromeScope value={chromeEl}>{media}</MediaChromeScope>
+          </MediaAspectContext.Provider>
+        </div>
+      ) : (
         <div className="absolute inset-0 grid place-items-center text-body text-white/40">No camera selected</div>
       )}
 
@@ -153,6 +170,7 @@ export default function GateCanvas({ line, direction, onChange, media, others = 
         onKeyDown={onEndKey('b')}
         onPointerDown={(e) => { e.stopPropagation(); begin(e, { kind: 'b' }); }}
       />
+      <MediaChromeSlot slotRef={setChromeEl} />
     </div>
   );
 }

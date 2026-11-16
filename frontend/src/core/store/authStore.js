@@ -2,6 +2,18 @@ import { create } from 'zustand';
 import { authService } from '../services/auth';
 import { shinobiService } from '../services/shinobi';
 import { connectSocket, disconnectSocket } from '../services/socket';
+import { queryClient } from '../lib/queryClient';
+import { useNotificationStore } from './notificationStore';
+import { useInvestigationStore } from './investigationStore';
+
+// Everything one account fetched or collected in this tab. Cleared at logout
+// and again at login, so the next account never sees the last one's cameras,
+// sites or alerts (the cache keys aren't per user).
+function clearUserData() {
+  try { queryClient.cancelQueries(); queryClient.clear(); } catch { /* ignore */ }
+  try { useNotificationStore.getState().clear?.(); } catch { /* ignore */ }
+  try { useInvestigationStore.getState().clear?.(); } catch { /* ignore */ }
+}
 
 export const useAuthStore = create((set) => ({
   user: authService.getCurrentUser(),
@@ -10,6 +22,7 @@ export const useAuthStore = create((set) => ({
 
   login: async (email, password) => {
     const data = await authService.login(email, password);
+    clearUserData();
     set({
       user: data.user,
       token: data.token,
@@ -24,11 +37,13 @@ export const useAuthStore = create((set) => ({
     await authService.logout();
     shinobiService.clearCache();
     disconnectSocket();
+    clearUserData();
     set({ user: null, token: null, isAuthenticated: false });
   },
 
   register: async (userData) => {
     const data = await authService.register(userData);
+    clearUserData();
     // Auto-login: persist tokens exactly like login does
     if (data.token) {
       localStorage.setItem('auth_token', data.token);

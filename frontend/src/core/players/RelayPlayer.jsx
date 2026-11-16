@@ -35,6 +35,7 @@ export default function RelayPlayer({
   fit = 'contain',
   protocolBadge = true,
   onFallback,
+  onState,               // (state, error, frame) — see PlayerFrame
 }) {
   const subRef = useRef(null);
   const mainRef = useRef(null);
@@ -135,6 +136,7 @@ export default function RelayPlayer({
       state={state}
       error={error}
       onRetry={null}
+      onState={onState}
       muted
       controls={controls}
       aiOverlay={aiOverlay}

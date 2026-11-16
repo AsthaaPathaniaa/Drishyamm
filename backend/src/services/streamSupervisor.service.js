@@ -539,6 +539,27 @@ async function tick() {
         server: t.server.name,
       });
     }
+
+    queueReferencePictures(transitions);
+  }
+}
+
+/**
+ * A camera that came back online gets its saved reference picture refreshed
+ * (queued 30 s out, so its path is ready and the frame comes from Stream
+ * Service, not the NVR). `camera.status` is the row as read at the start of
+ * this tick: still 'online' there means the backend restarted and is merely
+ * re-discovering the camera, so only a missing picture is filled in — a
+ * restart must not re-grab the whole fleet.
+ */
+function queueReferencePictures(transitions) {
+  for (const t of transitions) {
+    if (publicStatus(t.toState) !== 'online' || publicStatus(t.fromState) !== 'offline') continue;
+    try {
+      require('./liveSnapshot.service').queueOnline(t.camera, { onlyIfMissing: t.camera.status === 'online' });
+    } catch (err) {
+      logger.debug('streamSupervisor: snapshot queue failed', { monitor: t.camera.monitorId, error: err.message });
+    }
   }
 }
 
@@ -670,4 +691,4 @@ function forget(monitorId) { _cam.delete(monitorId); }
  */
 function isLeader() { return _redis ? _isLeader : true; }
 
-module.exports = { start, stop, snapshot, forget, isLeader, S };
+module.exports = { start, stop, snapshot, forget, isLeader, S, _internals: { queueReferencePictures } };

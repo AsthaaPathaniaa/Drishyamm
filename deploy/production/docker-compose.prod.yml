@@ -1,5 +1,5 @@
 # Production compose as running on the server (/data/build/docker-compose.prod.yml,
-# snapshot 2026-11-09). Secrets replaced with ${VAR} references - set them in .env.
+# snapshot 2026-11-16, images as live since 2026-11-11). Secrets replaced with ${VAR} references - set them in .env.
 # ============================================================================
 # Drishyam VMS — PRODUCTION compose for 103.109.7.36 (IP access, HTTP)
 #   - Prebuilt protected images (no source bind mounts, no build context)
@@ -143,7 +143,7 @@ services:
 
   # ── Backend (Express / Sequelize) ─────────────────────────────────────────
   smart-cam-backend:
-    image: drishyam/backend:prod-20261109-94ddf43
+    image: drishyam/backend:prod-20261111-5fd3f1e
     container_name: drisyam-original-backend
     restart: unless-stopped
     volumes:
@@ -197,7 +197,7 @@ services:
 
   # ── Frontend (built SPA served by nginx on :80) ────────────────────────────
   smart-cam-app:
-    image: drishyam/app:prod-20261109-audio
+    image: drishyam/app:prod-20261111d
     container_name: drisyam-original-app
     restart: unless-stopped
     ports:

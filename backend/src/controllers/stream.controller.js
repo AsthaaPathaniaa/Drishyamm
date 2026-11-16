@@ -89,14 +89,31 @@ const stopStream = asyncHandler(async (req, res) => {
   res.json({ ok: true, monitorId, message: 'Stream stopped' });
 });
 
+// 409 body for a camera with nothing to show: the editor words "never
+// connected" and "picture expired" differently.
+function sendOffline(res, err) {
+  return res.status(409).json({
+    ok: false,
+    message: 'Camera is offline.',
+    reason: err.reason,
+    lastSeenAt: err.lastSeenAt,
+  });
+}
+
 /**
- * One still from a live camera, for the Monitor Wall editor's tiles.
+ * One still from a camera, for the Monitor Wall and zone editors.
  * GET /api/stream/snapshot/:monitorId → image/jpeg
  *
  * X-Snapshot-At says when the frame was taken (stills are shared and cached,
- * so it can be up to a minute old); X-Snapshot-Stale=1 means the latest grab
- * failed and an older still was served. See liveSnapshot.service for why this
- * never opens more than one extra session per recorder.
+ * so it can be up to a minute old; a saved picture of an offline camera can be
+ * days old); X-Snapshot-Stale=1 means the latest grab failed or wasn't tried
+ * and an older still was served. 409 { reason: 'never_connected' | 'expired',
+ * lastSeenAt } when there is nothing to show. See liveSnapshot.service for why
+ * this never opens more than one extra session per recorder.
+ *
+ * ?cached=1 never grabs: only a picture already held (memory or saved), else
+ * 404 { reason: 'not_cached' }. Editors use it to show a picture instantly
+ * while their live view is still starting.
  */
 const getSnapshot = asyncHandler(async (req, res) => {
   const { monitorId } = req.params;
@@ -106,9 +123,10 @@ const getSnapshot = asyncHandler(async (req, res) => {
 
   let shot;
   try {
-    shot = await liveSnapshot.getSnapshot(camera);
+    shot = await liveSnapshot.getSnapshot(camera, { cachedOnly: req.query.cached === '1' });
   } catch (err) {
-    if (err.code === 'OFFLINE') throw new AppError('Camera is offline.', 409);
+    if (err.code === 'OFFLINE') return sendOffline(res, err);
+    if (err.code === 'NOT_CACHED') return res.status(404).json({ ok: false, message: 'No picture held yet.', reason: 'not_cached' });
     throw new AppError('Could not get a still from this camera. It will be retried.', 502);
   }
 
@@ -120,6 +138,68 @@ const getSnapshot = asyncHandler(async (req, res) => {
     'Access-Control-Expose-Headers': 'X-Snapshot-At, X-Snapshot-Stale',
   });
   res.send(shot.jpeg);
+});
+
+/**
+ * Live is playing in a zone editor: re-save the camera's picture from the live
+ * stream if the saved one is old (see liveSnapshot.freshen). Never touches the
+ * NVR, so any owner of the camera may call it.
+ * POST /api/stream/snapshot/:monitorId/freshen
+ *   200 { result: 'saved' | 'recent' | 'offline' | 'not_live' | 'not_saved' | 'failed' }
+ */
+const freshenSnapshot = asyncHandler(async (req, res) => {
+  const { monitorId } = req.params;
+
+  const camera = await Camera.findOne({ where: { userId: req.user.id, monitorId } });
+  if (!camera) throw new AppError('Camera not found', 404);
+
+  let result;
+  try {
+    result = await liveSnapshot.freshen(camera);
+  } catch {
+    result = 'failed';
+  }
+  res.json({ ok: true, monitorId, result });
+});
+
+/**
+ * Operator's "update picture": a fresh grab, saved as the camera's reference
+ * picture (restarts its expiry). Pictures only ever come from the camera or
+ * its recording — there is no upload.
+ * POST /api/stream/snapshot/:monitorId/refresh
+ *   200 { capturedAt } · 202 queued (NVR at its viewing limit) ·
+ *   409 offline (saved picture kept) · 429 updated by hand moments ago
+ */
+const refreshSnapshot = asyncHandler(async (req, res) => {
+  const { monitorId } = req.params;
+
+  const camera = await Camera.findOne({ where: { userId: req.user.id, monitorId } });
+  if (!camera) throw new AppError('Camera not found', 404);
+
+  let result;
+  try {
+    result = await liveSnapshot.refreshByHand(camera);
+  } catch (err) {
+    if (err.code === 'OFFLINE') return sendOffline(res, err);
+    if (err.code === 'TOO_SOON') {
+      res.set('Retry-After', String(err.retryAfterSec));
+      return res.status(429).json({
+        ok: false,
+        message: 'This picture was just updated. Try again in a few minutes.',
+        retryAfter: err.retryAfterSec,
+      });
+    }
+    throw new AppError('Could not get a picture from this camera. Try again shortly.', 502);
+  }
+
+  if (result.queued) {
+    return res.status(202).json({
+      ok: true,
+      queued: true,
+      message: 'The recorder is busy serving viewers. The picture will update when it frees up.',
+    });
+  }
+  res.json({ ok: true, monitorId, capturedAt: result.capturedAt });
 });
 
 /**
@@ -289,4 +369,4 @@ const liveTicket = asyncHandler(async (req, res) => {
   res.json({ ticket, path, variant, transcode });
 });
 
-module.exports = { liveTicket, warmStreams, startStream, stopStream, getStreamStatus, getSnapshot, runWatchdog, getMasterPlaylist, verifyStreamAccess, adminStartStream };
+module.exports = { liveTicket, warmStreams, startStream, stopStream, getStreamStatus, getSnapshot, refreshSnapshot, freshenSnapshot, runWatchdog, getMasterPlaylist, verifyStreamAccess, adminStartStream };
