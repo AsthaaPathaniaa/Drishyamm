@@ -9,8 +9,8 @@ PR main → production ──merge──▶ Deploy production (workflow)
                                  waits for approval (environment `production`)
                                  runner [self-hosted, production] on the prod server, user `deploy`
                                  scripts/deploy-production.sh <sha>
-                                   checks → build backend+app images (<sha12>)
-                                   → compare with live (env, mounts, ports) → MySQL dump
+                                   checks → git lfs pull (frontend videos) → build backend+app images (<sha12>)
+                                   → compare with live (env, mounts, ports; app files and videos) → MySQL dump
                                    → recreate backend + app → health → record
                                    unhealthy → automatic rollback to the previous images
 ```
@@ -30,6 +30,13 @@ databases. The preflight (`compare-live.py`) stops any deploy whose env, mounts,
 ports or command differ from the running containers. Only the image may change.
 A reviewed config change is deployed by re-running with `ALLOW_CONFIG_CHANGE=1`
 on the server.
+
+The app image bundles videos that live in Git LFS. The workflow pulls them
+(`frontend/**` except `public/demos`), the script refuses to build while any file
+under `frontend/` is still an LFS pointer, and `compare-app-content.py` compares the
+files served by the new image with the live one: an LFS pointer or a missing video
+stops the deploy. `public/demos` (~500 MB) is not shipped (Dockerfile.prod drops it),
+the same as before the pipeline, so `/demos/*` answers 404 in production.
 
 ## Server layout
 
@@ -60,7 +67,7 @@ on the server.
 
 ## First-time setup (done once, 2026-11-16)
 
-1. Root on the server: `bash deploy/production/setup-server.sh`. Creates the `deploy` user, the dirs, and `compose.env`.
+1. Root on the server: `bash deploy/production/setup-server.sh`. Installs `git-lfs`, creates the `deploy` user, the dirs, and `compose.env`.
 2. A repo admin creates a runner token (Settings → Actions → Runners → *New self-hosted runner*), then root runs: `RUNNER_TOKEN=<token> bash deploy/production/setup-server.sh runner`.
 3. A repo admin sets up the repo:
    - **Environment `production`** (Settings → Environments → New): *Required reviewers* = the maintainers; *Deployment branches* = selected, `production` only.
