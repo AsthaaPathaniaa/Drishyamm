@@ -1,9 +1,17 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Camera, FlipHorizontal2, Hexagon, MapPinned, Minus, MousePointer2, Plus,
-  Save, ScanFace, Square, Trash2, Undo2, Users, X,
+  Camera, Ellipsis, FlipHorizontal2, Hexagon, MapPinned, Minus, MousePointer2, Plus,
+  RefreshCw, Save, ScanFace, Square, Trash2, Undo2, Users, X,
 } from 'lucide-react';
 import DirectStreamPlayer from '@/core/players/DirectStreamPlayer';
+import FallbackFeed from '@/core/players/FallbackFeed';
+import { useUpdateSavedPicture } from '@/core/hooks/useUpdateSavedPicture';
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from '@/core/ui/dropdown-menu';
+import {
+  LEGACY_ASPECT, MediaAspectContext, noteLegacyZones,
+} from '@/core/players/media-aspect';
 import {
   Select, SelectContent, SelectGroup, SelectItem,
   SelectLabel, SelectTrigger, SelectValue,
@@ -61,6 +69,22 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
   const [activeId, setActiveId] = useState('');
   const [hoverPoint, setHoverPoint] = useState(null); // { x, y } in 0..1 — cursor for previews
   const [dragStart, setDragStart] = useState(null);   // anchor while dragging a box/line
+  // The picture's own shape. Points are fractions of the PICTURE (the AI
+  // scales them by its frame), so the pointer is mapped onto the picture's
+  // contained rect and the drawing layer uses the same shape: 1080 high,
+  // FRAME_W wide. See core/players/media-aspect.js.
+  // Tagged with its camera: a shape reported for the previous camera must not
+  // shape the next one's box.
+  const [picture, setPicture] = useState(null);       // { monitorId, aspect }
+  const reportAspect = useCallback((next) => setPicture((prev) => (
+    prev?.monitorId === camera?.monitorId && Math.abs(prev.aspect - next) < 0.005
+      ? prev : { monitorId: camera?.monitorId, aspect: next }
+  )), [camera?.monitorId]);
+  const mediaAspect = picture && picture.monitorId === camera?.monitorId ? picture.aspect : null;
+  // "Update saved picture" sits in the header's ⋯ menu, not on the picture.
+  const savedPicture = useUpdateSavedPicture(camera?.monitorId);
+  const aspect = mediaAspect || LEGACY_ASPECT;
+  const FRAME_W = Math.round(1080 * aspect);
 
   // Re-seed the draft only when the modal opens or the camera changes — NOT on
   // every background poll of `zones`, which would otherwise wipe a drawing in
@@ -77,6 +101,15 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
     initialRef.current = JSON.stringify(next);
   }, [open, monitorId]);
 
+  // Areas saved on this camera before the box took the picture's shape.
+  useEffect(() => {
+    if (!open || !camera) return;
+    noteLegacyZones(mediaAspect, {
+      camera: camera.name || camera.monitorId,
+      zones: (zones || []).filter((z) => z?.points?.length).map((z) => z.name || z.id),
+    });
+  }, [open, camera, zones, mediaAspect]);
+
   const activeZone = draftZones.find((zone) => zone.id === activeId) || draftZones[0];
   const shape = activeZone?.shape || 'polygon';
   const dirty = JSON.stringify(draftZones) !== initialRef.current;
@@ -84,7 +117,6 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
   const mapPointer = (event, clampToFrame = false) => {
     const rect = stageRef.current?.getBoundingClientRect();
     if (!rect) return null;
-    const aspect = 16 / 9;
     let width = rect.width;
     let height = width / aspect;
     if (height > rect.height) {
@@ -283,6 +315,26 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
                   })}
                 </SelectContent>
               </Select>
+              {savedPicture.allowed ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label="More for this camera"
+                      title="More"
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-line bg-surface text-fg-muted transition hover:bg-surface-sunken hover:text-fg"
+                    >
+                      <Ellipsis className="h-4 w-4" strokeWidth={2.25} />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="z-[260]">
+                    <DropdownMenuItem disabled={savedPicture.busy} onSelect={() => savedPicture.run()}>
+                      <RefreshCw className={`h-3.5 w-3.5 ${savedPicture.busy ? 'animate-spin' : ''}`} strokeWidth={2.25} />
+                      Update saved picture
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -329,26 +381,39 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
               className="relative h-full min-h-[360px] overflow-hidden rounded-xl bg-black ring-1 ring-white/10 select-none"
               style={{ cursor: nearStart ? 'pointer' : 'crosshair' }}
             >
-              <DirectStreamPlayer
-                key={`${camera.monitorId}-zone-editor`}
-                monitorId={camera.monitorId}
-                mode="webrtc"
-                quality="high"
-                muted
-                controls={false}
-                aiOverlay={false}
-                digitalZoom={false}
-                className="h-full w-full"
-              />
+              {/* Live, with the camera's dated still behind it when live
+                  doesn't play (see FallbackFeed). */}
+              <MediaAspectContext.Provider value={reportAspect}>
+                <FallbackFeed
+                  key={`${camera.monitorId}-zone-editor`}
+                  monitorId={camera.monitorId}
+                  online={camera.status ? camera.status === 'online' : undefined}
+                  // Its own hints and zone chip sit along the top of the stage.
+                  chromeAt="bottom"
+                  renderLive={(onState) => (
+                    <DirectStreamPlayer
+                      monitorId={camera.monitorId}
+                      mode="webrtc"
+                      quality="high"
+                      muted
+                      controls={false}
+                      aiOverlay={false}
+                      digitalZoom={false}
+                      className="h-full w-full"
+                      onState={onState}
+                    />
+                  )}
+                />
+              </MediaAspectContext.Provider>
               {/* Translucent overlay so the painted zones read clearly over the video */}
               <div className="pointer-events-none absolute inset-0 bg-black/15" />
 
-              <ZoneOverlay zones={draftZones.filter((zone) => zone.id !== activeZone?.id && zone.points.length >= SHAPE_MIN_POINTS[zoneShape(zone.shape)])} frameW={1920} frameH={1080} subtle />
+              <ZoneOverlay zones={draftZones.filter((zone) => zone.id !== activeZone?.id && zone.points.length >= SHAPE_MIN_POINTS[zoneShape(zone.shape)])} frameW={FRAME_W} frameH={1080} subtle />
 
               {/* Active zone overlay (drawing layer) */}
               <svg
                 className="pointer-events-none absolute inset-0 z-30 h-full w-full"
-                viewBox="0 0 1920 1080"
+                viewBox={`0 0 ${FRAME_W} 1080`}
                 preserveAspectRatio="xMidYMid meet"
               >
                 {/* ── LINE: straight boundary + arrow toward the watched side ── */}
@@ -358,7 +423,7 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
                     : (dragStart && hoverPoint ? [dragStart, hoverPoint] : null);
                   if (!pts) return null;
                   const [a, b] = pts;
-                  const mx = ((a.x + b.x) / 2) * 1920;
+                  const mx = ((a.x + b.x) / 2) * FRAME_W;
                   const my = ((a.y + b.y) / 2) * 1080;
                   const n = lineInsideNormal(a, b, activeZone.side);
                   const tipX = mx + n.x * 130;
@@ -368,12 +433,12 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
                   const px = -n.y; const py = n.x; // perpendicular for arrowhead
                   return (
                     <g>
-                      <line x1={a.x * 1920} y1={a.y * 1080} x2={b.x * 1920} y2={b.y * 1080} stroke={ORANGE} strokeWidth="5" strokeLinecap="round" />
+                      <line x1={a.x * FRAME_W} y1={a.y * 1080} x2={b.x * FRAME_W} y2={b.y * 1080} stroke={ORANGE} strokeWidth="5" strokeLinecap="round" />
                       <line x1={mx} y1={my} x2={tipX} y2={tipY} stroke={ORANGE} strokeWidth="4" />
                       <polygon points={`${tipX},${tipY} ${bx + px * 16},${by + py * 16} ${bx - px * 16},${by - py * 16}`} fill={ORANGE} />
                       <text x={tipX + n.x * 28} y={tipY + n.y * 28 + 6} fill="white" fontSize="20" fontWeight="800" textAnchor="middle" paintOrder="stroke" stroke="rgba(15,23,42,0.85)" strokeWidth="5">inside</text>
                       {[a, b].map((p, i) => (
-                        <circle key={i} cx={p.x * 1920} cy={p.y * 1080} r="12" fill="white" stroke={ORANGE} strokeWidth="5" />
+                        <circle key={i} cx={p.x * FRAME_W} cy={p.y * 1080} r="12" fill="white" stroke={ORANGE} strokeWidth="5" />
                       ))}
                     </g>
                   );
@@ -388,14 +453,14 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
                   return (
                     <g>
                       <polygon
-                        points={corners.map((p) => `${p.x * 1920},${p.y * 1080}`).join(' ')}
+                        points={corners.map((p) => `${p.x * FRAME_W},${p.y * 1080}`).join(' ')}
                         fill={`${ORANGE}26`}
                         stroke={ORANGE}
                         strokeWidth="4"
                         strokeLinejoin="round"
                       />
                       {corners.map((p, i) => (
-                        <circle key={i} cx={p.x * 1920} cy={p.y * 1080} r="9" fill="white" stroke={ORANGE} strokeWidth="4" />
+                        <circle key={i} cx={p.x * FRAME_W} cy={p.y * 1080} r="9" fill="white" stroke={ORANGE} strokeWidth="4" />
                       ))}
                     </g>
                   );
@@ -406,7 +471,7 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
                   <>
                     {isReady ? (
                       <polygon
-                        points={activeZone.points.map((p) => `${p.x * 1920},${p.y * 1080}`).join(' ')}
+                        points={activeZone.points.map((p) => `${p.x * FRAME_W},${p.y * 1080}`).join(' ')}
                         fill={`${ORANGE}26`}
                         stroke={ORANGE}
                         strokeWidth="4"
@@ -415,7 +480,7 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
                     ) : null}
                     {!isReady && activeZone?.points.length >= 2 ? (
                       <polyline
-                        points={activeZone.points.map((p) => `${p.x * 1920},${p.y * 1080}`).join(' ')}
+                        points={activeZone.points.map((p) => `${p.x * FRAME_W},${p.y * 1080}`).join(' ')}
                         fill="none"
                         stroke={ORANGE}
                         strokeWidth="4"
@@ -424,9 +489,9 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
                     ) : null}
                     {lastPoint && hoverPoint ? (
                       <line
-                        x1={lastPoint.x * 1920}
+                        x1={lastPoint.x * FRAME_W}
                         y1={lastPoint.y * 1080}
-                        x2={hoverPoint.x * 1920}
+                        x2={hoverPoint.x * FRAME_W}
                         y2={hoverPoint.y * 1080}
                         stroke={ORANGE}
                         strokeWidth="3"
@@ -436,9 +501,9 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
                     ) : null}
                     {nearStart && firstPoint ? (
                       <line
-                        x1={hoverPoint.x * 1920}
+                        x1={hoverPoint.x * FRAME_W}
                         y1={hoverPoint.y * 1080}
-                        x2={firstPoint.x * 1920}
+                        x2={firstPoint.x * FRAME_W}
                         y2={firstPoint.y * 1080}
                         stroke={ORANGE}
                         strokeWidth="3"
@@ -452,10 +517,10 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
                       return (
                         <g key={`${activeZone.id}-${index}`}>
                           {isFirst && nearStart ? (
-                            <circle cx={point.x * 1920} cy={point.y * 1080} r="28" fill={`${ORANGE}30`} />
+                            <circle cx={point.x * FRAME_W} cy={point.y * 1080} r="28" fill={`${ORANGE}30`} />
                           ) : null}
                           <circle
-                            cx={point.x * 1920}
+                            cx={point.x * FRAME_W}
                             cy={point.y * 1080}
                             r={radius}
                             fill="white"
@@ -463,7 +528,7 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
                             strokeWidth="5"
                           />
                           <text
-                            x={point.x * 1920}
+                            x={point.x * FRAME_W}
                             y={point.y * 1080 + 9}
                             fill={ORANGE}
                             fontSize="22"
@@ -481,8 +546,8 @@ export default function ZoneEditorModal({ open, camera, zones, groups = [], onCl
                 {/* Cursor crosshair (only while hovering) */}
                 {hoverPoint ? (
                   <g pointerEvents="none">
-                    <line x1={hoverPoint.x * 1920 - 18} y1={hoverPoint.y * 1080} x2={hoverPoint.x * 1920 + 18} y2={hoverPoint.y * 1080} stroke="white" strokeWidth="2" opacity="0.7" />
-                    <line x1={hoverPoint.x * 1920} y1={hoverPoint.y * 1080 - 18} x2={hoverPoint.x * 1920} y2={hoverPoint.y * 1080 + 18} stroke="white" strokeWidth="2" opacity="0.7" />
+                    <line x1={hoverPoint.x * FRAME_W - 18} y1={hoverPoint.y * 1080} x2={hoverPoint.x * FRAME_W + 18} y2={hoverPoint.y * 1080} stroke="white" strokeWidth="2" opacity="0.7" />
+                    <line x1={hoverPoint.x * FRAME_W} y1={hoverPoint.y * 1080 - 18} x2={hoverPoint.x * FRAME_W} y2={hoverPoint.y * 1080 + 18} stroke="white" strokeWidth="2" opacity="0.7" />
                   </g>
                 ) : null}
               </svg>

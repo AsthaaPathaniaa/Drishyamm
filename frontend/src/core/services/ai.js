@@ -97,7 +97,8 @@ export const aiService = {
   snapshotSrc(uri) {
     if (!uri || !String(uri).startsWith('s3://')) return null;
     const token = localStorage.getItem('auth_token') || '';
-    return `${API_BASE}/api/person-tracker/snapshot?uri=${encodeURIComponent(uri)}&token=${encodeURIComponent(token)}`;
+    // /ai/snapshot: needs only the AI plan, not Personnel Search (see ai.routes.js).
+    return `${API_BASE}/api/ai/snapshot?uri=${encodeURIComponent(uri)}&token=${encodeURIComponent(token)}`;
   },
   acknowledge(eventId) {
     return api.post(`/ai/events/${eventId}/ack`).then((r) => r.data);

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Loader2, AlertCircle } from 'lucide-react';
 import AIOverlay from './AIOverlay';
 import ZoomIndicator from './ZoomIndicator';
@@ -33,7 +34,56 @@ export default function PlayerFrame({
   fit = 'contain',       // 'cover' fills the box and crops - for video walls
   className = '',
   children,              // protocol-specific overlays (badges, gear, volume)
+  // (state, error, frame) on every change. 'playing' here means frames are on
+  // screen (the <video> fired `playing`), not just that the player has a
+  // manifest or a track — a picture drawn over a black video is the case
+  // callers care about. `frame` is { width, height } of the video then.
+  onState,
 }) {
+  const [frame, setFrame] = useState(null);
+  useEffect(() => {
+    // The relay player stacks two videos (sub, then main) and hides one with
+    // `hidden`; report the one on screen that has started.
+    const els = [videoRef?.current, secondVideoRef?.current].filter(Boolean);
+    if (!els.length) return undefined;
+    const started = new Set();
+    const update = () => {
+      const v = els.find((e) => started.has(e) && !e.hidden);
+      setFrame(v ? { width: v.videoWidth || 0, height: v.videoHeight || 0 } : null);
+    };
+    // `playing` can fire a moment before the first frame is painted. Wait for
+    // one to be presented, so whatever covers the video (a still) can step
+    // aside without a black flash.
+    const on = (e) => {
+      const el = e.currentTarget;
+      const mark = () => { started.add(el); update(); };
+      if (el.requestVideoFrameCallback) el.requestVideoFrameCallback(mark); else mark();
+    };
+    const off = (e) => { started.delete(e.currentTarget); update(); };
+    const watch = new MutationObserver(update);
+    els.forEach((el) => {
+      el.addEventListener('playing', on);
+      el.addEventListener('resize', update);
+      el.addEventListener('emptied', off);
+      watch.observe(el, { attributes: true, attributeFilter: ['hidden'] });
+    });
+    return () => {
+      watch.disconnect();
+      els.forEach((el) => {
+        el.removeEventListener('playing', on);
+        el.removeEventListener('resize', update);
+        el.removeEventListener('emptied', off);
+      });
+    };
+  }, [videoRef, secondVideoRef]);
+
+  const reported = state === 'playing' && !frame ? 'loading' : state;
+  const frameW = frame?.width || 0;
+  const frameH = frame?.height || 0;
+  useEffect(() => {
+    onState?.(reported, reported === 'error' ? error : null, frameW && frameH ? { width: frameW, height: frameH } : null);
+  }, [reported, error, onState, frameW, frameH]);
+
   // A single camera is shown whole (contain): nothing of the frame is hidden.
   // A wall tile is a cell of a grid whose shape is the screen's, not the
   // camera's, so contain letterboxes every tile - 'cover' fills it instead.
