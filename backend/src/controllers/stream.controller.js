@@ -340,6 +340,7 @@ const warmStreams = asyncHandler(async (req, res) => {
 /**
  * One-time ticket for the live relay WebSocket (GET ws …/api/stream/live?ticket=).
  * POST /api/stream/live/:monitorId/ticket?variant=sub|main&transcode=0|1
+ *      …&audio=1 → ticket for the audio-only socket instead (liveAudio.service)
  *
  * Also makes sure the Stream Service path exists and starts the relay, so the
  * stream warms up while the browser opens its socket. `transcode=1` is for
@@ -351,6 +352,14 @@ const liveTicket = asyncHandler(async (req, res) => {
   if (!camera) throw new AppError('Camera not found', 404);
   const variant = req.query.variant === 'main' ? 'main' : 'sub';
   const relay = require('../services/liveRelay.service');
+  // ?audio=1: the camera's sound on its own socket (liveAudio.service), read
+  // from the raw camera path — the H.264 sidecar carries no audio.
+  if (req.query.audio === '1') {
+    const path = await streamService.ensureLivePath(camera, { variant });
+    const nvrUrl = streamService.liveNvrUrl(camera, variant);
+    const ticket = relay.issueAudioTicket({ userId: req.user.id, monitorId, path, nvrUrl });
+    return res.json({ ticket, path, variant, audio: true });
+  }
   let transcode = req.query.transcode === '1';
   // The browser says whether it decodes H.265 (hevc=1|0). If it can't and we
   // already know this camera sends H.265, go straight to the H.264 sidecar
