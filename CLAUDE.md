@@ -11,12 +11,13 @@ frontend = React/Vite (`frontend/`), AI = FastAPI (`ai/face-service`, plus
 - **This machine is the TESTING server**, public at `<testing URL>`
   via Tailscale Funnel (no site password, by the maintainer's choice). Its checkout
   (`/home/systools-pc/Desktop/Projects/Drishyamm`) is auto-deployed from `main`.
-  Production deploys from the `production` branch on another machine; we don't touch it.
+  Production (demo.indyatools.com, another machine) deploys only from the `production`
+  branch via `deploy-production.yml`, after approval. Runbook: `deploy/production/README.md`.
 - **Code reaches a server only through GitHub + the pipeline.** No hand edits on
   servers, no direct pushes to `main`/`production`. Branch → PR → merge → auto-deploy.
 - Never commit secrets (`.env*` except examples, `deploy/cloudflared/credentials/*`, tokens, keys).
 - Ask before destructive actions (reset --hard, deleting volumes/files, dropping DBs,
-  stopping the stack, force-push). Don't touch production.
+  stopping the stack, force-push). Never change production by hand: only through the pipeline.
 - Deploy / verify / rollback runbook: skill `drishyam-deploy`.
   CI/CD setup status and open decisions: skill `drishyam-cicd-setup`.
   Human docs: `docs/DEPLOYMENT.md`.
