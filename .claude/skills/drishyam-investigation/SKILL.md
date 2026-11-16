@@ -95,7 +95,9 @@ Forensic-grade (README §6 12–18, mandatory; toolkit stays inside Drishyam for
 16. Store model name+version+key settings on every derived result. 17. Evidence pack includes BSA 2023 §63 certificate draft.
 18. Export redaction (blur bystanders), optional two-person export approval, published accuracy/limits sheet.
 Phase 0 meter: `vms_face/investigate/measure.py` (`investigate_measure_enabled`), runbook `docs/investigation/PHASE0_MEASUREMENT.md`.
-Licence flag: Ultralytics YOLOv8 is AGPL-3.0 — needs commercial licence or a permissive detector before customer rollout.
+Licences: `docs/investigation/LICENCES.md` (YOLO = AGPL; InsightFace + OSNet/MSMT17 research-only; SigLIP Apache-2.0 preferred).
+Spike: `vms_face/eval/i1_crop_dump.py` (AI image, recordings only) → `vms_face/eval/i1_text_search.py` (host venv) → report.html.
+Person ONNX: `models/person/yolov8n.onnx` (LFS) → copy to `data/ai-models/`. AI image has no torch: never load `.pt` there.
 
 ## Definition of done (README §7, short)
 I-1 lab tracks with crop/embedding/colour under tenant filter, retention deletes them, report of tracks/camera/day + GPU + storage, 1 h backfill < 15 min ·
