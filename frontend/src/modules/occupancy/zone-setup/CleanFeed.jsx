@@ -8,20 +8,30 @@
  * else's annotations. The platform's HLS feed has neither problem.
  *
  * Every player control is off: this sits under a drawing surface, and a
- * zoom, a menu or an overlay of its own would fight the pointer.
+ * zoom, a menu or an overlay of its own would fight the pointer. When live
+ * does not play, the camera's dated still stands in (see FallbackFeed), so an
+ * offline camera can still have its zones drawn.
  */
+import FallbackFeed from '@/core/players/FallbackFeed';
 import HLSPlayer from '@/core/players/HLSPlayer';
 
-export default function CleanFeed({ monitorId }) {
+export default function CleanFeed({ monitorId, online }) {
   return (
-    <HLSPlayer
-      aiOverlay={false}
-      className="h-full w-full"
-      controls={false}
-      digitalZoom={false}
+    <FallbackFeed
       monitorId={monitorId}
-      protocolBadge={false}
-      qualityControl={false}
+      online={online}
+      renderLive={(onState) => (
+        <HLSPlayer
+          aiOverlay={false}
+          className="h-full w-full"
+          controls={false}
+          digitalZoom={false}
+          monitorId={monitorId}
+          onState={onState}
+          protocolBadge={false}
+          qualityControl={false}
+        />
+      )}
     />
   );
 }

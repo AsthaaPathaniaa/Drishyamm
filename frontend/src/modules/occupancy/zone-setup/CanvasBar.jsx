@@ -11,11 +11,14 @@
  * zone is its name, edited in place.
  *
  * The ⋯ menu keeps the rare, easy-to-get-wrong multi-camera actions: span
- * another camera, make a view primary (where intrusion rules run), drop one.
+ * another camera, make a view primary (where intrusion rules run), drop one --
+ * and "Update saved picture" for the camera being drawn on, which used to sit
+ * on the picture itself.
  */
 import {
-  ChevronRight, Ellipsis, Plus, Star, Video, X,
+  ChevronRight, Ellipsis, Plus, RefreshCw, Star, Video, X,
 } from 'lucide-react';
+import { useUpdateSavedPicture } from '@/core/hooks/useUpdateSavedPicture';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
   DropdownMenuSeparator, DropdownMenuTrigger,
@@ -32,6 +35,7 @@ export default function CanvasBar({
   const addable = cameras.filter((c) => !zoneCameras.includes(c.id));
   const spans = zoneCameras.length > 1;
   const note = status(cam(activeCam));
+  const picture = useUpdateSavedPicture(activeCam);
 
   return (
     <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -73,13 +77,13 @@ export default function CanvasBar({
         </label>
         {children}
 
-        {addable.length || spans ? (
+        {addable.length || spans || picture.allowed ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
-                aria-label="Cameras for this zone"
+                aria-label="More for this zone and camera"
                 className="inline-flex h-[34px] shrink-0 items-center gap-1 rounded-lg border border-line bg-surface px-2 text-body font-semibold text-fg-muted transition hover:border-brand/50 hover:text-brand-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
-                title="Cameras for this zone"
+                title="More"
                 type="button"
               >
                 <Ellipsis className="h-3.5 w-3.5" strokeWidth={2.25} />
@@ -128,6 +132,15 @@ export default function CanvasBar({
                       {status(c) ? <span className="shrink-0 text-small text-fg-subtle">{status(c)}</span> : null}
                     </DropdownMenuItem>
                   ))}
+                </>
+              ) : null}
+              {picture.allowed ? (
+                <>
+                  {addable.length || spans ? <DropdownMenuSeparator /> : null}
+                  <DropdownMenuItem disabled={picture.busy} onSelect={() => picture.run()}>
+                    <RefreshCw className={`h-3.5 w-3.5 ${picture.busy ? 'animate-spin' : ''}`} strokeWidth={2.25} />
+                    <span className="min-w-0 flex-1 text-body">Update saved picture</span>
+                  </DropdownMenuItem>
                 </>
               ) : null}
             </DropdownMenuContent>

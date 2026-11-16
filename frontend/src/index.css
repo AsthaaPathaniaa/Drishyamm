@@ -1025,6 +1025,17 @@ html { zoom: var(--app-zoom); }
    * site. background-IMAGE only, so a component's own bg colour still shows
    * underneath, and (being @layer base) any select that sets its own image —
    * a custom chevron, say — keeps it. */
+  /* ── Native <select> option lists ────────────────────────────────────────
+   * Many selects are bg-transparent, and Chrome on Windows then paints the
+   * open option list on its default white while the options inherit the
+   * theme's text colour: light-on-white, unreadable in dark mode (seen on the
+   * Gallery camera filter). Give the list the theme's surface and text. */
+  select option,
+  select optgroup {
+    background-color: var(--surface);
+    color: var(--text-primary);
+  }
+
   select:not(:disabled):hover {
     background-image: linear-gradient(to right, color-mix(in oklab, var(--brand) 15%, transparent), color-mix(in oklab, var(--brand-active) 5%, transparent));
   }

@@ -41,6 +41,7 @@ export default function WebRTCPlayer({
   // same corner.
   protocolBadge = true,
   onFallback,            // called once if WebRTC can't be established
+  onState,               // (state, error) — see PlayerFrame
 }) {
   const videoRef = useRef(null);
   const pcRef    = useRef(null);   // holds the unsubscribe shim while subscribed
@@ -139,6 +140,7 @@ export default function WebRTCPlayer({
       state={state}
       error={error}
       onRetry={null}       // no manual retry — a failed WebRTC hands off to HLS
+      onState={onState}
       muted={userMuted}
       controls={controls}
       aiOverlay={aiOverlay}

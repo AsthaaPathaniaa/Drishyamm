@@ -44,6 +44,7 @@ export default function DirectStreamPlayer({
   digitalZoom = true,
   protocolBadge = true,
   fit = 'contain',
+  onState,               // (state, error) of whichever player is mounted
 }) {
   // Resolve the effective mode. An explicit mode='webrtc' WINS — grid tiles and
   // the dashboard use it to stay on the low-latency WebRTC path (WHEP forwards
@@ -75,7 +76,7 @@ export default function DirectStreamPlayer({
   // getting the cheap sub-stream path it asked for.
   const common = {
     monitorId, quality, muted, controls, className, aiOverlay, digitalZoom,
-    volumeToggle, protocolBadge, fit,
+    volumeToggle, protocolBadge, fit, onState,
   };
 
   if (useRelay) {

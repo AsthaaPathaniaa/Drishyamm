@@ -80,6 +80,20 @@ function normalizeVmsFaceEvent(evt) {
   };
 }
 
+// Face alerts an account has cleared. They live in the AI service (not ours to
+// delete), so they are hidden here instead: an account listed in
+// FACE_ALERTS_HIDDEN_BEFORE sees only face events after its cut-off.
+// Format: <userId>=<ISO time>[,<userId>=<ISO time>...]. Sub-users follow their
+// account owner's entry. Remove the entry to show the old events again.
+const FACE_HIDDEN_BEFORE = new Map(
+  String(process.env.FACE_ALERTS_HIDDEN_BEFORE || '').split(',').map((x) => x.trim()).filter(Boolean)
+    .map((x) => { const i = x.indexOf('='); return [x.slice(0, i).trim(), new Date(x.slice(i + 1).trim()).getTime()]; })
+    .filter(([id, ms]) => id && Number.isFinite(ms)),
+);
+function faceHiddenBefore(user) {
+  return FACE_HIDDEN_BEFORE.get(String(user?.parentUserId || '')) || FACE_HIDDEN_BEFORE.get(String(user?.id || '')) || 0;
+}
+
 async function fetchVmsFaceEvents({ limit, req }) {
   if (!AI_BASE) return [];
   try {
@@ -91,7 +105,13 @@ async function fetchVmsFaceEvents({ limit, req }) {
       headers: proxyHeaders(req),
       timeout: 3500,
     });
-    return Array.isArray(data) ? data.map(normalizeVmsFaceEvent) : [];
+    const events = Array.isArray(data) ? data.map(normalizeVmsFaceEvent) : [];
+    const cutoff = faceHiddenBefore(req.user);
+    if (!cutoff) return events;
+    return events.filter((evt) => {
+      const ms = new Date(eventTime(evt) || 0).getTime();
+      return Number.isFinite(ms) && ms > cutoff;
+    });
   } catch (err) {
     logger.warn('vms_face event mirror unavailable', { error: err.message });
     return [];
