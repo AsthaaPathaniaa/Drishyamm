@@ -13,9 +13,12 @@
 # services, cloudflared, gpu-bridge and every .env file are left alone.
 #
 #   1. checks   kill switch, lock, commit is on origin/production, disk space
-#   2. build    drishyam/backend:<sha12>, drishyam/app:<sha12> (skipped if present)
+#   2. build    drishyam/backend:<sha12>, drishyam/app:<sha12> (skipped if present);
+#               refuses if a file under frontend/ is still a Git LFS pointer
 #   3. verify   the new config equals the live containers except the image
-#               (env, mounts, ports, command); any difference stops here
+#               (env, mounts, ports, command), and the app image serves the same
+#               files as the live one (no LFS pointers, no missing videos);
+#               any difference stops here
 #      --dry-run stops here: nothing is restarted
 #   4. backup   mysqldump of drishyamvms (the backend's migrations touch only it)
 #   5. deploy   recreate the two containers; the backend runs its migrations on start
@@ -76,6 +79,14 @@ main() {
 
   # ── 2. build ─────────────────────────────────────────────────────────────
   step "2/7 build images"
+  # Videos are bundled into the app image. Without `git lfs pull` they are
+  # 130-byte pointer files and the build "succeeds" with broken videos.
+  local pointers; pointers="$(lfs_pointers frontend)"
+  if [[ -n "$pointers" ]]; then
+    err "these files are Git LFS pointers, not the real files (git lfs pull missing?):"
+    printf '    %s\n' "$pointers" >&2
+    return 1
+  fi
   build_if_missing "drishyam/backend:$tag" "$sha" -f backend/Dockerfile backend
   # Relative bases on purpose: the app's nginx proxies /api, /ai, /hls and /whep
   # on the same origin, so one build serves every hostname (see build-app.sh).
@@ -93,6 +104,7 @@ main() {
   python3 -I "$root/deploy/production/compare-live.py" "$rendered" \
     smart-cam-backend=drisyam-original-backend smart-cam-app=drisyam-original-app || same=0
   rm -f "$rendered"
+  python3 -I "$root/deploy/production/compare-app-content.py" "drishyam/app:$tag" drisyam-original-app || same=0
   if [[ $same == 0 ]]; then
     if [[ "${ALLOW_CONFIG_CHANGE:-0}" == 1 ]]; then
       echo "    differences accepted (ALLOW_CONFIG_CHANGE=1)"
@@ -103,7 +115,7 @@ main() {
     fi
   fi
   if [[ $dry_run == 1 ]]; then
-    echo; echo "✔ dry run OK: images built, config matches. Nothing was restarted."
+    echo; echo "✔ dry run OK: images built, config and app content match. Nothing was restarted."
     return 0
   fi
 
@@ -156,6 +168,18 @@ step() { printf '\n==> %s\n' "$*"; }
 err()  { printf '✖ %s\n' "$*" >&2; }
 image_tag() { docker inspect -f '{{.Config.Image}}' "$1" | sed 's/^.*://'; }
 
+# Files under $1 that are Git LFS pointers. public/demos is skipped: it is not
+# fetched and Dockerfile.prod leaves it out of the image.
+lfs_pointers() {
+  local f
+  find "$1" -type f -size -2k -not -path '*/node_modules/*' -not -path "$1/public/demos/*" -print0 |
+    while IFS= read -r -d '' f; do
+      if [[ "$(head -n 1 "$f")" == "version https://git-lfs.github.com/spec/v1" ]]; then
+        printf '%s\n' "$f"
+      fi
+    done
+}
+
 build_if_missing() {
   local image="$1" sha="$2"; shift 2
   if docker image inspect "$image" >/dev/null 2>&1; then
@@ -176,7 +200,7 @@ wait_healthy() {
 }
 
 # Any failure after the containers were recreated puts the previous images back.
-# shellcheck disable=SC2317  # invoked by the ERR trap
+# shellcheck disable=SC2317,SC2329  # invoked by the ERR trap
 on_fail() {
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if [[ "${ROLLBACK_ARMED:-0}" == 1 ]]; then

@@ -15,6 +15,7 @@
 #   /data/deploy/                  state: compose.env (0600), lock, history.log
 #   /data/deploy/actions-runner/   GitHub runner, labels self-hosted,production
 #   /data/backups/deploys/         pre-deploy MySQL dumps
+#   package git-lfs                the workflow pulls the frontend's videos with it
 # Does NOT create /data/deploy/ENABLED: that switch is turned on by hand after
 # the first dry run (deploy/production/README.md).
 # ═══════════════════════════════════════════════════════════════════════════
@@ -38,6 +39,9 @@ if [[ "${1:-}" != runner ]]; then
   # docker group = can run containers (root-equivalent on this host, like any
   # docker user). Locked password and no authorized_keys: it can't log in.
   usermod -aG docker deploy
+
+  # ── git-lfs: the app image bundles videos stored in Git LFS ──
+  command -v git-lfs >/dev/null || { apt-get install -y git-lfs >/dev/null && echo "installed git-lfs"; }
 
   # ── dirs ──
   install -d -m 0750 -o deploy -g deploy "$STATE" /data/backups/deploys

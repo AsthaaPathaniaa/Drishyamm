@@ -63,6 +63,15 @@ jobs:
           lfs: false
           clean: true
 
+      # Only the frontend's videos are needed (they are bundled into the app image).
+      # public/demos (~500 MB) is left out: Dockerfile.prod drops it, as production
+      # has always done. Needs git-lfs on the server (deploy/production/README.md).
+      - name: Fetch frontend videos (Git LFS)
+        run: |
+          set -euo pipefail
+          git lfs install --local
+          git lfs pull --include "frontend/**" --exclude "frontend/public/demos/**"
+
       - name: Deploy
         env:
           SHA: ${{ steps.sha.outputs.sha }}
