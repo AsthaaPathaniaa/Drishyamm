@@ -88,7 +88,7 @@ x-ai-env: &ai-env
   PIPELINE_PERSON_MODEL_PATH: /srv/data/models/yolov8n.onnx
   PIPELINE_PERSON_THRESHOLD: "0.35"
   PIPELINE_PERSON_DET_SIZE: "640"
-  PIPELINE_PERSON_DETECT_EVERY_N_FRAMES: "2"
+  PIPELINE_PERSON_DETECT_EVERY_N_FRAMES: ${PIPELINE_PERSON_DETECT_EVERY_N_FRAMES:-2}
   # Investigation index (I-1) phase 0: count tracks per camera, nothing else.
   # See docs/investigation/PHASE0_MEASUREMENT.md.
   INVESTIGATE_MEASURE_ENABLED: ${INVESTIGATE_MEASURE_ENABLED:-false}
