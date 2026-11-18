@@ -1,6 +1,5 @@
 import { ChevronDown, ListFilter, RefreshCw, RotateCcw, Search, X } from 'lucide-react';
 import { cn } from '@/core/lib/utils';
-import { PageAction } from '@/core/layout/OperationsPage';
 import { Button } from '@/core/ui/button';
 import {
   DropdownMenu,
@@ -35,8 +34,8 @@ function statusSummary(statuses) {
 
 /**
  * Every control this page has, in one row beside the title: search, site,
- * group and status on the left, then the page's own controls — help, refresh
- * and auto refresh — on the right.
+ * group and status on the left, then the page's own controls — help and
+ * refresh — on the right.
  *
  * This replaces a 320px sidebar card. The sidebar cost the table a third of
  * the page's width and pushed the first camera row to ~520px down the page,
@@ -61,8 +60,6 @@ export function HealthToolbar({
   counts,
   loading,
   onRefresh,
-  autoRefresh,
-  onAutoRefreshChange,
 }) {
   // A group belongs to a site, so choosing a site narrows the group list. The
   // alternative — offering groups that cannot match the chosen site — hands
@@ -225,25 +222,19 @@ export function HealthToolbar({
 
       <HealthGuide className={BRAND_SHEEN} />
 
-      {/* Refresh only earns its place while auto-refresh is OFF: with it on
-          (the default) the page reloads every 10s, so the button saves at most
-          ten seconds and competes with the ticked box to say the same thing. */}
-      {!autoRefresh ? (
-        <Button variant="outline" onClick={onRefresh} className={BRAND_SHEEN}>
-          <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
-          Refresh
-        </Button>
-      ) : null}
-
-      <PageAction as="label" className={cn('cursor-pointer', BRAND_SHEEN)}>
-        <input
-          type="checkbox"
-          checked={autoRefresh}
-          onChange={(e) => onAutoRefreshChange(e.target.checked)}
-          className="h-4 w-4 rounded border-line accent-brand"
-        />
-        Auto refresh
-      </PageAction>
+      {/* Manual refresh only — the page does not poll. Icon-only to keep the
+          toolbar tight; spins while a load is in flight. */}
+      <Button
+        variant="outline"
+        size="icon"
+        onClick={onRefresh}
+        disabled={loading}
+        title="Refresh"
+        aria-label="Refresh camera status"
+        className={BRAND_SHEEN}
+      >
+        <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
+      </Button>
     </div>
   );
 }

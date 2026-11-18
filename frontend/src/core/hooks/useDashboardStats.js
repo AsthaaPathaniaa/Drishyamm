@@ -3,6 +3,8 @@ import { useMemo } from 'react';
 import api from '@/core/services/api';
 import { aiService } from '@/core/services/ai';
 import { useGroups } from '@/core/hooks/useQueries';
+import { useAuthStore } from '@/core/store/authStore';
+import { makeEntitlement } from '@/core/nav/entitlements';
 
 /**
  * useDashboardStats — derives the Dashboard's headline numbers + chart data
@@ -64,9 +66,14 @@ function alertKey(e) {
 export function useDashboardStats() {
   const { data: groups = [], isLoading: groupsLoading } = useGroups({ refetchInterval: 30_000 });
 
+  // Basic-VMS accounts have no AI tier: /ai/* answers 403 for them, so don't ask.
+  const user = useAuthStore((s) => s.user);
+  const aiOn = makeEntitlement(user).aiOn;
+
   // AI events — pull last 200 across the day to feed every chart at once.
   const eventsQuery = useQuery({
     queryKey: ['dashboard', 'ai-events'],
+    enabled: aiOn,
     queryFn: () => aiService.listEvents({ limit: 200 }).catch(() => ({ events: [], items: [] })),
     refetchInterval: 15_000,
     staleTime: 10_000,

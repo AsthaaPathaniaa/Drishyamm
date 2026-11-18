@@ -8,6 +8,7 @@ import {
 import { on as onSocket, connectSocket, getSocket } from '@/core/services/socket';
 import { describe, aiService } from '@/core/services/ai';
 import { useAuthStore } from '@/core/store/authStore';
+import { makeEntitlement } from '@/core/nav/entitlements';
 import { useNotificationStore } from '@/core/store/notificationStore';
 import {
   useToastStore, toast, TOAST_TTL, MAX_VISIBLE, mergeCameraStatus, offlineReasonText,
@@ -101,6 +102,8 @@ const FOOT_BY_TONE = { danger: 'alert', warning: 'alert', success: 'check', neut
 
 export default function AIToastHost() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  // Basic-VMS accounts have no AI tier; /ai/* answers 403 for them.
+  const aiOn = makeEntitlement(useAuthStore((s) => s.user)).aiOn;
   const toasts = useToastStore((s) => s.toasts);
   const camNamesRef = useRef({});          // monitorId -> friendly name
   const offlineRef = useRef(new Set());    // monitorIds currently offline (transition dedup)
@@ -132,7 +135,7 @@ export default function AIToastHost() {
     connectSocket();
 
     // Resolve monitorId -> camera name so a card reads "Gate 2", not a hash.
-    aiService.listCameraAiSettings?.().then((d) => {
+    if (aiOn) aiService.listCameraAiSettings?.().then((d) => {
       const list = d?.data || d?.cameras || (Array.isArray(d) ? d : []);
       const m = {};
       for (const c of list) if (c?.monitorId) m[c.monitorId] = c.name || c.monitorId;
@@ -256,7 +259,7 @@ export default function AIToastHost() {
       sock?.off('disconnect', onDisconnect);
       sock?.off('connect', onConnect);
     };
-  }, [isAuthenticated]);
+  }, [isAuthenticated, aiOn]);
 
   if (!isAuthenticated || toasts.length === 0) return null;
 

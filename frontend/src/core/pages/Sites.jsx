@@ -20,6 +20,8 @@ import { isEmptyPreview } from '@/core/lib/emptyPreview'; // TEMP-PREVIEW
 import { StatusBadge } from '@/core/ui/status-badge';
 import { ConfirmDialog } from '@/core/ui/confirm-dialog';
 import { toneClass } from '@/core/ui/tone';
+import { useAuthStore } from '@/core/store/authStore';
+import { makeEntitlement } from '@/core/nav/entitlements';
 
 /**
  * Sites — list + manage physical locations.
@@ -69,6 +71,8 @@ export default function Sites({ summary, onNavigate }) {
   const totalCameras   = sites.reduce((acc, s) => acc + (s.camerasTotal || 0), 0);
   const onlineCameras  = sites.reduce((acc, s) => acc + (s.camerasOnline || 0), 0);
   const aiOn           = summary?.aiOn;
+  // VMS-only accounts have no AI tier: no "Turn on AI detection" step.
+  const hasAi          = makeEntitlement(useAuthStore((s) => s.user)).aiOn;
 
   // Account-wide counts from CameraSetup's summary. The site totals above
   // only count cameras attached to a site through a device group, so they
@@ -185,12 +189,12 @@ export default function Sites({ summary, onNavigate }) {
               done: fleetCameras > 0,
               action: <Button size="sm" onClick={() => setImport(sites[0])}><Upload /> Import cameras</Button>,
             },
-            {
+            ...(hasAi ? [{
               label: 'Turn on AI detection',
               detail: 'Choose gates, reception and restricted areas.',
               done: (aiOn || 0) > 0,
               action: <Button size="sm" variant="outline" onClick={() => onNavigate?.('ai-detection')}>Open AI Detection</Button>,
-            },
+            }] : []),
           ]}
         />
       )}

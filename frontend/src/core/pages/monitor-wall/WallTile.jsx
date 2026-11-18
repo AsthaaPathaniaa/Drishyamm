@@ -6,7 +6,7 @@
 // badge instead of a player, so a 3 × 3 of one NVR's cameras never asks that
 // NVR for 18 streams — the thing that jammed the office recorder four times.
 
-import { VideoOff, Volume2 } from 'lucide-react';
+import { Maximize2, VideoOff, Volume2 } from 'lucide-react';
 import DirectStreamPlayer from '@/core/players/DirectStreamPlayer';
 import { playerQuality } from '@/core/lib/utils';
 import { useSnapshot } from '@/core/hooks/useSnapshot';
@@ -29,7 +29,7 @@ export function WallTile({ slot, monitorId, camera, still, focused, audible, onF
       onClick={onFocus}
       onDoubleClick={onExpand}
       title={title}
-      className={`relative cursor-pointer overflow-hidden ${online ? 'bg-neutral-950' : 'bg-linear-to-br from-danger/45 via-danger/15 to-neutral-950'}`}
+      className={`group relative cursor-pointer overflow-hidden ${online ? 'bg-neutral-950' : 'bg-linear-to-br from-danger/45 via-danger/15 to-neutral-950'}`}
     >
       {!online ? (
         <OfflineBody camera={camera} />
@@ -49,6 +49,20 @@ export function WallTile({ slot, monitorId, camera, still, focused, audible, onF
           fit="cover"
           className="absolute inset-0 h-full w-full"
         />
+      )}
+      {/* Full-screen button — the same as double-clicking the tile, made
+          visible. Shows on hover (always on touch screens, which can't hover). */}
+      {onExpand && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onExpand(); }}
+          onDoubleClick={(e) => e.stopPropagation()}
+          title="Full screen"
+          aria-label={`Show ${camera.name} full screen`}
+          className="absolute right-2 top-2 z-10 grid h-8 w-8 place-items-center rounded-md border border-white/15 bg-black/55 text-white opacity-0 backdrop-blur-sm transition hover:bg-black/75 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+        >
+          <Maximize2 className="h-4 w-4" />
+        </button>
       )}
       {focused && <span aria-hidden className="pointer-events-none absolute inset-0 shadow-[inset_0_0_0_3px] shadow-brand" />}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-2 bg-linear-to-t from-black/70 to-transparent px-3.5 pb-2.5 pt-8">

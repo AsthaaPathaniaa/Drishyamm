@@ -75,7 +75,8 @@ const SECTION_GROUPS = [
     label: 'Operations',
     items: [
       { id: 'features', label: 'Feature Controls', desc: 'Module-level toggles', Icon: SlidersHorizontal },
-      { id: 'reports', label: 'Reports', desc: 'Scheduled summaries', Icon: FileText },
+      // Reports summarises AI events (served by the AI service) — AI plans only.
+      { id: 'reports', label: 'Reports', desc: 'Scheduled summaries', Icon: FileText, ai: true },
       { id: 'notifications', label: 'Alert Emails', desc: 'Emails that receive alerts', Icon: Mail, feature: 'email_alerts' },
     ],
   },
@@ -89,6 +90,20 @@ const SECTION_GROUPS = [
 ];
 
 const SECTIONS = SECTION_GROUPS.flatMap((group) => group.items);
+
+// VMS-only accounts have no AI tier, so AI settings are hidden for them (the
+// AI APIs answer 403). Keys/groups below belong to AI features only.
+const AI_GROUP_IDS = new Set(['ai-detection']);
+const AI_SETTING_KEYS = new Set([
+  'face_recognition', 'unknown_person_alerts', 'journey_mapping', 'watchlist_escalation',
+  'retention_cleanup', 'audit_ai_search', 'ai_events',
+]);
+const useAiOn = () => makeEntitlement(useAuthStore((s) => s.user)).aiOn;
+const withoutAi = (items, aiOn) => (aiOn || !items ? items : items.filter((i) => !AI_SETTING_KEYS.has(i.key)));
+const featureGroupsFor = (groups, aiOn) => (aiOn || !groups ? groups : groups
+  .filter((g) => !AI_GROUP_IDS.has(g.id))
+  .map((g) => ({ ...g, items: withoutAi(g.items, false) }))
+  .filter((g) => g.items.length > 0));
 
 // Sections made only of cards, rendered without the outer white panel.
 const BARE_SECTIONS = new Set(['overview', 'organization', 'features', 'notifications', 'security']);
@@ -106,7 +121,7 @@ const ORG_PLACEHOLDER = {
   integrations: [
     { name: 'Email alerts', Icon: Mail, connected: true, section: 'notifications' },
     { name: 'Storage backend', Icon: Database, connected: true },
-    { name: 'AI engine', Icon: Cpu, connected: true },
+    { name: 'AI engine', Icon: Cpu, connected: true, ai: true },
     { name: 'SMS gateway', Icon: Bell, connected: false },
   ],
 };
@@ -175,8 +190,8 @@ export default function Settings() {
   const isAdmin = ['admin', 'owner', 'user'].includes(user?.role);
   // Account switches (admin console): Email alerts and Users & roles hide
   // their sections; the backend refuses their APIs too.
-  const { has } = makeEntitlement(user);
-  const sectionOn = (it) => (!it.adminOnly || isAdmin) && (!it.feature || has(it.feature));
+  const { has, aiOn } = makeEntitlement(user);
+  const sectionOn = (it) => (!it.adminOnly || isAdmin) && (!it.feature || has(it.feature)) && (!it.ai || aiOn);
   const [params, setParams] = useSearchParams();
   const requested = params.get('tab') || 'overview';
   const known = SECTIONS.find((it) => it.id === requested);
@@ -189,7 +204,9 @@ export default function Settings() {
       <PageHeader
         icon={SettingsIcon}
         title="Settings"
-        description="Manage platform controls, AI usage, reports, security, and organization policy from one unified console."
+        description={aiOn
+          ? 'Manage platform controls, AI usage, reports, security, and organization policy from one unified console.'
+          : 'Manage platform controls, security, and organization policy from one unified console.'}
         // No page-level Save: every section saves each change as it is made.
         actions={
           <span className="inline-flex h-9 items-center gap-1.5 rounded-md border border-success-line bg-success-soft px-2.5 text-small font-semibold text-success-ink">
@@ -307,7 +324,7 @@ export default function Settings() {
                 sits in a 16px page gutter left the content on a narrow ribbon. */}
             <div className={`scroll-thin lg:h-full lg:min-h-0 lg:overflow-y-auto ${BARE_SECTIONS.has(active) ? 'p-0.5' : 'p-3 sm:p-5 lg:p-6'}`}>
               {active === 'features' ? <FeaturesSection /> : null}
-              {active === 'reports' ? <ReportsSection /> : null}
+              {active === 'reports' && aiOn ? <ReportsSection /> : null}
               {active === 'security' ? <SecuritySection /> : null}
               {active === 'organization' ? <OrganizationSection user={user} onOpenSection={setActive} /> : null}
               {active === 'users' && isAdmin ? <ManageUsersSection /> : null}
@@ -321,15 +338,17 @@ export default function Settings() {
 }
 
 const SETUP_STEPS = [
-  { title: 'Enable AI usage alerts', note: 'Warn management before monthly token usage crosses budget.', done: true },
+  { title: 'Enable AI usage alerts', note: 'Warn management before monthly token usage crosses budget.', done: true, ai: true },
   { title: 'Review report recipients', note: 'Add security head and IT admin to scheduled reports.', done: true },
-  { title: 'Map camera locations', note: 'Journey Map is clearer when cameras have readable area names.', done: false, href: '/camera-setup?tab=cameras' },
-  { title: 'Set retention policy', note: 'Define how long AI events, snapshots, and audit logs are kept.', done: true },
+  { title: 'Map camera locations', note: 'Journey Map is clearer when cameras have readable area names.', done: false, href: '/camera-setup?tab=cameras', ai: true },
+  { title: 'Set retention policy', note: 'Define how long AI events, snapshots, and audit logs are kept.', vmsNote: 'Define how long snapshots and audit logs are kept.', done: true },
 ];
 
 function OverviewSection({ user, onOpenSection }) {
   const navigate = useNavigate();
-  const doneCount = SETUP_STEPS.filter((s) => s.done).length;
+  const aiOn = useAiOn();
+  const steps = SETUP_STEPS.filter((s) => aiOn || !s.ai);
+  const doneCount = steps.filter((s) => s.done).length;
   // Same query keys as the Feature Controls and Security sections, so the
   // cards share their cache and update the moment a switch is flipped there.
   const featuresQ = useQuery({ queryKey: FEATURES_QUERY_KEY, queryFn: featureSettingsService.list });
@@ -337,14 +356,14 @@ function OverviewSection({ user, onOpenSection }) {
 
   const countOn = (items) => (items ? `${items.filter((i) => i.enabled).length} / ${items.length}` : '—');
   const aiFeatures = featuresQ.data?.flatMap((g) => g.items);
-  const policies = securityQ.data?.policies;
+  const policies = withoutAi(securityQ.data?.policies, aiOn);
 
   return (
     <section className="space-y-4">
       <div className="settings-cards gap-4">
         <OverviewCard Icon={Video} tone="brand" label="Camera Estate" value="Active" sub="Live, AI Feed, health" onClick={() => navigate('/camera-setup?tab=cameras')} />
-        <OverviewCard Icon={Sparkles} tone="success" label="AI Detection" value={countOn(aiFeatures)} sub="Features switched on" onClick={() => onOpenSection('features')} />
-        <OverviewCard Icon={FileText} tone="ai" label="Reports" value="Live" sub="Event summaries, CSV export" onClick={() => onOpenSection('reports')} />
+        {aiOn && <OverviewCard Icon={Sparkles} tone="success" label="AI Detection" value={countOn(aiFeatures)} sub="Features switched on" onClick={() => onOpenSection('features')} />}
+        {aiOn && <OverviewCard Icon={FileText} tone="ai" label="Reports" value="Live" sub="Event summaries, CSV export" onClick={() => onOpenSection('reports')} />}
         <OverviewCard Icon={ShieldCheck} tone="info" label="Security" value={countOn(policies)} sub="Access policies on" onClick={() => onOpenSection('security')} />
       </div>
       {/* Golden-ratio split: 1fr (≈61.8%) : 360px (≈38.2% of an 944px row),
@@ -354,15 +373,15 @@ function OverviewSection({ user, onOpenSection }) {
           title="Recommended Setup"
           aside={
             <span className="shrink-0 text-small font-medium text-fg-subtle">
-              {doneCount} of {SETUP_STEPS.length} complete
+              {doneCount} of {steps.length} complete
             </span>
           }
         >
-          {SETUP_STEPS.map((step) => (
+          {steps.map((step) => (
             <ChecklistItem
               key={step.title}
               title={step.title}
-              note={step.note}
+              note={(!aiOn && step.vmsNote) || step.note}
               done={step.done}
               onSetup={step.href ? () => navigate(step.href) : undefined}
             />
@@ -951,6 +970,7 @@ const FEATURES_QUERY_KEY = ['settings-features'];
 function FeaturesSection() {
   const queryClient = useQueryClient();
   const featuresQ = useQuery({ queryKey: FEATURES_QUERY_KEY, queryFn: featureSettingsService.list });
+  const groups = featureGroupsFor(featuresQ.data, useAiOn());
   // A critical feature waiting for "are you sure" before it is switched off.
   const [confirmTarget, setConfirmTarget] = useState(null);
 
@@ -999,7 +1019,7 @@ function FeaturesSection() {
         />
       ) : (
         <div className="settings-panels gap-4">
-          {featuresQ.data.map((group) => (
+          {groups.map((group) => (
             <Panel
               key={group.id}
               title={group.title}
@@ -1147,6 +1167,7 @@ const SECURITY_QUERY_KEY = ['settings-security'];
 function SecuritySection() {
   const queryClient = useQueryClient();
   const securityQ = useQuery({ queryKey: SECURITY_QUERY_KEY, queryFn: securitySettingsService.get });
+  const aiOn = useAiOn();
   // What the confirm dialog is asking about: { kind: 'policy', item } or { kind: 'retention', item, days }.
   const [confirm, setConfirm] = useState(null);
 
@@ -1219,7 +1240,8 @@ function SecuritySection() {
           run: () => retentionMutation.mutateAsync({ key: confirm.item.key, name: confirm.item.name, days: confirm.days }),
         };
 
-  const data = securityQ.data;
+  const raw = securityQ.data;
+  const data = raw && (aiOn ? raw : { ...raw, policies: withoutAi(raw.policies, false), retention: withoutAi(raw.retention, false) });
 
   return (
     <section className="space-y-4">
@@ -1294,6 +1316,8 @@ function RetentionRow({ item, onChange }) {
 }
 
 function OrganizationSection({ user, onOpenSection }) {
+  const aiOn = useAiOn();
+  const integrations = ORG_PLACEHOLDER.integrations.filter((it) => aiOn || !it.ai);
   const { license, loading: licenseLoading } = useMyLicense();
 
   // Camera quota from license_resources when available, else the placeholder.
@@ -1337,11 +1361,11 @@ function OrganizationSection({ user, onOpenSection }) {
           title="Integrations"
           aside={
             <span className="shrink-0 text-small font-medium text-fg-subtle">
-              {ORG_PLACEHOLDER.integrations.filter((i) => i.connected).length} of {ORG_PLACEHOLDER.integrations.length} connected
+              {integrations.filter((i) => i.connected).length} of {integrations.length} connected
             </span>
           }
         >
-          {ORG_PLACEHOLDER.integrations.map((item) => (
+          {integrations.map((item) => (
             <IntegrationRow
               key={item.name}
               Icon={item.Icon}

@@ -663,7 +663,9 @@ export default function Dashboard() {
 
 
       {/* ── Metric cards (real numbers from useDashboardStats) ─────────── */}
-      <MetricGrid cols={6} className="mb-5">
+      {/* Card count changes with the plan (no "Detections" card on VMS-only),
+          so the grid follows it and the cards stretch to fill the row. */}
+      <MetricGrid cols={aiOn ? 6 : 5} className="mb-5">
         <MetricCard
           icon={Camera} tone="success"
           label="Cameras working"
