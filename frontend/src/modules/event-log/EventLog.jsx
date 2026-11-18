@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import {
-  CheckCircle2, ChevronDown, Download, FileText, Info, Loader2, RefreshCw, ScrollText, SearchX,
-  Sheet as SheetIcon, ShieldQuestion, X,
+  Ban, BarChart3, CheckCircle2, ChevronDown, Download, FileText, Info, Loader2, RefreshCw,
+  ScrollText, SearchX, Sheet as SheetIcon, ShieldCheck, ShieldQuestion, X,
 } from 'lucide-react';
+import { cn } from '@/core/lib/utils';
 import { aiService } from '@/core/services/ai';
+import { playbackService } from '@/core/services/playback';
 import { useGroups } from '@/core/hooks/useQueries';
 import { useMediaQuery, BELOW_XL } from '@/core/hooks/useMediaQuery';
 import {
-  OperationsPage, PageAction, PageCard, PageContent, PageHeader,
+  OperationsPage, PageAction, PageCard, PageContent, PageContext, PageHeader,
 } from '@/core/layout/OperationsPage';
 import { EmptyState } from '@/core/ui/states';
 import {
@@ -33,6 +35,14 @@ import {
   CATEGORIES, VIEWS, VIOLATIONS, categoryOf, eventLogHref, eventTypeLabel, parseLogParams,
   violationOf, viewMatches, zoneMatches,
 } from './eventlog/log-query';
+import {
+  NO_ENTRY_TYPE, PDF_ROW_LIMIT, SERVER_PAGE_MAX, SHIFT_OPTIONS, STATUS_OPTIONS,
+  exportName as breachExportName, exportParams, isNoEntry, monitorIdsFor, pdfOverflowNote,
+  pdfPagePlan, scopeIsEmpty, zoneBreachParams,
+} from './eventlog/no-entry';
+import BreachTrends from '@/modules/occupancy/breaches/BreachTrends';
+import { clipWindow } from '@/modules/occupancy/breaches/breach-model';
+import { listZones } from '@/modules/occupancy/zone-setup/restricted-zones-api';
 import { download, exportScorecardPdf, istNow } from '@/modules/employee-productivity/scorecard-export';
 
 /**
@@ -60,6 +70,7 @@ import { download, exportScorecardPdf, istNow } from '@/modules/employee-product
  */
 
 const REPORT_TITLE = 'Event Log Report';
+const BREACH_REPORT_TITLE = 'No-entry Areas Report';
 const exportName = (from, to) => `event-log-${from}${to !== from ? `_to_${to}` : ''}`;
 
 // Every row matching the filters, not just the page on screen. Metadata first
@@ -89,39 +100,48 @@ function downloadCsv(rows, from, to, filters) {
 // The same rows as a branded, paginated A4 PDF — the report writer the
 // Reports hub uses (logo, generated stamp, zebra table, "Page X of Y"), so a
 // log handed to an auditor looks like every other Drishyam export.
-function downloadPdf(rows, from, to, filters) {
+function downloadPdf(rows, from, to, filters, {
+  title = REPORT_TITLE,
+  reportPrefix = 'RPT-LOG',
+  filename = exportName(from, to),
+  tagline = 'AI VIDEO ANALYTICS  -  EVENT LOG',
+  subtitle = 'Every event matching the filters below, in the order the log lists them.',
+  footer = 'Exported from the Drishyam Event Log.',
+  rowNoun = 'events',
+  tableTitle = 'Events',
+} = {}) {
   const now = istNow();
   const bySev = (sev) => rows.filter((e) => e.severity === sev).length;
   return exportScorecardPdf({
-    title: REPORT_TITLE,
-    reportId: `RPT-LOG-${now.stamp}`,
+    title,
+    reportId: `${reportPrefix}-${now.stamp}`,
     header: [
-      ['Report Type', REPORT_TITLE],
+      ['Report Type', title],
       ['Date Range', rangeLabel(from, to)],
       ['Generated At', now.label],
-      ['Total Events', `${rows.length.toLocaleString()} events`],
+      ['Total Events', `${rows.length.toLocaleString()} ${rowNoun}`],
     ],
     policy: filters,
     kpis: [
-      { label: 'Events', value: rows.length.toLocaleString(), note: 'Matching the filters' },
+      { label: tableTitle, value: rows.length.toLocaleString(), note: 'Matching the filters' },
       { label: 'High', value: String(bySev('high')), note: 'Severity high' },
       { label: 'Medium', value: String(bySev('medium')), note: 'Severity medium' },
       { label: 'Unacknowledged', value: String(rows.filter((e) => statusOf(e) === 'new').length), note: 'Still need a human' },
     ],
     tables: [{
-      title: 'Events',
+      title: tableTitle,
       columns: REPORT_COLUMNS.map((c) => c.label),
       rows: rows.map((evt) => REPORT_COLUMNS.map((c) => csvValue(evt, c.id))),
     }],
     labels: {
-      subtitle: 'Every event matching the filters below, in the order the log lists them.',
-      tagline: 'AI VIDEO ANALYTICS  -  EVENT LOG',
+      subtitle,
+      tagline,
       policy: 'Applied filters',
       summary: 'Summary',
-      footer: 'Exported from the Drishyam Event Log.',
-      rowNoun: 'events',
+      footer,
+      rowNoun,
     },
-    filename: exportName(from, to),
+    filename,
   });
 }
 
@@ -130,7 +150,36 @@ const EXPORT_FORMATS = [
   { id: 'pdf', label: 'Export as PDF', icon: FileText },
 ];
 
-export default function EventLog() {
+const BANNER_TONE = {
+  info: 'border-info-line bg-info-soft text-info-ink',
+  warning: 'border-warning-line bg-warning-soft text-warning-ink',
+  danger: 'border-danger-line bg-danger-soft text-danger-ink',
+};
+
+/** A dismissible line about something the page just did — a clip export. */
+function Banner({ tone, onClose, children }) {
+  return (
+    <p className={cn(
+      'flex shrink-0 items-start gap-2 rounded-lg border px-3 py-2 text-caption',
+      BANNER_TONE[tone] || BANNER_TONE.info,
+    )}
+    >
+      <span className="flex-1">{children}</span>
+      <button aria-label="Dismiss" className="shrink-0 opacity-70 hover:opacity-100" onClick={onClose} type="button">
+        <X className="h-3.5 w-3.5" strokeWidth={2} />
+      </button>
+    </p>
+  );
+}
+
+/**
+ * @param {{ mode?: 'no-entry' }} props  `mode` turns the log into the
+ *   No-entry page (/occupancy/breaches): one event type, server-side paging,
+ *   and the clip / resolve actions. Omitted, this is Activity history
+ *   (/event-logs), unchanged.
+ */
+export default function EventLog({ mode = null }) {
+  const noEntry = isNoEntry(mode);
   const navigate = useNavigate();
   // Whether the details are a column or a drawer is layout STATE, not styling:
   // a Sheet hidden with a CSS class still paints its overlay over the table.
@@ -160,7 +209,11 @@ export default function EventLog() {
   const setGlobalSite = useSiteStore((st) => st.setSelectedSiteId);
   const [camera, setCamera] = useState(seed.camera);
   const [zone, setZone] = useState(seed.zone);
-  const [type, setType] = useState(seed.type);
+  // In no-entry mode the type is not a filter, it is the page: a restricted-zone
+  // entry. Locked here, re-locked by Clear filters, and never offered in a menu.
+  const [type, setType] = useState(noEntry ? NO_ENTRY_TYPE : seed.type);
+  // Hours of the day, IST, applied on every day in the range (no-entry only).
+  const [shift, setShift] = useState('all');
   const [severity, setSeverity] = useState(seed.severity);
   const [status, setStatus] = useState(seed.status);
   const [category, setCategory] = useState(seed.category);
@@ -177,6 +230,11 @@ export default function EventLog() {
   const [acked, setAcked] = useState(() => new Set());
   const [acking, setAcking] = useState(false);
   const [ackError, setAckError] = useState('');
+  // No-entry only: `note` is the clip export's progress line. A resolution is
+  // no longer held here — it is resolved_at / resolved_by on the event, so
+  // the next shift and the next browser read the same thing.
+  const [note, setNote] = useState(null);   // { tone, text }
+  const [showTrends, setShowTrends] = useState(false);
   // The arrival-time "No site selected" notice. Live until dismissed or until
   // the operator picks a site any way at all — it is about how the page
   // OPENED, so clearing back to All Sites later does not bring it back.
@@ -249,6 +307,7 @@ export default function EventLog() {
   const aiQuery = useQuery({
     queryKey: ['event-log', 'ai', sinceIso, untilIso],
     queryFn: () => aiService.listEvents({ since: sinceIso, until: untilIso, limit: FETCH_LIMIT }),
+    enabled: !noEntry,
     refetchInterval: live ? 30_000 : false,
     staleTime: 10_000,
   });
@@ -256,17 +315,92 @@ export default function EventLog() {
   // The activity service's timeline takes ONE day, not a range — asking it for
   // a month would be a request per day. A multi-day range therefore shows AI
   // events only, and the header says so rather than quietly dropping rows.
+  // It carries attendance and staff-policy rows, none of which is a
+  // restricted-zone entry, so no-entry mode does not ask it at all.
   const singleDay = from === to ? from : null;
   const activityQuery = useQuery({
     queryKey: ['event-log', 'activity', singleDay],
     queryFn: () => aiService.activityEvents({ date: singleDay, limit: 500 }),
-    enabled: Boolean(singleDay),
+    enabled: Boolean(singleDay) && !noEntry,
     refetchInterval: live ? 30_000 : false,
     staleTime: 10_000,
     retry: false,   // 502 when the activity service is not deployed — not an error worth retrying
   });
 
+  // ── No-entry: one server query that filters, sorts AND pages ───────────────
+  // Every control narrows on the server, because the server is what pages. A
+  // filter applied in the browser would narrow the 25 rows on screen and leave
+  // the count, the page numbers and the exports describing a different set.
+  const serverPageSize = Math.min(SERVER_PAGE_MAX, pageSize || 25);
+  const monitorIds = useMemo(
+    () => monitorIdsFor({ camera: cameraValue, siteCodes }),
+    [cameraValue, siteCodes],
+  );
+  // A site with no cameras in it: nothing can match, and sending no camera
+  // filter at all would show the whole estate instead.
+  const emptyScope = scopeIsEmpty(monitorIds);
+  const breachFilters = useMemo(() => zoneBreachParams({
+    since: sinceIso, until: untilIso, monitorIds, zoneId: zone, severity, status, shift, query,
+  }), [sinceIso, untilIso, monitorIds, zone, severity, status, shift, query]);
+  const breachQuery = useQuery({
+    queryKey: ['no-entry', 'breaches', breachFilters, requestedPage, serverPageSize],
+    queryFn: () => aiService.listZoneBreaches({
+      ...breachFilters, page: requestedPage, pageSize: serverPageSize,
+    }),
+    enabled: noEntry && !emptyScope,
+    refetchInterval: live ? 30_000 : false,
+    staleTime: 10_000,
+    // Hold the page that is on screen while the next one loads, so paging does
+    // not blink through an empty table.
+    placeholderData: keepPreviousData,
+  });
+  const serverTotal = emptyScope ? 0 : (breachQuery.data?.pagination?.total ?? 0);
+
+  // Peak hours and the most-affected cameras, over the SAME filters, rolled
+  // up in SQL. Only asked for while the panel is open: it is a second pass
+  // over the range, and most sessions never open it.
+  const trendsQuery = useQuery({
+    queryKey: ['no-entry', 'trends', breachFilters],
+    queryFn: () => aiService.zoneBreachTrends(exportParams(breachFilters)),
+    enabled: noEntry && showTrends && !emptyScope,
+    staleTime: 10_000,
+    placeholderData: keepPreviousData,
+  });
+
+  // The zones an operator drew, by id — what the server filters on. Not the
+  // zone NAMES the generic log matches as substrings: two zones may share a
+  // word, and the id cannot half-match.
+  const zonesQuery = useQuery({
+    queryKey: ['no-entry', 'zones'],
+    queryFn: listZones,
+    enabled: noEntry,
+    staleTime: 300_000,
+    retry: false,
+  });
+  const zoneOptions = useMemo(() => (zonesQuery.data || [])
+    .filter((z) => z.zoneId)
+    .map((z) => ({ id: String(z.zoneId), label: z.name || 'Unnamed zone' }))
+    .sort((a, b) => a.label.localeCompare(b.label)), [zonesQuery.data]);
+
   const events = useMemo(() => {
+    if (noEntry) {
+      // The SAME normalizer as every other AI row, so a breach is the same
+      // object in this table as it is in the feed — and each row takes its
+      // zone from its own payload (event-model reads payload.zoneName). It is
+      // never given the zones configured on its camera, which is what the old
+      // page did: a camera covering two zones then labelled every breach on it
+      // "Dock / Switchgear", naming a zone nobody had entered.
+      return (breachQuery.data?.data || [])
+        .map((row) => normalizeEvent(row, cameraIndex))
+        .filter(Boolean)
+        .map((evt) => {
+          // `resolved` is the server's, carried onto the normalized row here
+          // rather than in event-model, so Activity history is untouched.
+          const row = evt.raw || {};
+          const out = { ...evt, resolved: Boolean(row.resolvedAt), resolvedBy: row.resolvedBy || null };
+          return acked.has(out.id) ? { ...out, acknowledged: true } : out;
+        });
+    }
     const ai = (aiQuery.data?.data || [])
       .map((row) => normalizeEvent(row, cameraIndex))
       .filter(Boolean);
@@ -280,7 +414,7 @@ export default function EventLog() {
       // the Event Type menu. Its own slug, prettified, says more.
       return out.title === 'AI Event' && out.type ? { ...out, title: eventTypeLabel(out.type) } : out;
     });
-  }, [aiQuery.data, activityQuery.data, cameraIndex, acked]);
+  }, [noEntry, breachQuery.data, aiQuery.data, activityQuery.data, cameraIndex, acked]);
 
   // ── Filtering ──────────────────────────────────────────────────────────────
   // Types on offer are the ones present in the window — a menu that can only
@@ -294,12 +428,16 @@ export default function EventLog() {
   // Same guard as the site and camera above: a type chosen on Monday may not
   // occur in Tuesday's events, and a filter that can only return nothing is not
   // a state worth preserving through a date change.
-  const typeValue = type === 'all' || !typeOptions.length || typeOptions.some((t) => t.id === type)
-    ? type : 'all';
+  const typeValue = noEntry ? NO_ENTRY_TYPE
+    : (type === 'all' || !typeOptions.length || typeOptions.some((t) => t.id === type) ? type : 'all');
 
   // Everything except the view and violation kind, so the pill counts and the
   // table can never disagree about what "142" means.
-  const beforeView = useMemo(() => events.filter((e) => (
+  //
+  // In no-entry mode this is a pass-through: the server already applied every
+  // filter, and re-applying them here could only narrow the page further —
+  // which would mean the table showing fewer rows than the count beside it.
+  const beforeView = useMemo(() => (noEntry ? events : events.filter((e) => (
     (!siteCodes || siteCodes.has(e.monitorId))
     && (cameraValue === 'all' || e.monitorId === cameraValue)
     && zoneMatches(e, zone)
@@ -308,7 +446,7 @@ export default function EventLog() {
     && (status === 'all' || statusOf(e) === status)
     && (category === 'all' || categoryOf(e) === category)
     && matchesQuery(e, query)
-  )), [events, siteCodes, cameraValue, zone, typeValue, severity, status, category, query]);
+  ))), [noEntry, events, siteCodes, cameraValue, zone, typeValue, severity, status, category, query]);
 
   const counts = useMemo(() => {
     const out = Object.fromEntries(VIEWS.map((v) => [v.id, 0]));
@@ -321,17 +459,33 @@ export default function EventLog() {
   }, [beforeView]);
 
   const rows = useMemo(() => {
+    // Newest first is the server's order, and the only one it offers; sorting
+    // the 25 rows in hand the other way round would label the newest page
+    // "oldest first". The Time header is not a button in this mode.
+    if (noEntry) return beforeView;
     const list = beforeView.filter((e) => viewMatches(e, view)
       && (violation === 'all' || violationOf(e)?.kind === violation));
     return list.sort((a, b) => (sortDesc ? b.ts - a.ts : a.ts - b.ts));
-  }, [beforeView, view, violation, sortDesc]);
+  }, [noEntry, beforeView, view, violation, sortDesc]);
 
-  const continuous = pageSize === CONTINUOUS;
-  const pageCount = continuous ? 1 : Math.max(1, Math.ceil(rows.length / pageSize));
+  // The number the header, the footer and the page buttons all count in. On
+  // Activity history it is what the browser holds; in no-entry mode it is the
+  // database's own COUNT, so "500 breaches" means 500 and page 20 exists.
+  const totalRows = noEntry ? serverTotal : rows.length;
+  const continuous = !noEntry && pageSize === CONTINUOUS;
+  const pageCount = continuous ? 1 : Math.max(1, Math.ceil(totalRows / (noEntry ? serverPageSize : pageSize)));
   const page = Math.min(Math.max(1, requestedPage), pageCount);
-  const pageRows = continuous ? rows.slice(0, shown) : rows.slice((page - 1) * pageSize, page * pageSize);
+  const pageRows = noEntry ? rows
+    : continuous ? rows.slice(0, shown) : rows.slice((page - 1) * pageSize, page * pageSize);
   const selected = rows.find((e) => e.id === selectedId) || null;
   const loadMore = useCallback(() => setShown((n) => n + SCROLL_CHUNK), []);
+
+  // A page past the end: the total shrank under the page in view — a poll
+  // landed, or rows were acknowledged out of a status filter. Adjusted during
+  // render rather than in an effect, which is React's own answer for deriving
+  // state from something that changed (it re-renders before committing, so
+  // nothing paints the dead page and no cascading render is queued).
+  if (noEntry && requestedPage > pageCount) setRequestedPage(pageCount);
 
   // Any filter change: back to page 1 / the first chunk, selection cleared —
   // a bulk action must only ever touch rows the operator can currently see.
@@ -339,16 +493,24 @@ export default function EventLog() {
     setRequestedPage(1); setShown(SCROLL_CHUNK); setChecked(new Set());
   }, []);
 
-  const dirty = siteValue !== 'all' || cameraValue !== 'all' || zone !== 'all' || typeValue !== 'all'
-    || severity !== 'all' || status !== 'all' || category !== 'all' || violation !== 'all' || query !== '';
+  // The locked type is not a filter the operator set, so it must not light up
+  // Clear Filters or put a chip above the table.
+  const dirty = siteValue !== 'all' || cameraValue !== 'all' || zone !== 'all'
+    || severity !== 'all' || status !== 'all' || query !== ''
+    || (noEntry
+      ? shift !== 'all'
+      : typeValue !== 'all' || category !== 'all' || violation !== 'all');
   // The view is a place, not a filter: clearing keeps you on Staff Violations
-  // and only widens it back to every kind.
+  // and only widens it back to every kind. In no-entry mode the type is the
+  // page itself, so clearing RE-LOCKS it rather than widening to every event.
   const clearFilters = useCallback(() => {
     setSiteNoticeOpen(false);
-    setSite('all'); setGlobalSite('all'); setCamera('all'); setZone('all'); setType('all'); setSeverity('all');
+    setSite('all'); setGlobalSite('all'); setCamera('all'); setZone('all'); setSeverity('all');
     setStatus('all'); setCategory('all'); setViolation('all'); setQuery('');
+    setType(noEntry ? NO_ENTRY_TYPE : 'all');
+    setShift('all');
     refilter();
-  }, [refilter, setGlobalSite]);
+  }, [refilter, setGlobalSite, noEntry]);
 
   // A violation kind lives under Staff Violations; leaving that view drops it,
   // and entering it drops an Event Type that would only fight the kind menu.
@@ -372,23 +534,36 @@ export default function EventLog() {
     add('site', 'Site',
       siteValue === 'all' ? null : (sites.find((x) => String(x.id) === String(siteValue))?.name || siteValue),
       () => { pickSite('all'); refilter(); });
-    add('zone', 'Zone', zone === 'all' ? null : zone, () => { setZone('all'); refilter(); });
+    // In no-entry mode `zone` is a zone id, so the chip has to print its name.
+    add('zone', 'Zone',
+      zone === 'all' ? null : (noEntry ? (zoneOptions.find((z) => z.id === zone)?.label || zone) : zone),
+      () => { setZone('all'); refilter(); });
     add('camera', 'Camera',
       cameraValue === 'all' ? null : (cameras.find((c) => c.monitorId === cameraValue)?.name || cameraValue),
       () => { setCamera('all'); refilter(); });
-    // The events in view name their own type; `eventTypeLabel` covers the
-    // case a deep link creates — a type this day contains none of.
-    add('type', 'Event',
-      typeValue === 'all' ? null : (typeOptions.find((t) => t.id === typeValue)?.label || eventTypeLabel(typeValue)),
-      () => { setType('all'); refilter(); });
-    add('violation', 'Violation',
-      violation === 'all' ? null : VIOLATIONS.find((v) => v.id === violation)?.label,
-      () => { setViolation('all'); refilter(); });
-    add('category', 'Category',
-      category === 'all' ? null : (CATEGORIES.find((c) => c.id === category)?.label || category),
-      () => { setCategory('all'); refilter(); });
+    if (noEntry) {
+      add('shift', 'Shift',
+        shift === 'all' ? null : SHIFT_OPTIONS.find((s) => s.id === shift)?.label,
+        () => { setShift('all'); refilter(); });
+    } else {
+      // The events in view name their own type; `eventTypeLabel` covers the
+      // case a deep link creates — a type this day contains none of. There is
+      // no type chip in no-entry mode: the type is the page, not a choice.
+      add('type', 'Event',
+        typeValue === 'all' ? null : (typeOptions.find((t) => t.id === typeValue)?.label || eventTypeLabel(typeValue)),
+        () => { setType('all'); refilter(); });
+      add('violation', 'Violation',
+        violation === 'all' ? null : VIOLATIONS.find((v) => v.id === violation)?.label,
+        () => { setViolation('all'); refilter(); });
+      add('category', 'Category',
+        category === 'all' ? null : (CATEGORIES.find((c) => c.id === category)?.label || category),
+        () => { setCategory('all'); refilter(); });
+    }
     add('status', 'Status',
-      status === 'all' ? null : (status === 'new' ? 'Unacknowledged' : 'Acknowledged'),
+      status === 'all' ? null
+        : (noEntry
+          ? STATUS_OPTIONS.find((o) => o.id === status)?.label || status
+          : status === 'new' ? 'Unacknowledged' : 'Acknowledged'),
       () => { setStatus('all'); refilter(); });
     add('severity', 'Severity',
       severity === 'all' ? null : (severity === 'info' ? 'Low' : severity[0].toUpperCase() + severity.slice(1)),
@@ -396,7 +571,8 @@ export default function EventLog() {
     add('q', 'Search', query || null, () => { setQuery(''); refilter(); });
 
     return out;
-  }, [siteValue, sites, zone, cameraValue, cameras, typeValue, typeOptions, violation, category, status, severity, query, refilter, pickSite]);
+  }, [noEntry, siteValue, sites, zone, zoneOptions, cameraValue, cameras, typeValue, typeOptions,
+    violation, category, status, severity, shift, query, refilter, pickSite]);
 
   // ── The address bar, kept honest ───────────────────────────────────────────
   // Whatever is on screen must be re-openable from the URL: an operator who
@@ -433,8 +609,10 @@ export default function EventLog() {
   }, [navigate]);
 
   // Activity-service rows carry no event id, so there is nothing to mark.
+  // `=== 'new'` rather than `!== 'acknowledged'`, so a resolved breach is not
+  // offered an acknowledgement it already has.
   const canAck = useCallback(
-    (evt) => Boolean(evt?.raw?.id) && !evt.fromActivityService && statusOf(evt) !== 'acknowledged',
+    (evt) => Boolean(evt?.raw?.id) && !evt.fromActivityService && statusOf(evt) === 'new',
     [],
   );
   const checkedRows = useMemo(() => rows.filter((e) => checked.has(e.id) && canAck(e)), [rows, checked, canAck]);
@@ -469,10 +647,77 @@ export default function EventLog() {
     }
   }, [acked]);
 
+  // ── No-entry actions ───────────────────────────────────────────────────────
+  // The NVR recording around the breach, as an MP4 an incident report can
+  // carry: 15 s before to 45 s after, never past now (clipWindow).
+  const exportClip = useCallback((evt) => {
+    const whenMs = new Date(evt.ts).getTime();
+    const { start, end } = clipWindow(whenMs);
+    if (end - start < 1000) {
+      setNote({ tone: 'danger', text: 'That breach has not been recorded yet — try again in a minute.' });
+      return;
+    }
+    const stamp = new Date(whenMs + 330 * 60_000).toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const camera = evt.cameraName || evt.monitorId || 'camera';
+    const url = playbackService.exportUrl({
+      monitorId: evt.monitorId,
+      start: new Date(start).toISOString(),
+      end: new Date(end).toISOString(),
+      name: `breach_${camera.replace(/[^\w-]+/g, '_')}_${stamp}`,
+    });
+    playbackService.download(url, end - start, (message) => setNote({
+      tone: 'danger', text: `Clip export failed: ${message}`,
+    }));
+    setNote({
+      tone: 'info',
+      text: `Exporting the ${Math.round((end - start) / 1000)} s clip from ${camera} as MP4. Your browser saves it as it arrives; the NVR replays in real time, so it takes about as long as the clip.`,
+    });
+  }, []);
+
+  // Closing a breach out. One call: the server acknowledges it first if
+  // nobody had, then records who resolved it and when — so the day shift
+  // sees what the night shift dealt with, which a resolution kept in this
+  // browser never managed.
+  const resolve = useCallback(async (evt) => {
+    if (!evt?.raw?.id) return;
+    setAcking(true);
+    setAckError('');
+    try {
+      await aiService.resolveZoneBreach(evt.raw.id);
+      // Re-read rather than patch in place: the row now carries the server's
+      // resolvedAt and resolvedBy, and a status filter may have moved it off
+      // this page entirely.
+      await breachQuery.refetch();
+    } catch (err) {
+      setAckError(err?.response?.status === 404
+        ? 'That breach is no longer in the log — refresh the page.'
+        : 'Could not mark that breach resolved — it did not reach the server. Try again.');
+    } finally {
+      setAcking(false);
+    }
+  }, [breachQuery]);
+
   // ── Empty states ───────────────────────────────────────────────────────────
   const meta = view === 'system' ? SOURCE_META.system : null;
   let empty;
-  if (meta && !meta.available) {
+  if (noEntry) {
+    empty = dirty ? (
+      <EmptyState
+        action={<PageAction onClick={clearFilters} type="button">Clear filters</PageAction>}
+        className="py-16"
+        description="Nothing in this date range matches these filters. Widen the range, or clear them to see every breach recorded in this window."
+        icon={SearchX}
+        title="No breaches match these filters"
+      />
+    ) : (
+      <EmptyState
+        className="py-16"
+        description={`Nobody entered a restricted zone ${singleDay ? `on ${rangeLabel(from, to)}` : `between ${rangeLabel(from, from)} and ${rangeLabel(to, to)}`}. A breach appears here when someone who is not on a zone's allow-list is detected inside its boundary.`}
+        icon={CheckCircle2}
+        title="No breaches recorded in this range"
+      />
+    );
+  } else if (meta && !meta.available) {
     empty = (
       <EmptyState
         icon={ShieldQuestion}
@@ -513,21 +758,87 @@ export default function EventLog() {
 
   // What the exported rows were cut by — printed at the top of both files.
   // Resolved values (siteValue / cameraValue / typeValue), like the chips.
-  const filterSummary = [
+  const siteLabel = siteValue === 'all' ? 'All sites'
+    : (sites.find((x) => String(x.id) === String(siteValue))?.name || siteValue);
+  const cameraLabel = cameraValue === 'all' ? 'All cameras'
+    : (cameras.find((c) => c.monitorId === cameraValue)?.name || cameraValue);
+  const zoneLabel = zone === 'all' ? 'All zones'
+    : (noEntry ? (zoneOptions.find((z) => z.id === zone)?.label || zone) : zone);
+  const statusLabelOf = status === 'all' ? 'All'
+    : noEntry ? (STATUS_OPTIONS.find((o) => o.id === status)?.label || status)
+      : status === 'new' ? 'Unacknowledged' : 'Acknowledged';
+
+  const filterSummary = noEntry ? [
     ['Date Range', rangeLabel(from, to)],
-    ['Site', siteValue === 'all' ? 'All sites' : (sites.find((x) => String(x.id) === String(siteValue))?.name || siteValue)],
-    ['Camera', cameraValue === 'all' ? 'All cameras' : (cameras.find((c) => c.monitorId === cameraValue)?.name || cameraValue)],
+    ['Shift', SHIFT_OPTIONS.find((s) => s.id === shift)?.label || 'All shifts'],
+    ['Site', siteLabel],
+    ['Camera', cameraLabel],
+    ['Zone', zoneLabel],
+    ['Severity', severity === 'all' ? 'All' : severityLabel(severity)],
+    ['Status', statusLabelOf],
+    ...(query ? [['Search', query]] : []),
+  ] : [
+    ['Date Range', rangeLabel(from, to)],
+    ['Site', siteLabel],
+    ['Camera', cameraLabel],
     ['View', VIEWS.find((v) => v.id === view)?.label],
     ...(violation !== 'all' ? [['Violation', VIOLATIONS.find((v) => v.id === violation)?.label]] : []),
     ['Event Type', typeValue === 'all' ? 'All events' : (typeOptions.find((t) => t.id === typeValue)?.label || eventTypeLabel(typeValue))],
     ['Severity', severity === 'all' ? 'All' : severityLabel(severity)],
     ['Category', category === 'all' ? 'All' : CATEGORIES.find((c) => c.id === category)?.label],
-    ['Zone', zone === 'all' ? 'All zones' : zone],
-    ['Status', status === 'all' ? 'All' : status === 'new' ? 'Unacknowledged' : 'Acknowledged'],
+    ['Zone', zoneLabel],
+    ['Status', statusLabelOf],
     ...(query ? [['Search', query]] : []),
   ];
 
+  /**
+   * No-entry exports cover the WHOLE filtered range, not the page on screen.
+   *
+   * CSV comes from the server, which streams every row with no ceiling, so a
+   * 5,000-breach month is one request and never a 5,000-row array in this tab.
+   * PDF is a document somebody files, so it loads up to PDF_ROW_LIMIT rows
+   * through the same API and says in the file when the range held more.
+   */
+  const runBreachExport = async (format) => {
+    setExporting(true);
+    setNote(null);
+    try {
+      if (format === 'csv') {
+        const blob = await aiService.zoneBreachesCsv(exportParams(breachFilters));
+        download(blob, `${breachExportName(from, to)}.csv`);
+        return;
+      }
+      const pages = await Promise.all(pdfPagePlan(serverTotal).map((p) => aiService.listZoneBreaches({
+        ...exportParams(breachFilters), page: p, pageSize: SERVER_PAGE_MAX,
+      })));
+      const all = pages
+        .flatMap((r) => r?.data || [])
+        .map((row) => normalizeEvent(row, cameraIndex))
+        .filter(Boolean);
+      const overflow = pdfOverflowNote(serverTotal, all.length);
+      await downloadPdf(all, from, to, [
+        ...filterSummary,
+        ...(overflow ? [['Note', overflow]] : []),
+      ], {
+        title: BREACH_REPORT_TITLE,
+        reportPrefix: 'RPT-ZONE',
+        filename: breachExportName(from, to),
+        tagline: 'AI VIDEO ANALYTICS  -  RESTRICTED ZONES',
+        subtitle: overflow
+          || 'Every restricted-zone entry matching the filters below, newest first.',
+        footer: 'Exported from Drishyam No-entry areas.',
+        rowNoun: 'breaches',
+        tableTitle: 'Breaches',
+      });
+    } catch {
+      setNote({ tone: 'danger', text: 'That export did not reach the server — try again.' });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const runExport = async (format) => {
+    if (noEntry) { await runBreachExport(format); return; }
     if (format === 'csv') { downloadCsv(rows, from, to, filterSummary); return; }
     setExporting(true);
     try {
@@ -537,22 +848,60 @@ export default function EventLog() {
     }
   };
 
-  const capped = events.length >= FETCH_LIMIT;
-  const loading = aiQuery.isLoading || (Boolean(singleDay) && activityQuery.isLoading);
+  // Only Activity history can hit the shared feed's ceiling. No-entry mode
+  // pages on the server, so there is nothing to warn about.
+  const capped = !noEntry && events.length >= FETCH_LIMIT;
+  const loading = noEntry
+    ? breachQuery.isLoading
+    : aiQuery.isLoading || (Boolean(singleDay) && activityQuery.isLoading);
+  const refresh = () => {
+    if (noEntry) { breachQuery.refetch(); return; }
+    aiQuery.refetch();
+    if (singleDay) activityQuery.refetch();
+  };
 
   return (
     <OperationsPage>
       <PageHeader
-        icon={ScrollText}
-        title="Activity history"
-        description="Every AI detection, security event and system event, in one searchable record — with the evidence attached."
+        icon={noEntry ? Ban : ScrollText}
+        title={noEntry ? 'No-entry areas' : 'Activity history'}
+        description={noEntry
+          ? 'Every recorded entry into a restricted zone, newest first, with the evidence attached. Filter by site, camera, zone, severity, date range and shift; acknowledge or resolve each one, and export the whole range as CSV or PDF.'
+          : 'Every AI detection, security event and system event, in one searchable record — with the evidence attached.'}
         descriptionAs="tooltip"
-        tagline={`${rangeLabel(from, to)} · ${counts.all.toLocaleString()} events${singleDay ? '' : ' · attendance events need a single-day range'}`}
+        tagline={noEntry
+          ? `Restricted-zone entries, newest first · ${rangeLabel(from, to)} · ${totalRows.toLocaleString()} ${totalRows === 1 ? 'breach' : 'breaches'}`
+          : `${rangeLabel(from, to)} · ${counts.all.toLocaleString()} events${singleDay ? '' : ' · attendance events need a single-day range'}`}
+        context={noEntry ? (
+          // The old page mixed unrecognised faces and loitering in with real
+          // intrusions. They are still recorded — they are just not breaches,
+          // and this says where they went.
+          <PageContext icon={Info}>
+            <span className="min-w-0">
+              Unrecognised faces are on{' '}
+              <Link className="font-semibold text-brand-ink underline-offset-2 hover:underline" to="/event-logs">
+                Activity history
+              </Link>
+            </span>
+          </PageContext>
+        ) : null}
         actions={
           <>
+            {noEntry ? (
+              <PageAction
+                aria-pressed={showTrends}
+                className={showTrends ? 'border-brand/50 bg-brand-soft text-brand-ink' : ''}
+                onClick={() => setShowTrends((v) => !v)}
+                title="Peak hours and the most-violated cameras, over the rows on this page"
+                type="button"
+              >
+                <BarChart3 className="h-3.5 w-3.5" strokeWidth={2} />
+                Trends
+              </PageAction>
+            ) : null}
             <PageAction
               type="button"
-              onClick={() => { aiQuery.refetch(); if (singleDay) activityQuery.refetch(); }}
+              onClick={refresh}
               title="Reload the log"
             >
               <RefreshCw className={loading ? 'h-3.5 w-3.5 animate-spin' : 'h-3.5 w-3.5'} strokeWidth={2} />
@@ -560,7 +909,7 @@ export default function EventLog() {
             </PageAction>
             {/* One primary [Export ▾]; the menu closes itself on select. */}
             <DropdownMenu modal={false}>
-              <DropdownMenuTrigger asChild disabled={!rows.length || exporting}>
+              <DropdownMenuTrigger asChild disabled={!totalRows || exporting}>
                 <PageAction
                   type="button"
                   className="border-brand bg-brand text-white shadow-sm hover:bg-brand-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 disabled:cursor-not-allowed disabled:opacity-50 data-[state=open]:bg-brand-hover"
@@ -589,13 +938,21 @@ export default function EventLog() {
         {/* Quick views on top, the fine controls beneath — one card, so the
             whole of "what am I looking at" is stated in one place. */}
         <PageCard className="flex shrink-0 flex-col gap-3 p-3">
-          <LogQuickFilters
-            view={view}
-            onView={pickView}
-            counts={counts}
-            activeViolations={counts.activeViolations}
-          />
-          <div className="border-t border-line-subtle" aria-hidden="true" />
+          {/* The quick views answer "which KIND of event am I here for", which
+              in no-entry mode is already answered — and three of the four
+              (Staff Violations, Queue Alerts, System Events) could only ever
+              show zero. */}
+          {noEntry ? null : (
+            <>
+              <LogQuickFilters
+                view={view}
+                onView={pickView}
+                counts={counts}
+                activeViolations={counts.activeViolations}
+              />
+              <div className="border-t border-line-subtle" aria-hidden="true" />
+            </>
+          )}
           <LogFilters
             from={from} to={to}
             onFrom={(v) => { setFrom(v); if (v > to) setTo(v); refilter(); }}
@@ -608,11 +965,32 @@ export default function EventLog() {
             severity={severity} onSeverity={(v) => { setSeverity(v); refilter(); }}
             query={query} onQuery={(v) => { setQuery(v); refilter(); }}
             dirty={dirty} onClear={clearFilters}
+            searchPlaceholder={noEntry ? 'Search zone or person…' : undefined}
+            shift={shift} shifts={noEntry ? SHIFT_OPTIONS : null}
+            onShift={(v) => { setShift(v); refilter(); }}
+            zone={zone} zones={noEntry ? zoneOptions : null}
+            onZone={(v) => { setZone(v); refilter(); }}
+            status={status} statuses={noEntry ? STATUS_OPTIONS : null}
+            onStatus={(v) => { setStatus(v); refilter(); }}
           />
         </PageCard>
 
+        {/* Over the rows on screen, not the whole range: the aggregate is
+            computed in the browser, and the browser only has this page. The
+            panel says "This page" so the numbers are not read as the month's. */}
+        {noEntry && showTrends ? (
+          <div className="shrink-0">
+            <BreachTrends data={trendsQuery.data} loading={trendsQuery.isFetching} />
+          </div>
+        ) : null}
+
+        {note ? (
+          <Banner onClose={() => setNote(null)} tone={note.tone}>{note.text}</Banner>
+        ) : null}
+
         {showSiteNotice ? (
           <SiteScopeNotice
+            noun={noEntry ? 'breaches' : 'event logs'}
             sites={sites}
             missingSite={missingSite}
             onPick={(v) => { pickSite(v); refilter(); }}
@@ -657,15 +1035,17 @@ export default function EventLog() {
           <PageCard className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
             <LogTable
               rows={pageRows}
-              totalRows={rows.length}
+              totalRows={totalRows}
               loading={loading}
               empty={empty}
               page={page}
               pageCount={pageCount}
-              pageSize={pageSize}
+              pageSize={noEntry ? serverPageSize : pageSize}
+              allowContinuous={!noEntry}
               onPage={setRequestedPage}
               onPageSize={(size) => { setPageSize(size); refilter(); }}
               onLoadMore={loadMore}
+              rowNoun={noEntry ? 'breaches' : 'events'}
               checked={checked}
               canAck={canAck}
               onCheck={(id) => setChecked((prev) => {
@@ -679,12 +1059,14 @@ export default function EventLog() {
                 return next;
               })}
               sortDesc={sortDesc}
-              onToggleSort={() => setSortDesc((v) => !v)}
+              onToggleSort={noEntry ? null : () => setSortDesc((v) => !v)}
               selectedId={selectedId}
               onSelect={(id) => { setSelectedId(id); setAckError(''); }}
               onLive={goLive}
               onPlayback={goPlayback}
               onAcknowledge={acknowledge}
+              onExportClip={noEntry ? exportClip : null}
+              onResolve={noEntry ? resolve : null}
             />
           </PageCard>
 
@@ -699,6 +1081,8 @@ export default function EventLog() {
                 onLive={goLive}
                 onPlayback={goPlayback}
                 onAcknowledge={acknowledge}
+                onExportClip={noEntry ? exportClip : null}
+                onResolve={noEntry ? resolve : null}
                 onTrack={goTrack}
                 acking={acking}
                 ackError={ackError}
@@ -721,6 +1105,8 @@ export default function EventLog() {
               onLive={goLive}
               onPlayback={goPlayback}
               onAcknowledge={acknowledge}
+              onExportClip={noEntry ? exportClip : null}
+              onResolve={noEntry ? resolve : null}
               onTrack={goTrack}
               acking={acking}
               ackError={ackError}
