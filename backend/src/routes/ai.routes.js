@@ -16,6 +16,7 @@ const TRACKING     = requireFeature('person_search', 'person_tracker', 'journey_
 const LIVE_TRACKER = requireFeature('person_tracker');
 const ACTIVITY     = requireFeature('activity');
 const HEADCOUNT    = requireFeature('headcount');
+const ZONES        = requireFeature('restricted_zone');
 
 const router = Router();
 
@@ -41,6 +42,19 @@ router.get   ('/snapshot', (req, res, next) => {
   return next();
 }, personTracker.getSnapshot);
 router.post  ('/events/:id/ack',           ai.acknowledgeEvent);
+
+// Restricted-zone breaches — the No-entry page's own query. /events caps at
+// 200 rows of every type and filters in the browser, so a week of breaches on
+// a busy account is unreachable through it; these two answer only
+// zone.intrusion, filter and page in SQL, and the export streams the lot.
+router.get   ('/zone-breaches',             ZONES, ai.listZoneBreaches);
+// Peak hours + most-affected cameras over the same filters, aggregated in SQL
+// so the panel describes the whole range and not the page in the browser.
+router.get   ('/zone-breaches/trends',      ZONES, ai.zoneBreachTrends);
+router.get   ('/zone-breaches/export',      ZONES, ai.exportZoneBreaches);
+// Closing a breach out. Shared state, not this browser's: the day shift has
+// to see what the night shift dealt with.
+router.post  ('/zone-breaches/:id/resolve', ZONES, ai.resolveZoneBreach);
 
 // Watchlist — individual face (proxy → smart-cam-ai)
 router.get   ('/watchlist',                FACE_READ, ai.listWatchlist);

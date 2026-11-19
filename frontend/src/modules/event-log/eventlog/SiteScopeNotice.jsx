@@ -12,8 +12,11 @@ import {
  *
  * `missingSite`: the id a link asked for that matched no site — said out loud,
  * because otherwise the link looks like it was simply ignored.
+ *
+ * `noun`: what this page is showing. The same notice sits over the No-entry
+ * table, where "event logs" would name the wrong page.
  */
-export default function SiteScopeNotice({ sites, missingSite, onPick, onDismiss }) {
+export default function SiteScopeNotice({ sites, missingSite, onPick, onDismiss, noun = 'event logs' }) {
   return (
     <div
       role="status"
@@ -24,7 +27,7 @@ export default function SiteScopeNotice({ sites, missingSite, onPick, onDismiss 
         <span className="font-semibold">
           {missingSite ? 'The site in this link was not found.' : 'No site selected.'}
         </span>
-        {' '}Showing event logs for All Sites. Select a specific site from the filter above.
+        {' '}Showing {noun} for All Sites. Select a specific site from the filter above.
       </p>
       <div className="flex shrink-0 items-center gap-2">
         <Select value="" onValueChange={onPick}>

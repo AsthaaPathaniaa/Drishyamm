@@ -122,3 +122,4 @@ $RECYCLE.BIN/
 
 # Deploy state on servers (scripts/deploy.sh)
 .deploy/
+docker-compose.override.yml

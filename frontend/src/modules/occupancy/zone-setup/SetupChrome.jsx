@@ -5,7 +5,7 @@
  * Its own file because zone mode and gate mode both need them, and neither
  * should import from the other.
  */
-import { MapPin, Users, X } from 'lucide-react';
+import { Loader2, MapPin, Users, X } from 'lucide-react';
 import { PageAction, PageHeader } from '@/core/layout/OperationsPage';
 
 /**
@@ -147,6 +147,25 @@ export function SetupGrid({ rail, center, right = null }) {
  * taking height means scrolling. The only lever that works is trimming the
  * chrome in the table above.
  */
+/**
+ * Held while the footfall service is still being asked what this camera's
+ * gate is. Shaped like the canvas it stands in for, so the panel does not
+ * resize under the operator when the picture arrives.
+ */
+export function CanvasLoading({ label = 'Loading the saved line…' }) {
+  return (
+    <div
+      className="flex aspect-video w-full items-center justify-center rounded-xl border border-line bg-surface-sunken"
+      role="status"
+    >
+      <p className="flex items-center gap-2 text-body font-semibold text-fg-subtle">
+        <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.25} />
+        {label}
+      </p>
+    </div>
+  );
+}
+
 export function CanvasFrame({ children }) {
   return <div className="mx-auto w-full xl:max-w-[calc((var(--app-dvh)-330px)*16/9)]">{children}</div>;
 }

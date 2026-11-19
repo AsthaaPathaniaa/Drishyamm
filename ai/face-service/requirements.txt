@@ -64,3 +64,10 @@ opentelemetry-exporter-otlp-proto-grpc>=1.27,<2.0
 opentelemetry-instrumentation-fastapi>=0.48b0
 opentelemetry-instrumentation-sqlalchemy>=0.48b0
 opentelemetry-instrumentation-redis>=0.48b0
+
+# tzdata — the IANA zone database for `zoneinfo`. api/routes/footfall.py maps
+# "today" onto the caller's zone (ZoneInfo("Asia/Kolkata")), which otherwise
+# depends on the OS database being present in the CUDA base image. With this
+# wheel, zoneinfo falls back to it when /usr/share/zoneinfo is missing, so a
+# slimmer base image cannot quietly send every account back to the UTC day.
+tzdata>=2024.2

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import {
   ArrowDown, ArrowUp, CheckCircle2, ChevronLeft, ChevronRight, Copy,
-  MonitorPlay, MoreVertical, PlaySquare,
+  MonitorPlay, MoreVertical, PlaySquare, Scissors, ShieldCheck,
 } from 'lucide-react';
 import { cn } from '@/core/lib/utils';
 import { Button } from '@/core/ui/button';
@@ -23,6 +23,7 @@ import { locationLabel } from '@/modules/ai-feed/aifeed/event-model';
 import {
   CONTINUOUS, PAGE_SIZES, SOURCE_META, STATUS_META, fmtTime, sourceOf, statusOf,
 } from './log-model';
+import { intruderText } from './intruders';
 import { T, TH } from '@/modules/employee-productivity/type';
 import { violationOf } from './log-query';
 
@@ -111,8 +112,9 @@ function Pagination({ page, pageCount, onPage }) {
   );
 }
 
-function RowMenu({ event, onLive, onPlayback, onAcknowledge }) {
-  const acked = statusOf(event) === 'acknowledged';
+function RowMenu({ event, onLive, onPlayback, onAcknowledge, onExportClip, onResolve }) {
+  const state = statusOf(event);
+  const acked = state !== 'new';
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -132,10 +134,22 @@ function RowMenu({ event, onLive, onPlayback, onAcknowledge }) {
         <DropdownMenuItem onSelect={() => onPlayback(event)}>
           <PlaySquare className="h-4 w-4" /> View playback
         </DropdownMenuItem>
+        {/* No-entry mode only: the recording around the breach, as a file that
+            can be attached to an incident report. */}
+        {onExportClip ? (
+          <DropdownMenuItem onSelect={() => onExportClip(event)}>
+            <Scissors className="h-4 w-4" /> Export clip
+          </DropdownMenuItem>
+        ) : null}
         <DropdownMenuSeparator />
         <DropdownMenuItem disabled={acked} onSelect={() => onAcknowledge(event)}>
           <CheckCircle2 className="h-4 w-4" /> {acked ? 'Already acknowledged' : 'Mark as acknowledged'}
         </DropdownMenuItem>
+        {onResolve ? (
+          <DropdownMenuItem disabled={state === 'resolved'} onSelect={() => onResolve(event)}>
+            <ShieldCheck className="h-4 w-4" /> {state === 'resolved' ? 'Already resolved' : 'Mark resolved'}
+          </DropdownMenuItem>
+        ) : null}
         <DropdownMenuItem onSelect={() => navigator.clipboard?.writeText(String(event.id))}>
           <Copy className="h-4 w-4" /> Copy event ID
         </DropdownMenuItem>
@@ -152,8 +166,19 @@ export default function LogTable({
   selectedId, onSelect,
   onLive, onPlayback, onAcknowledge,
   checked, onCheck, onCheckAll, canAck,
+  // No-entry mode. Omitted elsewhere, and each menu entry appears only when
+  // its handler does, so Activity history gains nothing it cannot do.
+  onExportClip, onResolve,
+  // Continuous appends to a list the BROWSER holds. On the No-entry page the
+  // server does the paging, so the row count is the whole range rather than
+  // what has been fetched, and "keep loading as you scroll" would be
+  // promising to append rows that were never asked for.
+  allowContinuous = true,
+  // What the footer counts. "186 events" on the No-entry page would name
+  // the wrong thing: every row there is a breach.
+  rowNoun = 'events',
 }) {
-  const continuous = pageSize === CONTINUOUS;
+  const continuous = allowContinuous && pageSize === CONTINUOUS;
   const first = totalRows === 0 ? 0 : continuous ? 1 : (page - 1) * pageSize + 1;
   const last = continuous ? rows.length : Math.min(page * pageSize, totalRows);
   const SortIcon = sortDesc ? ArrowDown : ArrowUp;
@@ -188,13 +213,22 @@ export default function LogTable({
                   />
                 </TableHead>
                 <TableHead className={cn(TH.left, 'w-[9.5rem]')}>
-                  <button
-                    type="button"
-                    onClick={onToggleSort}
-                    className="inline-flex items-center gap-1 font-semibold text-fg-secondary transition hover:text-fg"
-                  >
-                    Time <SortIcon className="h-3 w-3" strokeWidth={2.4} />
-                  </button>
+                  {/* Without a handler the order is the server's and fixed —
+                      a button that reversed the page in hand would label the
+                      newest 25 rows "oldest first". */}
+                  {onToggleSort ? (
+                    <button
+                      type="button"
+                      onClick={onToggleSort}
+                      className="inline-flex items-center gap-1 font-semibold text-fg-secondary transition hover:text-fg"
+                    >
+                      Time <SortIcon className="h-3 w-3" strokeWidth={2.4} />
+                    </button>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 font-semibold text-fg-secondary">
+                      Time <ArrowDown className="h-3 w-3 opacity-50" strokeWidth={2.4} />
+                    </span>
+                  )}
                 </TableHead>
                 <TableHead className={TH.left}>Event</TableHead>
                 <TableHead className={cn(TH.left, 'w-[5.5rem]')}>Type</TableHead>
@@ -210,6 +244,8 @@ export default function LogTable({
                 const status = STATUS_META[statusOf(event)];
                 const violation = violationOf(event);
                 const selected = event.id === selectedId;
+                // Zone intrusions only: who was in there. null everywhere else.
+                const people = intruderText(event);
                 return (
                   <TableRow
                     key={event.id}
@@ -225,7 +261,7 @@ export default function LogTable({
                         label={`Select ${event.title}`}
                         checked={checked.has(event.id)}
                         disabled={!canAck(event)}
-                        title={canAck(event) ? undefined : statusOf(event) === 'acknowledged'
+                        title={canAck(event) ? undefined : statusOf(event) !== 'new'
                           ? 'Already acknowledged'
                           : 'Activity-service events cannot be acknowledged from the log'}
                         onChange={() => onCheck(event.id)}
@@ -248,8 +284,17 @@ export default function LogTable({
                               </StatusBadge>
                             ) : null}
                           </div>
-                          {event.detail ? (
-                            <p className={cn('truncate', T.tdSub)}>{event.detail}</p>
+                          {/* The people come first on a breach: "who got in"
+                              is the question the row is opened to answer, and
+                              the zone is already in the Location column. */}
+                          {people || event.detail ? (
+                            <p className={cn('truncate', T.tdSub)} title={people || event.detail}>
+                              {people ? (
+                                <span className="font-semibold text-fg-secondary">{people}</span>
+                              ) : null}
+                              {people && event.detail ? <span aria-hidden="true"> · </span> : null}
+                              {event.detail}
+                            </p>
                           ) : null}
                         </div>
                       </div>
@@ -276,7 +321,14 @@ export default function LogTable({
                     </TableCell>
 
                     <TableCell>
-                      <RowMenu event={event} onLive={onLive} onPlayback={onPlayback} onAcknowledge={onAcknowledge} />
+                      <RowMenu
+                        event={event}
+                        onAcknowledge={onAcknowledge}
+                        onExportClip={onExportClip}
+                        onLive={onLive}
+                        onPlayback={onPlayback}
+                        onResolve={onResolve}
+                      />
                     </TableCell>
                   </TableRow>
                 );
@@ -296,10 +348,10 @@ export default function LogTable({
             <span className="font-semibold tabular-nums text-fg-secondary">{first}–{last}</span>
             {' '}of{' '}
             <span className="font-semibold tabular-nums text-fg-secondary">{totalRows.toLocaleString()}</span>
-            {' '}events
+            {' '}{rowNoun}
           </p>
         ) : (
-          <p className="text-small text-fg-muted">No events to show</p>
+          <p className="text-small text-fg-muted">No {rowNoun} to show</p>
         )}
         <div className="flex items-center gap-2">
           {!continuous && pageCount > 1 ? <Pagination page={page} pageCount={pageCount} onPage={onPage} /> : null}
@@ -309,7 +361,7 @@ export default function LogTable({
               {PAGE_SIZES.map((size) => (
                 <SelectItem key={size} value={String(size)}>{size} / page</SelectItem>
               ))}
-              <SelectItem value={String(CONTINUOUS)}>Continuous</SelectItem>
+              {allowContinuous ? <SelectItem value={String(CONTINUOUS)}>Continuous</SelectItem> : null}
             </SelectContent>
           </Select>
         </div>

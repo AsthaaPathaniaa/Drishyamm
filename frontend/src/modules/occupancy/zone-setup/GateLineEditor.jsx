@@ -26,17 +26,23 @@ import { flipDirection } from '../gate-model';
 import CleanFeed from './CleanFeed';
 import GateCanvas from './GateCanvas';
 import { Stat } from './GateEditor';
+import { CanvasLoading } from './SetupChrome';
+import { CHANGED_ELSEWHERE } from './gate-sync';
 import { useGateDraft } from './useGateDraft';
 
 export default function GateLineEditor({
-  monitorId, cameraName, gate, others, onSaved, onDirty, visible, footfallDown,
+  monitorId, cameraName, gate, others, onSaved, onDirty, visible, footfallDown, gatesReady = true,
 }) {
   const {
-    draft, set, baseline, known, dirty, saving, result, save,
+    draft, set, baseline, known, dirty, saving, result, save, conflict, reloadStored,
   } = useGateDraft({ gate, cameraName, onSaved });
   useEffect(() => { onDirty(dirty); }, [dirty, onDirty]);
 
   if (!visible) return null;
+  // Until the footfall list has answered, every camera looks like a camera
+  // with no gate -- so drawing the canvas now would show the default line
+  // over a saved one and invite the operator to move it.
+  if (!gatesReady) return <CanvasLoading />;
 
   const note = result?.error || result?.message;
 
@@ -51,6 +57,20 @@ export default function GateLineEditor({
         onChange={(line) => set({ line })}
         others={others}
       />
+
+      {conflict ? (
+        <p className="mt-2 flex flex-wrap items-center gap-2 text-body leading-relaxed text-warning-ink" role="alert">
+          <CircleAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
+          <span>{CHANGED_ELSEWHERE}</span>
+          <button
+            className="shrink-0 rounded-md border border-warning-line bg-surface px-2 py-0.5 text-body font-semibold text-warning-ink transition hover:bg-warning-soft"
+            onClick={reloadStored}
+            type="button"
+          >
+            Reload
+          </button>
+        </p>
+      ) : null}
 
       {!known ? (
         <p className="mt-2 flex items-start gap-1.5 text-body leading-relaxed text-warning-ink">

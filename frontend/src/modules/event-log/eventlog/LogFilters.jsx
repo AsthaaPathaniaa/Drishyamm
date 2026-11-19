@@ -23,6 +23,12 @@ import { VIOLATIONS, eventTypeLabel } from './log-query';
  * Status and Category have no select here: they arrive by deep link
  * (?status=UNACKNOWLEDGED&category=QUEUE from the dashboard) and are shown,
  * and cleared, as chips — see LogFilterChips.
+ *
+ * On the No-entry page the row changes shape rather than growing: the event
+ * type is fixed there (one type is the whole point of the page), so that slot
+ * carries the zone instead, and a shift select joins the row because a
+ * restricted zone is usually a question about a particular shift. Both are
+ * opt-in — pass `zones` / `shifts` and they appear.
  */
 
 // Borderless: the pair sits inside one bordered group, and a border on each
@@ -72,6 +78,12 @@ export default function LogFilters({
   severity, onSeverity,
   query, onQuery,
   dirty, onClear,
+  // No-entry mode (see the header): the zone takes the event type's slot, and
+  // the shift narrows every day in the range to its hours.
+  zones = null, zone = 'all', onZone,
+  shifts = null, shift = 'all', onShift,
+  statuses = null, status = 'all', onStatus,
+  searchPlaceholder = 'Search events, people, cameras…',
 }) {
   return (
     // Three blocks that wrap as blocks: dates, search, and the four selects.
@@ -90,7 +102,7 @@ export default function LogFilters({
         <input
           value={query}
           onChange={(e) => onQuery(e.target.value)}
-          placeholder="Search events, people, cameras…"
+          placeholder={searchPlaceholder}
           aria-label="Search the log"
           className="h-9 w-full rounded-lg border border-line bg-surface pl-8 pr-7 text-control text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none"
         />
@@ -130,7 +142,20 @@ export default function LogFilters({
             </SelectContent>
           </Select>
 
-          {view === 'violations' ? (
+          {zones ? (
+            // No-entry mode. A zone id, not a name: the server filters on the
+            // id the zone was drawn with, so this cannot half-match a second
+            // zone whose name happens to contain the first.
+            <Select value={zone} onValueChange={onZone}>
+              <SelectTrigger className={SELECT} aria-label="Filter by zone"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Zones</SelectItem>
+                {withCurrent(zones, zone, (id) => id).map((z) => (
+                  <SelectItem key={z.id} value={z.id}>{z.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : view === 'violations' ? (
             <Select value={violation} onValueChange={onViolation}>
               <SelectTrigger className={cn(SELECT, 'min-w-56')} aria-label="Filter by violation type"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -165,6 +190,36 @@ export default function LogFilters({
               {SEVERITIES.map((s) => <SelectItem key={s.id} value={s.id}>{s.label}</SelectItem>)}
             </SelectContent>
           </Select>
+
+          {shifts ? (
+            // Hours of the day, on every day in the range: "night shift, last
+            // 7 days" is seven nights. Applied by the server, in IST.
+            //
+            // Fixed width, not `flex-1` like its neighbours: it is the fifth
+            // control in a row that fits four, so it is the one that wraps —
+            // and a lone select stretching the full width of the second line
+            // reads as a search field, not a dropdown.
+            <Select value={shift} onValueChange={onShift}>
+              <SelectTrigger className="h-9 w-56 shrink-0 bg-surface" aria-label="Filter by shift"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {shifts.map((s) => <SelectItem key={s.id} value={s.id}>{s.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          ) : null}
+
+          {statuses ? (
+            // Open → Acknowledged → Resolved. A real control rather than a
+            // deep-link-only chip, because closing breaches out is the work
+            // this page exists for: "what is still open" is the first
+            // question of a shift, and "what did the last shift resolve" is
+            // the second. Both are server states, so both page correctly.
+            <Select value={status} onValueChange={onStatus}>
+              <SelectTrigger className="h-9 w-44 shrink-0 bg-surface" aria-label="Filter by status"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {statuses.map((s) => <SelectItem key={s.id} value={s.id}>{s.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          ) : null}
         </div>
 
         {dirty ? (

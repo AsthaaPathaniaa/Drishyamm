@@ -1,13 +1,14 @@
 import { createElement } from 'react';
 import {
   Cctv, CheckCircle2, Clock, Cpu, Gauge, MapPin, MonitorPlay, PlaySquare,
-  ScanSearch, Shapes, X,
+  ScanSearch, Shapes, ShieldCheck, Scissors, Users, X,
 } from 'lucide-react';
 import { cn } from '@/core/lib/utils';
 import TargetThumb from '@/modules/ai-feed/aifeed/TargetThumb';
 import { SeverityBadge } from '@/modules/ai-feed/aifeed/chips';
 import { EventIcon } from '@/modules/ai-feed/aifeed/icons';
 import { fmtDateTime, statusOf } from './log-model';
+import { intruderText } from './intruders';
 
 /**
  * Everything known about one event, and the three things you can do about it.
@@ -51,9 +52,17 @@ function Action({ icon, children, onClick, primary = false, disabled = false, ti
   );
 }
 
-export default function EventDetail({ event, onClose, onLive, onPlayback, onAcknowledge, onTrack, acking, ackError }) {
+export default function EventDetail({
+  event, onClose, onLive, onPlayback, onAcknowledge, onTrack, acking, ackError,
+  // No-entry mode: each appears only when its handler is passed, so the panel
+  // on Activity history is unchanged.
+  onExportClip, onResolve,
+}) {
   if (!event) return null;
-  const acked = statusOf(event) === 'acknowledged';
+  const state = statusOf(event);
+  const acked = state !== 'new';
+  // Zone intrusions only: the recognised names, then how many were not.
+  const people = intruderText(event);
   // The activity service's timeline hands out no row id, so there is nothing to
   // acknowledge against. Say that rather than offering a button that 404s.
   const ackable = !event.fromActivityService;
@@ -95,6 +104,12 @@ export default function EventDetail({ event, onClose, onLive, onPlayback, onAckn
 
         <h4 className="mt-5 text-micro font-bold uppercase tracking-[0.1em] text-fg-subtle">Event Information</h4>
         <dl className="mt-1 divide-y divide-line-subtle">
+          {/* First, because on a breach it is the record's point. A name is
+              here only because that camera recognised that face at that
+              moment — never inferred from another camera or an earlier
+              sighting. "+ N unidentified" is the rest of the people who were
+              inside and could not be matched. */}
+          <Field icon={Users} label="People">{people}</Field>
           <Field icon={Clock} label="Date & Time">{fmtDateTime(event.ts)}</Field>
           <Field icon={Cctv} label="Camera">{event.cameraName || event.monitorId || '—'}</Field>
           <Field icon={MapPin} label="Location">{event.location || '—'}</Field>
@@ -120,7 +135,26 @@ export default function EventDetail({ event, onClose, onLive, onPlayback, onAckn
           >
             {acked ? 'Acknowledged' : acking ? 'Marking…' : 'Mark as Acknowledged'}
           </Action>
-          {event.subject && !event.isUnknown ? (
+          {/* Closing a breach out acknowledges it on the server first, so a
+              resolved row is never one the server still thinks is open. */}
+          {onResolve ? (
+            <Action
+              icon={ShieldCheck}
+              onClick={() => onResolve(event)}
+              disabled={state === 'resolved' || acking}
+            >
+              {state === 'resolved' ? 'Resolved' : 'Mark Resolved'}
+            </Action>
+          ) : null}
+          {onExportClip ? (
+            <Action icon={Scissors} onClick={() => onExportClip(event)}>Export Clip</Action>
+          ) : null}
+          {/* A zone intrusion's `subject` is the ZONE, not a person, so this
+              offered "Track Switch room" — a search for a zone name in the
+              person tracker, which can only come back empty. Who was in there
+              is the People field above, and the names there are per-sighting:
+              following one across cameras is a different question. */}
+          {event.subject && !event.isUnknown && event.type !== 'zone.intrusion' ? (
             <Action icon={ScanSearch} onClick={() => onTrack(event)}>Track {event.subject}</Action>
           ) : null}
         </div>

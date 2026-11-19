@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  boxInImage, breachTrends, clipWindow, inShift, istDayStart, istHour, rangeLabel, rangeWindow, readBbox, statusOf,
+  boxInImage, clipWindow, inShift, istDayStart, istHour, rangeLabel, rangeWindow, readBbox,
 } from './breach-model.js';
 
 // 2026-09-29 15:30 IST = 10:00 UTC
@@ -48,27 +48,10 @@ test('range label names the preset and shift', () => {
   assert.equal(rangeLabel({ preset: 'today', shift: 'all' }), 'Today');
 });
 
-test('status: resolved beats acknowledged beats open', () => {
-  const ctx = { acked: new Set(['b']), resolved: { c: { at: 'x', by: 'y' } } };
-  assert.equal(statusOf({ id: 'a' }, ctx), 'open');
-  assert.equal(statusOf({ id: 'b' }, ctx), 'acknowledged');
-  assert.equal(statusOf({ id: 'd', acknowledgedAt: 'x' }, ctx), 'acknowledged');
-  assert.equal(statusOf({ id: 'c', acknowledgedAt: 'x' }, ctx), 'resolved');
-});
-
-test('trends bucket by IST hour and rank cameras', () => {
-  const at = (h) => new Date(IST_MIDNIGHT + h * 3_600_000);
-  const rows = [
-    { when: at(14), monitorId: 'm1', cameraName: 'Gate' },
-    { when: at(14.5), monitorId: 'm1', cameraName: 'Gate' },
-    { when: at(2), monitorId: 'm2', cameraName: 'Vault' },
-  ];
-  const t = breachTrends(rows);
-  assert.equal(t.peak.hour, 14);
-  assert.equal(t.peak.count, 2);
-  assert.deepEqual(t.topCameras.map((c) => [c.name, c.count]), [['Gate', 2], ['Vault', 1]]);
-  assert.equal(breachTrends([]).peak, null);
-});
+// The status rollup and the trend buckets used to live here. Both moved to
+// the server: a resolution is resolved_at / resolved_by on the event (so two
+// operators see one answer), and the trends are counted in SQL over the whole
+// filtered range. See backend/test/zoneBreachResolve.test.js.
 
 test('bbox reads arrays, corner objects and x/y/w/h', () => {
   assert.deepEqual(readBbox({ bbox: [1, 2, 3, 4] }), [1, 2, 3, 4]);
