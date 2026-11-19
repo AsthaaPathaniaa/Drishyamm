@@ -157,6 +157,81 @@ export function effectiveCapacity(room, at = new Date()) {
 const isHexId = (s) => typeof s === 'string' && /^[0-9a-f]{24}$/i.test(s.trim());
 
 /**
+ * How long a gate can go without its counter being fed before its picture is
+ * called stale. See gateStatus for what does and does not feed it.
+ */
+export const GATE_STALE_SEC = 60;
+
+export const GATE_STATUS_LABEL = {
+  counting: 'Counting',
+  off: 'Not counting',
+  stale: 'No recent picture',
+};
+
+/** "45s" / "4 min" -- how long since the counter last heard anything. */
+function describeAge(sec) {
+  if (sec < 90) return `${Math.round(sec)}s`;
+  return `${Math.round(sec / 60)} min`;
+}
+
+/**
+ * Is this gate's counter actually being fed?
+ *
+ * A gate's IN and OUT come from Postgres buckets, so a gate nothing is
+ * watching reads 0 / 0 -- indistinguishable on the page from a doorway nobody
+ * walked through. The footfall service's `session` block is what tells them
+ * apart: it is the in-memory counter, and `last_update_age_sec` is how long
+ * ago the pipeline last handed it boxes.
+ *
+ *   null age   the counter has never been fed. The AI pipeline runs a camera
+ *              only when that camera's AI flag is on and the plan includes AI
+ *              (backend aiLifecycle.service.js), so this is overwhelmingly
+ *              "AI is off for this camera".
+ *   over 60 s  nothing has reached the counter in a while.
+ *
+ * CAVEAT on that second one, which the row's wording cannot fully hide: the
+ * orchestrator calls the counter only when it HAS boxes to hand over
+ * (`if src_boxes:`, pipeline/orchestrator.py), so the age measures "since a
+ * person was last seen", not "since the last frame". An empty corridor at 3am
+ * therefore goes stale exactly like a stalled feed does. GATE_STALE_SEC above
+ * is the one knob; the AI service would have to tick the counter on every
+ * frame for this state to mean only what it says.
+ */
+export function gateStatus(camera) {
+  const session = camera?.session;
+  const raw = session?.last_update_age_sec;
+  const ageSec = raw === null || raw === undefined || !Number.isFinite(Number(raw))
+    ? null
+    : Number(raw);
+
+  if (!session || ageSec === null) {
+    return {
+      state: 'off',
+      label: GATE_STATUS_LABEL.off,
+      detail: 'AI is off for this camera',
+      counting: false,
+      ageSec: null,
+    };
+  }
+  if (ageSec > GATE_STALE_SEC) {
+    return {
+      state: 'stale',
+      label: GATE_STATUS_LABEL.stale,
+      detail: `nothing reached the counter for ${describeAge(ageSec)}`,
+      counting: false,
+      ageSec,
+    };
+  }
+  return {
+    state: 'counting',
+    label: GATE_STATUS_LABEL.counting,
+    detail: '',
+    counting: true,
+    ageSec,
+  };
+}
+
+/**
  * Footfall cameras -> line zones. `names` maps monitorId to a human label; the
  * AI service often only knows the raw monitor hex, and that is never something
  * an operator should have to read off a card.
@@ -184,6 +259,10 @@ export function buildLineZones(footfall, names = {}) {
         inside: Math.max(0, inCount - outCount),
         line,
         direction: directionFromCamera(c, line),
+        // Whether those two numbers mean anything. The matrix shows this in
+        // their place when they do not; `in`/`out` stay the real persisted
+        // totals, so the All-gates row and the dashboard tiles are unaffected.
+        status: gateStatus(c),
       };
     })
     .sort((a, b) => b.in - a.in);

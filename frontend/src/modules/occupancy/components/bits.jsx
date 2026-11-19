@@ -160,13 +160,27 @@ export function GateActivityMatrix({ zones, onConfigure }) {
                     <span className="min-w-0">{z.area} · {describeLine(z.line)} · arrow side is IN</span>
                   </p>
                 </td>
-                <td className={`${num} text-success-ink`}>
-                  <span className="inline-flex items-center gap-1"><ArrowUp className="h-3 w-3" strokeWidth={2.75} />{nfmt(z.in)}</span>
-                </td>
-                <td className={`${num} text-fg-secondary`}>
-                  <span className="inline-flex items-center gap-1"><ArrowDown className="h-3 w-3" strokeWidth={2.75} />{nfmt(z.out)}</span>
-                </td>
-                <td className={`${num} text-brand-ink`}>{nfmt(z.inside)}</td>
+                {z.status && !z.status.counting ? (
+                  /* 0 / 0 / 0 on a gate nothing is watching reads as a quiet
+                     doorway. The state goes where the numbers were, in the
+                     muted greys the rest of the page uses for "no data". */
+                  <td className="px-3 py-2 text-right text-[11px] leading-snug text-fg-muted" colSpan={3}>
+                    <span className="font-semibold">{z.status.label}</span>
+                    {z.status.detail ? (
+                      <span className="text-fg-subtle"> · {z.status.detail}</span>
+                    ) : null}
+                  </td>
+                ) : (
+                  <>
+                    <td className={`${num} text-success-ink`}>
+                      <span className="inline-flex items-center gap-1"><ArrowUp className="h-3 w-3" strokeWidth={2.75} />{nfmt(z.in)}</span>
+                    </td>
+                    <td className={`${num} text-fg-secondary`}>
+                      <span className="inline-flex items-center gap-1"><ArrowDown className="h-3 w-3" strokeWidth={2.75} />{nfmt(z.out)}</span>
+                    </td>
+                    <td className={`${num} text-brand-ink`}>{nfmt(z.inside)}</td>
+                  </>
+                )}
                 <td className="px-3 py-2">
                   <div className="flex items-center gap-2">
                     <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-muted">
