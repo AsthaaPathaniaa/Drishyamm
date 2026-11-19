@@ -120,7 +120,13 @@ async function zonesFor(userId, monitorId) {
   return entry.zonesByMonitor.get(monitorId) || [];
 }
 
-async function fireAlert(userId, monitorId, zone, count, snapB64, kind = 'intrusion') {
+/**
+ * @param {object|null} people  intrusion only: `{ names, unidentified }` as
+ *   recognised IN THE FRAME that triggered this alert. Omitted for a capacity
+ *   breach, whose count is everyone inside — including the authorised people,
+ *   whose names are deliberately not collected.
+ */
+async function fireAlert(userId, monitorId, zone, count, snapB64, kind = 'intrusion', people = null) {
   const { AIEvent } = require('../models');
   const alertEngine = require('./alertEngine');
   const isCapacity = kind === 'capacity';
@@ -148,6 +154,12 @@ async function fireAlert(userId, monitorId, zone, count, snapB64, kind = 'intrus
         zoneId: zone.id,
         zoneName: zone.name,
         count,
+        // Who, when the detector knew. `names` is absent on a capacity row and
+        // on every row written before this shipped, which is how the log and
+        // the CSV tell "nobody was recognised" from "we did not record it" and
+        // fall back to the count. Undefined keys are dropped by JSON.
+        names: people ? people.names : undefined,
+        unidentified: people ? people.unidentified : undefined,
         capacity: isCapacity ? cap : undefined,
         snapshotUri,                     // card + email resolve this via /journey/snapshot
         snapshot_uri: snapshotUri,       // (alias the UI's field too)
@@ -182,14 +194,28 @@ function handleFrame({ userId, frame }) {
       let count = 0;   // unauthorized intruders (intrusion mode)
       let total = 0;   // everyone inside the zone (capacity mode)
       let snap = null;
+      // Who the intruders were, when the detector could say. The box already
+      // carries the name for the allow-list check below; it used to be thrown
+      // away, so an alert could only ever report "1 person" and an operator had
+      // to open the snapshot to learn who walked into the switch room.
+      //
+      // ONLY this frame's own recognition. A name is never carried over from
+      // another camera or an earlier sighting: those would be inferences, and
+      // an inferred name in a security record is worse than no name.
+      const names = new Set();
+      let unidentified = 0;
       for (const box of boxes) {
         if (!Array.isArray(box.bbox) || box.bbox.length < 4) continue;
         const xPct = (((box.bbox[0] + box.bbox[2]) / 2) / frame.frameW) * 100;
         const yPct = (box.bbox[3] / frame.frameH) * 100; // feet / bottom-centre
         if (!inZone(zone, xPct, yPct)) continue;
         total += 1;
-        if (box.name && allowed.includes(String(box.name).toLowerCase())) continue; // authorized → occupies space, not an intruder
+        const name = typeof box.name === 'string' ? box.name.trim() : '';
+        if (name && allowed.includes(name.toLowerCase())) continue; // authorized → occupies space, not an intruder
         count += 1;
+        // "Unknown" is what the face stage emits for a detection it could not
+        // match — a label, not a person, so it counts as unidentified.
+        if (name && !/^unknown$/i.test(name)) names.add(name); else unidentified += 1;
         if (!snap && box.snap) snap = box.snap;
       }
 
@@ -212,14 +238,15 @@ function handleFrame({ userId, frame }) {
         st.lastInside = now;
         if (!st.firstInside) st.firstInside = now;
         const dwellMs = Math.max(CONFIRM_MS, Number(zone.dwellSec ?? 0) * 1000);
+        const people = { names: [...names], unidentified };
         if (!st.present) {
           if (now - st.firstInside >= dwellMs) {          // ENTER (confirmed)
             st.present = true; st.lastAlert = now;
-            fireAlert(userId, frame.monitorId, zone, count, snap);
+            fireAlert(userId, frame.monitorId, zone, count, snap, 'intrusion', people);
           }
         } else if (now - st.lastAlert >= ZONE_REALERT_MS) { // STAY heartbeat
           st.lastAlert = now;
-          fireAlert(userId, frame.monitorId, zone, count, snap);
+          fireAlert(userId, frame.monitorId, zone, count, snap, 'intrusion', people);
         }
       } else {
         st.firstInside = 0;

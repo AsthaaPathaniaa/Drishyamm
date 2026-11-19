@@ -87,6 +87,18 @@ module.exports = (sequelize) => {
         type: DataTypes.UUID,
         allowNull: true,
       },
+      // Closed out: a human dealt with the thing, not just saw it. Set by the
+      // No-entry page (migration 039); it lived in the operator's browser
+      // before that, so only one machine ever knew. A resolution always
+      // carries an acknowledgement with it — the API sets both.
+      resolvedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      resolvedBy: {
+        type: DataTypes.UUID,
+        allowNull: true,
+      },
     },
     {
       tableName: 'ai_events',
@@ -99,6 +111,11 @@ module.exports = (sequelize) => {
         // Alert queries (see migration 022): unacknowledged + severity filters.
         { name: 'ix_ai_events_user_severity_ts', fields: ['user_id', 'severity', 'ts'] },
         { name: 'ix_ai_events_user_ack', fields: ['user_id', 'acknowledged_at'] },
+        // One account's rows of ONE type over a date range (see migration
+        // 038): the restricted-zone breach list, its total and its CSV export.
+        { name: 'ix_ai_events_user_type_ts', fields: ['user_id', 'event_type', 'ts'] },
+        // "Still open" / "resolved" for one account (migration 039).
+        { name: 'ix_ai_events_user_resolved', fields: ['user_id', 'resolved_at'] },
       ],
     },
   );

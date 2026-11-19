@@ -1,10 +1,18 @@
 /**
- * Zone Breaches — the page's pure logic: date ranges, shifts, statuses, the
- * trend rollups and the detection box. No React, no network, so every rule
- * here is unit-tested (breach-model.test.js).
+ * Restricted zones — the page's pure logic: date ranges, shifts, the clip
+ * window and the detection box. No React, no network, so every rule here is
+ * unit-tested (breach-model.test.js).
  *
  * Time is India time throughout (IST, UTC+05:30), whatever the browser is set
  * to: a shift, an hour-of-day bucket and a "Today" all mean the site's clock.
+ *
+ * Two things USED to live here and no longer do, because the server owns
+ * them: the trend rollups (now GET /ai/zone-breaches/trends, counted in SQL
+ * over the whole filtered range rather than over the page the browser holds)
+ * and the resolution store (now resolved_at / resolved_by on the event, so a
+ * breach one operator closes out is closed for everyone).
+ *
+ * SHIFTS is the copy the server mirrors — see backend/src/utils/aiEventFilters.js.
  */
 
 const IST_MS = 330 * 60_000;
@@ -84,67 +92,6 @@ export function rangeLabel(range) {
     : (RANGE_PRESETS.find((p) => p.id === range.preset) || RANGE_PRESETS[0]).label;
   const shift = SHIFTS.find((s) => s.id === range.shift);
   return shift?.short ? `${base} · ${shift.short}` : base;
-}
-
-// ── Status ──────────────────────────────────────────────────────────────────
-// open → acknowledged (someone has seen it; the server's ack) → resolved
-// (closed out). The server records the ack; it has no resolve field yet, so a
-// resolution is kept in this browser (see resolutions below) and always sits
-// on top of a server ack.
-
-export const STATUSES = [
-  { id: 'all', label: 'All status' },
-  { id: 'open', label: 'Open' },
-  { id: 'acknowledged', label: 'Acknowledged' },
-  { id: 'resolved', label: 'Resolved' },
-];
-
-export function statusOf(evt, { acked, resolved }) {
-  const id = evt.id ?? evt._id;
-  if (evt.resolved || evt.resolvedAt || resolved[id]) return 'resolved';
-  if (evt.acknowledged || evt.acknowledgedAt || acked.has(id)) return 'acknowledged';
-  return 'open';
-}
-
-const RES_KEY = 'drishyam.zone-breach-resolutions';
-
-/** { [eventId]: { at: ISO string, by: string } } — per browser. */
-export function loadResolutions() {
-  try {
-    const v = JSON.parse(localStorage.getItem(RES_KEY) || '{}');
-    return v && typeof v === 'object' ? v : {};
-  } catch {
-    return {};
-  }
-}
-
-export function saveResolution(id, by, at = new Date()) {
-  const all = { ...loadResolutions(), [id]: { at: at.toISOString(), by } };
-  try { localStorage.setItem(RES_KEY, JSON.stringify(all)); } catch { /* storage blocked: kept for this session only */ }
-  return all;
-}
-
-// ── Trends ──────────────────────────────────────────────────────────────────
-
-/**
- * Breaches per IST hour of the day, and the cameras with the most breaches.
- * @param {{ when: Date, monitorId: string, cameraName: string }[]} rows
- */
-export function breachTrends(rows, topN = 6) {
-  const hours = Array.from({ length: 24 }, (_, h) => ({ hour: h, label: `${String(h).padStart(2, '0')}:00`, count: 0 }));
-  const cams = new Map();
-  for (const r of rows) {
-    const t = r.when?.getTime?.();
-    if (!Number.isFinite(t)) continue;
-    hours[istHour(t)].count += 1;
-    const key = r.monitorId || r.cameraName;
-    const c = cams.get(key) || { id: key, name: r.cameraName, count: 0 };
-    c.count += 1;
-    cams.set(key, c);
-  }
-  const peak = hours.reduce((best, h) => (h.count > best.count ? h : best), hours[0]);
-  const topCameras = [...cams.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)).slice(0, topN);
-  return { hours, peak: peak.count ? peak : null, topCameras, total: rows.length };
 }
 
 // ── Detection box ───────────────────────────────────────────────────────────

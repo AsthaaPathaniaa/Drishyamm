@@ -39,6 +39,57 @@ export const aiService = {
     return api.get('/ai/events/histogram', { params }).then((r) => r.data);
   },
 
+  /**
+   * Restricted-zone breaches — the No-entry areas page.
+   *
+   * Not `listEvents`: that route returns at most 200 rows of EVERY type and
+   * leaves the filtering to the browser, so on an account with a thousand
+   * newer face detections not one breach survives to the page. This one asks
+   * the database the narrow question — zone.intrusion only — and filters,
+   * sorts and PAGES on the server, so the count is the real count and a
+   * 500-breach range can be walked to its end.
+   *
+   * Params: since, until, monitorIds (comma-separated), zoneId, severity,
+   * status, shift, q, page, pageSize. Returns { data, pagination, filters }.
+   */
+  listZoneBreaches(params = {}) {
+    return api.get('/ai/zone-breaches', { params }).then((r) => r.data);
+  },
+
+  /**
+   * Peak hours and the most-affected cameras over the SAME filters, rolled up
+   * in SQL. Not derived from the rows the table is holding: that table pages
+   * on the server, so the browser has 25 of a range that may be 500.
+   */
+  zoneBreachTrends(params = {}) {
+    return api.get('/ai/zone-breaches/trends', { params }).then((r) => r.data?.data ?? null);
+  },
+
+  /**
+   * Close a breach out. Acknowledges it first if nobody had, and records who
+   * resolved it — on the server, so the next shift and the next browser see
+   * the same thing. Another organisation's id answers 404.
+   */
+  resolveZoneBreach(eventId) {
+    return api.post(`/ai/zone-breaches/${encodeURIComponent(eventId)}/resolve`).then((r) => r.data);
+  },
+
+  /**
+   * The same rows as a CSV, streamed by the server with no row cap.
+   *
+   * Through the authenticated client, not an `<a href>`: the API takes a
+   * bearer token from localStorage, which a plain browser navigation cannot
+   * send. The blob comes back here and goes to the save dialog instead.
+   */
+  zoneBreachesCsv(params = {}) {
+    return api
+      .get('/ai/zone-breaches/export', {
+        params: { ...params, format: 'csv' },
+        responseType: 'blob',
+      })
+      .then((r) => r.data);
+  },
+
   // Activity / productivity monitor (per-person phone-usage + time-in-state).
   // Proxied by the backend to the activity-monitor service.
   activityPeople() {

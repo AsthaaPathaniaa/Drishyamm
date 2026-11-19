@@ -107,7 +107,6 @@ const HeadCount       = lazy(() => import('@/modules/headcount/HeadCount'));
 const Occupancy = lazy(() => import('@/modules/occupancy/Occupancy'));
 const UsageTrends = lazy(() => import('@/modules/occupancy/UsageTrends'));
 const ZoneSetup = lazy(() => import('@/modules/occupancy/zone-setup/ZoneSetup'));
-const ZoneBreaches = lazy(() => import('@/modules/occupancy/breaches/ZoneBreaches'));
 const Reports         = lazy(() => import('@/modules/reports/ReportsHub'));
 const ReportView      = lazy(() => import('@/modules/reports/ReportView'));
 const PersonTracker   = lazy(() => import('@/modules/person-tracking/PersonTracker'));
@@ -337,7 +336,14 @@ export default function App() {
           Occupancy redirects that slug (and the older ?tab=analytics) here. */}
       <Route path="/occupancy/usage-trends" element={<ProtectedRoute>{wrap(<UsageTrends />)}</ProtectedRoute>} />
       <Route path="/occupancy/zone-setup" element={<ProtectedRoute>{wrap(<ZoneSetup />)}</ProtectedRoute>} />
-      <Route path="/occupancy/breaches"   element={<ProtectedRoute>{wrap(<ZoneBreaches />)}</ProtectedRoute>} />
+      {/* No-entry areas. The Event Log IS this page: one table, in a mode that
+          shows restricted-zone entries only (see EventLog's `mode`). The old
+          ZoneBreaches page read the same 200-row feed and mixed unrecognised
+          faces in with real intrusions. The path and its restricted_zone gate
+          are unchanged -- core/nav/entitlements.js keys off the PREFIX, so an
+          account with restricted_zone but no event_log still opens this and
+          still cannot open /event-logs. */}
+      <Route path="/occupancy/breaches"   element={<ProtectedRoute>{wrap(<EventLog mode="no-entry" />)}</ProtectedRoute>} />
       {/* Zone configuration has moved twice -- its own route, then a tab, now
           its own route again. Both old addresses still land. */}
       <Route path="/occupancy/settings" element={<ProtectedRoute><Navigate to="/occupancy/zone-setup" replace /></ProtectedRoute>} />

@@ -33,6 +33,9 @@ const { aiAuthHeader } = require('../utils/aiTenant');
 const { assertAiLicence } = require('../services/entitlements.service');
 const { AIEvent, Camera, CameraGroup } = require('../models');
 const { getClient } = require('../config/redis');
+const {
+  IST_OFFSET_MS, SHIFT_LABELS, ZONE_BREACH_EVENT_TYPE, buildZoneBreachWhere, withZoneBreachCursor,
+} = require('../utils/aiEventFilters');
 
 // AI service base URL + service token (used to authenticate proxy calls)
 const AI_BASE  = config.aiServiceUrl;
@@ -2127,8 +2130,415 @@ const activitySnapshot = asyncHandler(async (req, res) => {
   }
 });
 
+/* ─────────────────────── RESTRICTED-ZONE BREACHES ─────────────────────── */
+/**
+ * The No-entry page and the Activity history table both read
+ * `GET /api/ai/events`, which returns at most 200 rows of EVERY type and
+ * leaves the filtering to the browser. That route is shared, so it stays as
+ * it is — but it cannot answer "every breach this week": on a busy account
+ * the 200 newest events are face detections and not one intrusion survives.
+ *
+ * These two endpoints ask the narrow question in SQL instead: `ai_events`
+ * rows of type zone.intrusion only, for the calling account only, with every
+ * filter and the shift pushed into the query, a true total from the database,
+ * and an export that streams the whole range with no row cap.
+ */
+
+/** "YYYY-MM-DD HH:mm:ss" in IST — the clock the site runs on. */
+function istStamp(v) {
+  const ms = v instanceof Date ? v.getTime() : new Date(v).getTime();
+  if (!Number.isFinite(ms)) return '';
+  return new Date(ms + IST_OFFSET_MS).toISOString().replace('T', ' ').slice(0, 19);
+}
+
+// "3 persons" is what the engine writes when it has no identity to report. It
+// is a head count, already its own column, so it does not belong under Names.
+const GENERATED_NAME = /^\s*\d+\s+persons?\s*$/i;
+
+/**
+ * The identities on a breach, if the engine recognised any.
+ *
+ * `payload.names` is the zone engine's own list — the people it matched in the
+ * frame that fired the alert, and nobody else (zoneIntrusion.service). The
+ * other fields are read for rows written before that list existed.
+ */
+function namesOf(payload = {}) {
+  const raw = payload.names ?? payload.matchedNames ?? payload.matchedName
+    ?? payload.personName ?? payload.person_name;
+  const list = (Array.isArray(raw) ? raw : [raw])
+    .map((n) => (n === null || n === undefined ? '' : String(n).trim()))
+    .filter((n) => n && !GENERATED_NAME.test(n) && !/^unknown$/i.test(n));
+  return [...new Set(list)];
+}
+
+/** Intruders in the frame the detector could not put a name to. */
+function unidentifiedOf(payload = {}) {
+  const n = Number(payload.unidentified);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * The Names cell, in words: who was recognised, then how many were not.
+ *
+ * A row from before the engine recorded names has neither list nor tally, so
+ * the head count is the whole of what is known — printing an empty cell there
+ * would read as "nobody", which is the opposite of the truth. Mirrors
+ * intruderText in frontend/src/modules/event-log/eventlog/intruders.js.
+ */
+function peopleText(payload = {}) {
+  const names = namesOf(payload);
+  const unknown = unidentifiedOf(payload);
+  if (names.length && unknown) return `${names.join(', ')} + ${unknown} unidentified`;
+  if (names.length) return names.join(', ');
+  if (unknown) return `${unknown} unidentified`;
+  const count = Number(payload.count);
+  if (Number.isFinite(count) && count > 0) return `${count} ${count === 1 ? 'person' : 'people'}`;
+  return '';
+}
+
+/** One breach as the table and the CSV need it, from the stored row. */
+function breachRow(e, cameraNames) {
+  const payload = e.payload || {};
+  // The AI forwarder ships its MinIO crop inside the payload; the UI reads the
+  // top-level snapshot_uri. Lift it, exactly as listEvents does.
+  if (!e.snapshotKey && !e.snapshot_uri) {
+    e.snapshot_uri = payload.snapshotUri || payload.snapshot_uri || null;
+  }
+  const count = Number(payload.count);
+  return {
+    ...e,
+    zoneId: payload.zoneId ?? null,
+    zoneName: payload.zoneName ?? null,
+    cameraName: cameraNames[e.monitorId] || e.monitorId || 'Unknown camera',
+    peopleCount: Number.isFinite(count) ? count : null,
+    names: namesOf(payload),
+    unidentified: unidentifiedOf(payload),
+    // The one phrasing of "who was in there", so the table, the CSV and the
+    // PDF cannot word the same breach three ways.
+    peopleText: peopleText(payload),
+    // open → acknowledged → resolved, from the server. It used to be read
+    // out of the operator's own localStorage, so two people looking at the
+    // same breach saw two different states.
+    status: breachStatus(e),
+  };
+}
+
+/** The state of a breach: seen, dealt with, or neither. */
+const breachStatus = (e) => (e.resolvedAt ? 'resolved' : e.acknowledgedAt ? 'acknowledged' : 'open');
+
+/**
+ * monitorId → camera name, for this account only. With no `monitorIds` it
+ * loads every camera the account owns: an export names a camera on every row
+ * and must not turn into one lookup per row.
+ */
+async function cameraNameMap(userId, monitorIds) {
+  const where = { userId };
+  if (monitorIds) {
+    const ids = [...new Set(monitorIds.filter(Boolean))];
+    if (!ids.length) return {};
+    where.monitorId = ids;
+  }
+  const cams = await Camera.findAll({ where, attributes: ['monitorId', 'name'], raw: true });
+  const out = {};
+  for (const c of cams) if (c.monitorId) out[c.monitorId] = c.name;
+  return out;
+}
+
+/** The zone's name for the CSV header, when the export is filtered to one. */
+async function zoneLabel(userId, zoneId) {
+  try {
+    const { RestrictedZone } = require('../models');
+    const z = await RestrictedZone.findOne({
+      where: { id: zoneId, userId }, attributes: ['name'], raw: true,
+    });
+    return z?.name || null;
+  } catch (err) {
+    logger.warn('zone name lookup failed for export header', { error: err.message });
+    return null;
+  }
+}
+
+const listZoneBreaches = asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const { sequelize } = AIEvent;
+  const { where, filters } = buildZoneBreachWhere({
+    userId, query: req.query, escape: (v) => sequelize.escape(v),
+  });
+
+  const { rows, count } = await AIEvent.findAndCountAll({
+    where,
+    // id breaks ties so a page boundary inside one second is stable.
+    order: [['ts', 'DESC'], ['id', 'DESC']],
+    limit: filters.pageSize,
+    offset: (filters.page - 1) * filters.pageSize,
+  });
+
+  const cameraNames = await cameraNameMap(userId, rows.map((r) => r.monitorId));
+  const total = Number(count) || 0;
+
+  res.json({
+    success: true,
+    data: rows.map((row) => breachRow(row.toJSON(), cameraNames)),
+    pagination: {
+      page: filters.page,
+      pageSize: filters.pageSize,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / filters.pageSize)),
+      hasMore: filters.page * filters.pageSize < total,
+    },
+    filters,
+  });
+});
+
+/**
+ * POST /api/ai/zone-breaches/:id/resolve
+ *
+ * Close a breach out. Scoped to the caller's own rows and to this one event
+ * type, so a breach id from another organisation is a 404 and not a 403 —
+ * there is nothing to tell them about.
+ *
+ * Acknowledging comes first when it has not happened: "resolved but nobody
+ * ever looked at it" is not a state the log should be able to show, and the
+ * page used to have to make two calls to avoid it.
+ */
+const resolveZoneBreach = asyncHandler(async (req, res) => {
+  const row = await AIEvent.findOne({
+    where: {
+      id: req.params.id,
+      userId: req.user.id,
+      eventType: ZONE_BREACH_EVENT_TYPE,
+    },
+  });
+  if (!row) throw new AppError('Breach not found.', 404);
+
+  const now = new Date();
+  // Already resolved: say who did it and when, rather than overwriting their
+  // name with the name of whoever clicked second.
+  if (!row.resolvedAt) {
+    await row.update({
+      acknowledgedAt: row.acknowledgedAt || now,
+      acknowledgedBy: row.acknowledgedBy || req.user.id,
+      resolvedAt: now,
+      resolvedBy: req.user.id,
+    });
+  }
+
+  const cameraNames = await cameraNameMap(req.user.id, [row.monitorId]);
+  res.json({ success: true, data: breachRow(row.toJSON(), cameraNames) });
+});
+
+/**
+ * GET /api/ai/zone-breaches/trends
+ *
+ * Peak hours and the most-affected cameras over the SAME filters as the list.
+ *
+ * Computed in SQL over every matching row, not in the browser over the page
+ * it happens to be holding: the table pages on the server, so a panel built
+ * from the rows in hand described 25 breaches while the heading said 500.
+ * Hours are the IST hour of the day, the same shift to local time the shift
+ * filter applies.
+ */
+const TOP_CAMERAS = 6;
+
+const zoneBreachTrends = asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const { sequelize } = AIEvent;
+  const { where, filters } = buildZoneBreachWhere({
+    userId, query: req.query, escape: (v) => sequelize.escape(v),
+  });
+
+  const hourExpr = literal('HOUR(`ts` + INTERVAL 330 MINUTE)');
+  const [hourRows, cameraRows, total] = await Promise.all([
+    AIEvent.findAll({
+      where,
+      attributes: [[hourExpr, 'hour'], [fn('COUNT', col('id')), 'count']],
+      group: [hourExpr],
+      raw: true,
+    }),
+    AIEvent.findAll({
+      where,
+      attributes: ['monitorId', [fn('COUNT', col('id')), 'count']],
+      group: ['monitorId'],
+      order: [[literal('count'), 'DESC']],
+      limit: TOP_CAMERAS,
+      raw: true,
+    }),
+    AIEvent.count({ where }),
+  ]);
+
+  // Every hour of the day, including the quiet ones — the chart draws 24 bars
+  // and a missing hour must read as zero, not as a gap.
+  const hours = Array.from({ length: 24 }, (_, hour) => ({
+    hour,
+    label: `${String(hour).padStart(2, '0')}:00`,
+    count: 0,
+  }));
+  for (const r of hourRows) {
+    const h = Number(r.hour);
+    if (Number.isInteger(h) && h >= 0 && h < 24) hours[h].count = Number(r.count) || 0;
+  }
+  const peak = hours.reduce((best, h) => (h.count > best.count ? h : best), hours[0]);
+
+  const cameraNames = await cameraNameMap(userId, cameraRows.map((r) => r.monitorId));
+
+  res.json({
+    success: true,
+    data: {
+      total,
+      hours,
+      peak: peak.count ? peak : null,
+      topCameras: cameraRows.map((r) => ({
+        id: r.monitorId,
+        monitorId: r.monitorId,
+        name: cameraNames[r.monitorId] || r.monitorId || 'Unknown camera',
+        count: Number(r.count) || 0,
+      })),
+    },
+    filters,
+  });
+});
+
+/* ── CSV ── */
+
+const BREACH_CSV_COLUMNS = [
+  'Time (IST)', 'Zone', 'Camera', 'People count', 'Names', 'Severity', 'Status',
+];
+
+// A cell opening with one of these is a formula to Excel, Sheets and Numbers:
+// `=HYPERLINK(...)` or `@SUM(...)` in a camera name becomes executable the
+// moment an operator opens the export. Prefixing an apostrophe makes it text.
+const CSV_FORMULA_LEAD = /^[=+\-@\t\r]/;
+
+function csvCell(v) {
+  const s = v === null || v === undefined ? '' : String(v);
+  const safe = CSV_FORMULA_LEAD.test(s) ? `'${s}` : s;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
+const csvLine = (cells) => `${cells.map(csvCell).join(',')}\r\n`;
+
+/** What this file covers, so a saved export can still be read months later. */
+function breachCsvHeader(filters, cameraNames, zoneName) {
+  const from = filters.since === null ? 'earliest recorded' : istStamp(filters.since);
+  const to = filters.until === null ? 'now' : istStamp(filters.until);
+  const cameras = filters.monitorIds.length
+    ? filters.monitorIds.map((id) => cameraNames[id] || id).join(', ')
+    : 'All cameras';
+  return [
+    ['Drishyam - restricted-zone breaches'],
+    ['Date range (IST)', `${from} to ${to}`],
+    ['Shift', SHIFT_LABELS[filters.shift] || 'All shifts'],
+    ['Zone', zoneName || filters.zoneId || 'All zones'],
+    ['Cameras', cameras],
+    ['Severity', filters.severity || 'All severities'],
+    ['Status', filters.status || 'All statuses'],
+    ['Search', filters.q || '-'],
+    ['Exported (IST)', istStamp(Date.now())],
+    [],
+  ].map(csvLine).join('');
+}
+
+function csvFilename(filters) {
+  const day = (ms) => (ms === null ? 'start' : istStamp(ms).slice(0, 10));
+  return `zone-breaches_${day(filters.since)}_${filters.until === null ? 'now' : day(filters.until)}.csv`;
+}
+
+/**
+ * Write one chunk, waiting for the socket to drain when it is full. Without
+ * this the whole range would queue in the process's memory, which is the one
+ * thing an uncapped export must not do.
+ */
+function writeChunk(res, chunk) {
+  if (res.write(chunk)) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      res.removeListener('drain', done);
+      res.removeListener('close', done);
+      resolve();
+    };
+    res.once('drain', done);
+    res.once('close', done);   // client gave up: stop waiting, never hang
+  });
+}
+
+// Rows per query. Big enough that a 500-breach range is one or two round
+// trips, small enough that only this many rows are ever held at once.
+const BREACH_EXPORT_BATCH = 500;
+
+const exportZoneBreaches = asyncHandler(async (req, res) => {
+  const format = String(req.query.format || 'csv').trim().toLowerCase();
+  if (format !== 'csv') throw new AppError('Only format=csv is supported.', 400);
+
+  const userId = req.user.id;
+  const { sequelize } = AIEvent;
+  const { where, filters } = buildZoneBreachWhere({
+    userId, query: req.query, escape: (v) => sequelize.escape(v),
+  });
+
+  const cameraNames = await cameraNameMap(userId);
+  const zoneName = filters.zoneId ? await zoneLabel(userId, filters.zoneId) : null;
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${csvFilename(filters)}"`);
+  res.setHeader('Cache-Control', 'private, no-store');
+
+  // Excel reads a CSV in the machine's ANSI codepage unless it sees the BOM,
+  // which turns every non-ASCII zone or person name into mojibake.
+  await writeChunk(res, '﻿');
+  await writeChunk(res, breachCsvHeader(filters, cameraNames, zoneName));
+  await writeChunk(res, csvLine(BREACH_CSV_COLUMNS));
+
+  let cursor = null;
+  let written = 0;
+  try {
+    for (;;) {
+      if (res.destroyed || res.writableEnded) break;
+      // Keyset, not OFFSET: batch 20 of a long range costs the same as batch 1.
+      const rows = await AIEvent.findAll({
+        where: withZoneBreachCursor(where, cursor),
+        order: [['ts', 'DESC'], ['id', 'DESC']],
+        limit: BREACH_EXPORT_BATCH,
+      });
+      if (!rows.length) break;
+
+      let chunk = '';
+      for (const row of rows) {
+        const r = breachRow(row.toJSON(), cameraNames);
+        chunk += csvLine([
+          istStamp(r.ts),
+          r.zoneName || '',
+          r.cameraName,
+          r.peopleCount === null ? '' : r.peopleCount,
+          r.peopleText,
+          r.severity || '',
+          r.status,
+        ]);
+      }
+      await writeChunk(res, chunk);
+      written += rows.length;
+
+      const last = rows[rows.length - 1];
+      cursor = { ts: last.ts, id: last.id };
+      if (rows.length < BREACH_EXPORT_BATCH) break;
+    }
+    logger.info('zone-breach CSV exported', { userId, rows: written });
+  } catch (err) {
+    // The status line left with the first byte, so there is no error code to
+    // return. Say so inside the file rather than truncate it silently.
+    logger.error('zone-breach CSV export failed mid-stream', { error: err.message, written });
+    await writeChunk(res, csvLine([
+      `Export failed after ${written} rows - this file is incomplete. Please retry.`,
+    ]));
+  }
+  res.end();
+});
+
 module.exports = {
   listEvents,
+  listZoneBreaches,
+  exportZoneBreaches,
+  resolveZoneBreach,
+  zoneBreachTrends,
   eventHistogram,
   getReport,
   getSnapshotUrl,

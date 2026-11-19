@@ -76,14 +76,22 @@ export function sourceOf(evt) {
 // or it is not. A five-state triage workflow (new → acknowledged → reviewed →
 // closed, with notes) needs columns that do not exist yet; inventing them in
 // the UI would mean every status but "New" silently resetting on reload.
+// A third state exists only on the No-entry page, and only in this browser:
+// closing a breach out is a judgement a shift supervisor records, and
+// `ai_events` has no column for it yet (the ack it DOES have always happens
+// first — see breach-model's saveResolution). It is listed here so one
+// definition of "what state is this row in" serves both modes; nothing on
+// Activity history sets `resolved`, so nothing there can show it.
 export const STATUSES = [
   { id: 'new',          label: 'New',          tone: 'neutral' },
   { id: 'acknowledged', label: 'Acknowledged', tone: 'success' },
+  { id: 'resolved',     label: 'Resolved',     tone: 'success' },
 ];
 
 export const STATUS_META = Object.fromEntries(STATUSES.map((s) => [s.id, s]));
 
 export function statusOf(evt) {
+  if (evt?.resolved) return 'resolved';
   return evt?.acknowledged ? 'acknowledged' : 'new';
 }
 
