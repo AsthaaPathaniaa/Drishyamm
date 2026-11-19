@@ -29,6 +29,20 @@ const { TYPE_CATEGORY, planLabel, plural, nameList } = require('./platformEvents
 const { createCameraStatusCoalescer } = require('./platformEvents/cameraStatusCoalescer');
 
 const PLATFORM_EVENT = 'platform.event'; // bus + socket event name
+
+// Camera / NVR status events the owning account sees on its own Alerts page
+// (socket 'system.alert' to the owner + their sub-users, and GET /api/alerts/system).
+const SYSTEM_ALERT_EVENT = 'system.alert';
+const CUSTOMER_TYPES = new Set(['camera.offline', 'camera.recovered', 'nvr.down', 'nvr.recovered']);
+
+async function pushToAccount(event) {
+  try {
+    const { User } = models();
+    const subs = await User.findAll({ where: { parentUserId: event.accountId }, attributes: ['id'], raw: true });
+    const payload = { ...event, ip: undefined, actor: undefined };
+    for (const id of [event.accountId, ...subs.map((u) => String(u.id))]) ws().toUser(id, SYSTEM_ALERT_EVENT, payload);
+  } catch (_) { /* ws not running (tests, scripts) */ }
+}
 const COUNTERS_EVENT = 'platform.counters';
 const COUNTERS_MIN_MS = 5000;
 const CAMERA_BURST_MS = 3000;            // add/remove coalescing window
@@ -135,6 +149,7 @@ async function doRecord(type, opts = {}) {
   const event = shape(saved || row);
   try { emit(PLATFORM_EVENT, event); } catch (_) { /* bus never throws into us */ }
   try { ws().toOps(PLATFORM_EVENT, event); } catch (_) { /* ws not running (tests, scripts) */ }
+  if (event.accountId && CUSTOMER_TYPES.has(type)) pushToAccount(event);
   if (['signups', 'changes', 'cameras'].includes(event.category)) scheduleCounters();
   return event;
 }
@@ -502,7 +517,7 @@ function stop() {
 }
 
 module.exports = {
-  PLATFORM_EVENT, COUNTERS_EVENT,
+  PLATFORM_EVENT, COUNTERS_EVENT, SYSTEM_ALERT_EVENT, CUSTOMER_TYPES,
   record, shape, noteCameras, noteLogin, noteLoginFailure,
   actorFromUserId, accountOfUser, planLabel, plural, nameList,
   computeCounters, scheduleCounters, start, stop,

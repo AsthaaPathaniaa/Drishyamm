@@ -10,7 +10,7 @@
 // because there every tile is live.
 
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowLeft, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, Maximize2, Pencil, Tv, VideoOff,
@@ -86,7 +86,9 @@ export default function MonitorWallHome() {
   const slots = useMemo(() => pages[current] || [], [pages, current]);
   const live = useMemo(() => M.liveBudget(slots, byId), [slots, byId]);
   const [focusedId, setFocusedId] = useState(null);
-  const [expandedId, setExpandedId] = useState(null);
+  // ?cam=<id>: coming back from full screen on a single camera reopens it.
+  const [params] = useSearchParams();
+  const [expandedId, setExpandedId] = useState(() => params.get('cam') || null);
   const expanded = expandedId ? byId.get(expandedId) : null;
 
   const choose = (v) => {
@@ -132,11 +134,14 @@ export default function MonitorWallHome() {
   };
   // `fs=1` only on the full-screen route, not the pop-out window: a second
   // monitor's window is placed and sized by the operator, not by us.
-  const go = async (url, newWindow) => {
+  // A camera opened big (double-click) goes to full screen on its own,
+  // not the whole wall: the URL carries it as cam=<id>.
+  const go = async (base, newWindow, cam = expandedId) => {
+    const url = cam ? `${base}&cam=${encodeURIComponent(cam)}` : base;
     if (newWindow) window.open(url, 'drishyam-monitor-wall', 'popup,width=1280,height=720');
     else { await enterFullscreen(); navigate(url + '&fs=1'); }
   };
-  const fullScreen = (newWindow = false) => {
+  const fullScreen = (newWindow = false, cam = expandedId) => {
     if (saved) {
       // The big screen budgets its pulls per page like this one does, so the
       // only thing left to warn about is a saved wall that rotates: the
@@ -145,12 +150,12 @@ export default function MonitorWallHome() {
       const over = [...peak.entries()]
         .filter(([, n]) => n > M.NVR_PULL_LIMIT)
         .map(([g, n]) => ({ name: groupsById.get(g)?.name || 'A recorder', count: n }));
-      const run = () => go(`/monitor-wall/live?layout=${encodeURIComponent(saved.id)}&page=${current}`, newWindow);
+      const run = () => go(`/monitor-wall/live?layout=${encodeURIComponent(saved.id)}&page=${current}`, newWindow, cam);
       if (over.length) setOverLimit({ over, run });
       else run();
     } else {
       M.writeQuickDraft(layout);
-      go(`/monitor-wall/live?quick=1&page=${current}`, newWindow);
+      go(`/monitor-wall/live?quick=1&page=${current}`, newWindow, cam);
     }
   };
 
@@ -213,7 +218,6 @@ export default function MonitorWallHome() {
                 <PagerButton onClick={() => goTo(current + 1)} label="Next page (→)"><ChevronRight className="h-4 w-4" /></PagerButton>
               </span>
             )}
-            <Chip tone="success">{onlineCount} online</Chip>
             {offlineCount > 0 && <Chip tone="danger">{offlineCount} offline</Chip>}
             <span className="mx-0.5 h-5 w-px bg-line" aria-hidden />
             {manage && (
@@ -300,6 +304,15 @@ export default function MonitorWallHome() {
                 </button>
                 <span className="text-heading text-white [text-shadow:0_1px_2px_rgba(0,0,0,0.7)]">{expanded.name}</span>
               </div>
+              <button
+                type="button"
+                onClick={() => fullScreen(false)}
+                title="Full screen (F)"
+                aria-label={`Show ${expanded.name} full screen`}
+                className="absolute right-3 top-3 grid h-8 w-9 place-items-center rounded-lg border border-white/15 bg-black/60 text-white backdrop-blur hover:bg-black/80"
+              >
+                <Maximize2 className="h-4 w-4" />
+              </button>
             </div>
           ) : (
             <div
@@ -320,6 +333,7 @@ export default function MonitorWallHome() {
                   audible={!!layout.focusAudio && focusedId === id}
                   onFocus={() => setFocusedId((f) => (f === id ? null : id))}
                   onExpand={() => setExpandedId(id)}
+                  onFullscreen={() => fullScreen(false, id)}
                 />
               ))}
             </div>
@@ -329,7 +343,7 @@ export default function MonitorWallHome() {
             <div className="flex h-9 shrink-0 items-center gap-3 border-t border-white/10 bg-neutral-950 px-3.5 text-small text-white/60">
               <span className="truncate font-semibold text-white/85">{layout.name}</span>
               <span className="text-white/25">·</span>
-              <span className="tabular-nums">{liveCount} live</span>
+              <span className="inline-flex items-center gap-1.5 tabular-nums"><span aria-hidden className="h-[7px] w-[7px] rounded-full bg-success" />{liveCount} live</span>
               {previewCount > 0 && (
                 <span className="tabular-nums" title={`Each recorder serves at most ${M.NVR_PULL_LIMIT} streams; the rest of its cameras are shown as refreshing stills.`}>
                   · {previewCount} preview{previewCount === 1 ? '' : 's'} <span className="text-white/40">({busy.join(', ')} at its limit of {M.NVR_PULL_LIMIT} streams)</span>

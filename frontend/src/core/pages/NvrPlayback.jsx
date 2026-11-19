@@ -7,6 +7,7 @@ import {
   Clock, Loader2, Maximize, Pause, Play, RotateCcw, RotateCw, Video, VolumeX,
 } from 'lucide-react';
 import { cn } from '@/core/lib/utils';
+import TimeField from '@/core/ui/TimeField';
 import { PageCard } from '@/core/layout/OperationsPage';
 import { cameraHealthService } from '@/core/services/cameraHealth';
 import { aiService } from '@/core/services/ai';
@@ -119,7 +120,6 @@ export default function NvrPlayback() {
   const stageRef = useRef(null);
   const speedRef = useRef(null);
   const dateInputRef = useRef(null);
-  const fromInputRef = useRef(null);
   const hlsRef = useRef(null);
   // Fast path: the NVR's own stream over the live relay (see attachRelay).
   const relayRef = useRef(null);
@@ -863,7 +863,7 @@ export default function NvrPlayback() {
   const bufferedPct = bufferedMs != null ? pctOfWin(bufferedMs) : playedPct;
   const overlayOn = uiVisible || !playing;
   const pill = 'flex h-11 items-center gap-2 rounded-lg border border-line bg-surface px-2.5 transition hover:border-line-strong';
-  const timeInput = 'w-22 bg-transparent text-small font-medium tabular-nums text-fg outline-none [&::-webkit-calendar-picker-indicator]:hidden';
+  const timeInput = 'w-12 bg-transparent text-small font-medium tabular-nums text-fg outline-none [&::-webkit-calendar-picker-indicator]:hidden';
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
@@ -901,25 +901,19 @@ export default function NvrPlayback() {
             title="Press Enter to apply"
             className={cn(pill, 'focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/15')}
           >
-            <button type="button" tabIndex={-1} aria-hidden onClick={() => openPicker(fromInputRef.current)} className="text-fg-muted transition hover:text-fg">
-              <Clock className="h-4 w-4" />
-            </button>
-            <input
-              ref={fromInputRef}
-              type="time"
+            <TimeField
               value={draft.from}
-              onChange={(e) => setDraft((d) => ({ ...d, from: e.target.value }))}
+              onChange={(v) => setDraft((d) => ({ ...d, from: v }))}
               onKeyDown={(e) => { if (e.key === 'Enter') applyDraft({ refresh: true }); }}
-              aria-label="From time"
+              ariaLabel="From time"
               className={timeInput}
             />
             <ArrowRight className="h-3.5 w-3.5 shrink-0 text-fg-subtle" />
-            <input
-              type="time"
+            <TimeField
               value={draft.to}
-              onChange={(e) => setDraft((d) => ({ ...d, to: e.target.value }))}
+              onChange={(v) => setDraft((d) => ({ ...d, to: v }))}
               onKeyDown={(e) => { if (e.key === 'Enter') applyDraft({ refresh: true }); }}
-              aria-label="To time"
+              ariaLabel="To time"
               className={timeInput}
             />
           </div>

@@ -27,11 +27,13 @@ export default function NotificationBell() {
   const navigate = useNavigate();
   const unread = notifications.filter((n) => !n.read).length;
 
-  const toggle = () => {
-    const opening = !open;
-    setOpen(opening);
-    if (opening && unread) markAllRead();
+  // Mark read on CLOSE, not open — so the unread dots/tint are visible while
+  // the panel is open, and the "Mark all read" button has something to do.
+  const close = () => {
+    setOpen(false);
+    if (unread) markAllRead();
   };
+  const toggle = () => (open ? close() : setOpen(true));
 
   return (
     <div className="relative">
@@ -50,7 +52,7 @@ export default function NotificationBell() {
 
       {open && (
         <>
-          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div className="fixed inset-0 z-30" onClick={close} />
           <div className="absolute right-0 z-40 mt-2 w-[340px] max-w-[calc(var(--app-vw)*0.9)] overflow-hidden rounded-xl border border-line bg-popover shadow-2xl">
             <div className="flex items-center gap-2 border-b border-line px-4 py-2.5">
               <span className="text-body font-bold text-fg">Notifications</span>
@@ -79,7 +81,7 @@ export default function NotificationBell() {
                   return (
                     <button
                       key={n.id}
-                      onClick={() => { setOpen(false); if (n.to) navigate(n.to); }}
+                      onClick={() => { close(); if (n.to) navigate(n.to); }}
                       className={`flex w-full items-start gap-3 border-b border-line/60 px-4 py-2.5 text-left transition hover:bg-surface-muted/50 ${!n.read ? 'bg-primary/[0.04]' : ''}`}
                     >
                       <span className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${k.cls}`}>

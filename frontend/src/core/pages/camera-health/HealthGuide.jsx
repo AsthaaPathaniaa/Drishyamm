@@ -60,7 +60,7 @@ export function HealthGuide({ className }) {
             <DialogTitle>Reading the camera list</DialogTitle>
             <DialogDescription>
               Camera Status monitors the health, connectivity and performance of every camera in
-              real time, refreshing every ten seconds while auto refresh is on. Use Columns on the
+              one place. Use the refresh button to load the latest status. Use Columns on the
               table to choose which of these to show.
             </DialogDescription>
           </DialogHeader>

@@ -27,7 +27,6 @@ import {
   needsAttention,
 } from './camera-health/health-vocabulary';
 
-const REFRESH_INTERVAL_MS = 10_000;
 const PREFS_KEY = 'cameraHealth.tablePrefs';
 
 const EMPTY_FILTER = { siteId: ANY, groupId: ANY, statuses: new Set() };
@@ -86,7 +85,6 @@ export default function CameraHealth() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [autoRefresh, setAutoRefresh] = useState(true);
 
   // Search and the structured filters both run live. There is no staged copy
   // and no Apply button: the controls now sit in the header toolbar, and a
@@ -128,12 +126,6 @@ export default function CameraHealth() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
-
-  useEffect(() => {
-    if (!autoRefresh) return undefined;
-    const timer = setInterval(load, REFRESH_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [autoRefresh, load]);
 
   const cameras = useMemo(() => data?.cameras || [], [data]);
 
@@ -311,8 +303,6 @@ export default function CameraHealth() {
               counts={counts}
               loading={loading}
               onRefresh={load}
-              autoRefresh={autoRefresh}
-              onAutoRefreshChange={setAutoRefresh}
             />
 
             {engineDown ? (

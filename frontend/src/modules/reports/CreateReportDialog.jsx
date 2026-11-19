@@ -24,7 +24,8 @@ import {
 import { siteService } from '@/core/services/site';
 import { cameraGroupService } from '@/core/services/cameraGroup';
 import { reportService } from '@/core/services/reports';
-import { PERIODS, REPORT_TYPES, typeMeta } from './report-vocabulary';
+import { PERIODS, typeMeta } from './report-vocabulary';
+import { useReportAccess } from './report-access';
 
 const STEP = 'mb-1.5 text-micro text-fg-subtle';
 
@@ -67,7 +68,9 @@ function Toggle({ label, hint, checked, onChange }) {
   );
 }
 
-export default function CreateReportDialog({ open, onOpenChange, initialType = 'ai_events', onCreated }) {
+export default function CreateReportDialog({ open, onOpenChange, initialType: requestedType, onCreated }) {
+  const { aiOn, types: reportTypes, defaultType } = useReportAccess();
+  const initialType = reportTypes.some((t) => t.type === requestedType) ? requestedType : defaultType;
   const [type, setType] = useState(initialType);
   const [days, setDays] = useState(7);
   const [siteId, setSiteId] = useState('all');
@@ -131,7 +134,7 @@ export default function CreateReportDialog({ open, onOpenChange, initialType = '
             <Pick
               value={type}
               onChange={setType}
-              options={REPORT_TYPES.map((t) => ({ value: t.type, label: t.label.replace(' Report', '') }))}
+              options={reportTypes.map((t) => ({ value: t.type, label: t.label.replace(' Report', '') }))}
             />
           </div>
 
@@ -167,7 +170,7 @@ export default function CreateReportDialog({ open, onOpenChange, initialType = '
             </div>
           </div>
 
-          <div>
+          {aiOn && <div>
             <p className={STEP}>4 · Include</p>
             <Toggle
               label="Incidents with camera, time and duration"
@@ -179,7 +182,7 @@ export default function CreateReportDialog({ open, onOpenChange, initialType = '
               checked={include.watchlist}
               onChange={(v) => setInclude((s) => ({ ...s, watchlist: v }))}
             />
-          </div>
+          </div>}
 
           <div>
             <p className={STEP}>Name (optional)</p>

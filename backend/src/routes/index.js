@@ -8,6 +8,7 @@ const subscriptionRoutes = require('./subscription.routes');
 const streamRoutes = require('./stream.routes');
 const internalRoutes = require('./internal.routes');
 const aiRoutes = require('./ai.routes');
+const systemAlertsRoutes = require('./systemAlerts.routes');
 const occupancyRoutes = require('./occupancy.routes');
 const spaceRoutes = require('./space.routes');
 const personTrackerRoutes = require('./personTracker.routes');
@@ -41,6 +42,7 @@ router.use('/internal', internalRoutes);
 // Site relays (drishyam-site-relay.ps1) asking for NVR replays to push up.
 router.use('/edge', edgeRoutes);
 router.use('/ai', aiRoutes);
+router.use('/alerts', systemAlertsRoutes); // camera / NVR status alerts, every plan
 // Head-count history + reports (see docs/OCCUPANCY_LOGIC.md)
 router.use('/occupancy', occupancyRoutes);
 router.use('/spaces', spaceRoutes);

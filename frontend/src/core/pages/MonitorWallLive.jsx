@@ -73,7 +73,7 @@ export default function MonitorWallLive() {
   const rotating = !!layout?.rotate && pageCount > 1;
   const [paused, setPaused] = useState(false);
   const [focusedId, setFocusedId] = useState(null);
-  const [expandedId, setExpandedId] = useState(null);
+  const [expandedId, setExpandedId] = useState(() => params.get('cam') || null);
   const [isFs, setIsFs] = useState(() => !!document.fullscreenElement);
   const [fsPrompt, setFsPrompt] = useState(() => !document.fullscreenElement);
   const [stripShown, setStripShown] = useState(true);
@@ -109,10 +109,28 @@ export default function MonitorWallLive() {
   const showStrip = useCallback(() => { setStripShown(true); hideSoon(); }, [hideSoon]);
   useEffect(() => { hideSoon(); return () => clearTimeout(hideTimer.current); }, [hideSoon]);
 
+  // Latest handlers for the once-bound listeners, refreshed every render.
+  const keys = useRef({});
+  const ownFsExit = useRef(false);
+  const camFromGrid = useRef(false);
+  const [rearm, setRearm] = useState(0);
   useEffect(() => {
     const onChange = () => {
       const on = !!document.fullscreenElement;
       setIsFs(on);
+      // The browser takes Esc itself to leave full screen, so the key
+      // handler below never sees it. Treat any exit that was not our own
+      // F / button toggle as "leave the wall" and go back to the wall page.
+      if (!on && !ownFsExit.current) {
+        // A camera opened from this wall's grid: Esc goes back to the grid,
+        // and the next click or key puts the wall back in full screen.
+        if (keys.current.expandedId && camFromGrid.current) {
+          camFromGrid.current = false;
+          setExpandedId(null);
+          setRearm((n) => n + 1);
+        } else keys.current.exitWall?.();
+      }
+      ownFsExit.current = false;
       // Once the wall has actually been full screen, the prompt below has
       // done its job: from then on leaving is a choice, not something lost.
       if (on) setFsPrompt(false);
@@ -138,7 +156,8 @@ export default function MonitorWallLive() {
   const toggleFullscreen = () => {
     if (document.fullscreenElement) {
       setFsPrompt(false);
-      document.exitFullscreen().catch(() => {});
+      ownFsExit.current = true;
+      document.exitFullscreen().catch(() => { ownFsExit.current = false; });
     } else {
       goFullscreen();
     }
@@ -152,7 +171,7 @@ export default function MonitorWallLive() {
   // leave the wall, not a request to re-enter it.
   const wantFs = params.get('fs') === '1';
   useEffect(() => {
-    if (!wantFs) return undefined;
+    if (!wantFs && !rearm) return undefined;
     const cleanup = () => {
       window.removeEventListener('pointerdown', rearm);
       window.removeEventListener('keydown', rearm);
@@ -176,7 +195,7 @@ export default function MonitorWallLive() {
     window.addEventListener('pointerdown', rearm);
     window.addEventListener('keydown', rearm);
     return cleanup;
-  }, [wantFs, goFullscreen]);
+  }, [wantFs, rearm, goFullscreen]);
 
   // Leaving the wall drops every stream it opened, so the recorders aren't
   // left serving a screen nobody is looking at.
@@ -188,12 +207,16 @@ export default function MonitorWallLive() {
   // opened. In fullscreen the browser takes the first Esc itself (to leave
   // fullscreen) and the next one lands here.
   const exitWall = () => {
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    if (document.fullscreenElement) {
+      ownFsExit.current = true;
+      document.exitFullscreen().catch(() => { ownFsExit.current = false; });
+    }
     if (window.opener && !window.opener.closed) { window.close(); return; }
-    navigate('/monitor-wall');
+    // Hand the single camera back, so the wall page shows the same view.
+    const cam = keys.current.expandedId;
+    navigate(cam ? `/monitor-wall?cam=${encodeURIComponent(cam)}` : '/monitor-wall');
   };
 
-  const keys = useRef({});
   useEffect(() => {
     keys.current = { current, expandedId, goTo, toggleFullscreen, showStrip, exitWall };
   });
@@ -276,7 +299,13 @@ export default function MonitorWallLive() {
             focused={focusedId === id}
             audible={!!layout.focusAudio && focusedId === id}
             onFocus={() => setFocusedId((f) => (f === id ? null : id))}
-            onExpand={() => setExpandedId(id)}
+            onExpand={() => { camFromGrid.current = true; setExpandedId(id); }}
+            hoverOnly
+            onFullscreen={() => {
+              camFromGrid.current = true;
+              setExpandedId(id);
+              if (!document.fullscreenElement) goFullscreen();
+            }}
           />
         ))}
       </div>
@@ -394,6 +423,15 @@ export default function MonitorWallLive() {
             </button>
             <span className="text-heading text-white [text-shadow:0_1px_2px_rgba(0,0,0,0.7)]">{expanded.name}</span>
           </div>
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            data-fs-toggle
+            title={isFs ? 'Exit full screen (F)' : 'Full screen (F)'}
+            className="absolute right-3 top-3 grid h-8 w-9 place-items-center rounded-lg border border-white/15 bg-black/60 text-white backdrop-blur hover:bg-black/80"
+          >
+            {isFs ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+          </button>
         </div>
       )}
     </div>

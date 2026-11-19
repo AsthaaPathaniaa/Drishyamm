@@ -18,6 +18,8 @@ import { useCameras, useGroups } from '@/core/hooks/useQueries';
 import { siteService } from '@/core/services/site';
 import { aiService } from '@/core/services/ai';
 import api from '@/core/services/api';
+import { useAuthStore } from '@/core/store/authStore';
+import { makeEntitlement } from '@/core/nav/entitlements';
 import Sites from '@/core/pages/Sites';
 import CameraGroups from '@/core/pages/CameraGroups';
 import Cameras from '@/core/pages/Cameras';
@@ -38,7 +40,10 @@ import AiDetectionSetup from '@/core/pages/AiDetectionSetup';
  */
 export default function CameraSetup() {
   const [params, setParams] = useSearchParams();
-  const active = normalizeTab(params.get('tab'));
+  // VMS-only accounts have no AI tier, so the AI Detection tab is hidden
+  // (its API answers 403 for them) and a stale ?tab=ai-detection falls back.
+  const aiOn = makeEntitlement(useAuthStore((s) => s.user)).aiOn;
+  const active = normalizeTab(params.get('tab'), aiOn);
   const summary = useSetupSummary();
 
   // Switch tab, optionally with tab-specific filters (?status=offline from
@@ -58,15 +63,15 @@ export default function CameraSetup() {
     { id: 'sites',        label: 'Sites',        Icon: Building2, count: summary.sites },
     { id: 'devices',      label: 'Devices',      Icon: Network,   count: summary.devices },
     { id: 'cameras',      label: 'Cameras',      Icon: Camera,    count: summary.cameras },
-    { id: 'ai-detection', label: 'AI Detection', Icon: Brain,     count: summary.aiOn },
-  ]), [summary]);
+    ...(aiOn ? [{ id: 'ai-detection', label: 'AI Detection', Icon: Brain, count: summary.aiOn }] : []),
+  ]), [summary, aiOn]);
 
   return (
     <OperationsPage>
       <PageHeader
         icon={Cctv}
         title="Add cameras"
-        description="Manage sites, devices, cameras and AI detection."
+        description={aiOn ? 'Manage sites, devices, cameras and AI detection.' : 'Manage sites, devices and cameras.'}
         actions={<LicenceUsage />}
         context={<PageTabStrip tabs={tabs} active={active} onChange={setActive} />}
       />
@@ -99,8 +104,11 @@ function useSetupSummary() {
     queryFn: () => siteService.list().then((r) => r.data || []),
     staleTime: 30_000,
   });
+  // Basic-VMS accounts have no AI tier; /ai/cameras answers 403 for them.
+  const aiOn = makeEntitlement(useAuthStore((s) => s.user)).aiOn;
   const { data: ai } = useQuery({
     queryKey: ['ai-camera-settings-summary'],
+    enabled: aiOn,
     queryFn: () => aiService.listCameraAiSettings().then((p) => p.summary || {}),
     staleTime: 30_000,
     retry: false,
@@ -151,7 +159,8 @@ function LicenceUsage() {
   );
 }
 
-function normalizeTab(value) {
-  if (value === 'devices' || value === 'cameras' || value === 'ai-detection') return value;
+function normalizeTab(value, aiOn) {
+  if (value === 'devices' || value === 'cameras') return value;
+  if (value === 'ai-detection' && aiOn) return value;
   return 'sites';
 }

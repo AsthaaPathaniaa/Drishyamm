@@ -82,7 +82,8 @@ export function makeEntitlement(user) {
     if (item.optIn) return !!features && features.includes(item.feature);
     if (item.featureAny) return hasAny(item.featureAny);
     // featureOn(null, key) is true for every key but a demo one.
-    if (item.feature) return featureOn(features, item.feature);
+    // AI keys (e.g. event_log) outside an AI group still need the AI tier.
+    if (item.feature) return featureOn(features, item.feature) && (aiOn || !AI_KEYS.has(item.feature));
     return !features || !isAiGroup;
   };
 
@@ -93,6 +94,10 @@ export function makeEntitlement(user) {
 const AI_KEYS = new Set([
   'face_watchlist', 'face_detection', 'person_search', 'person_tracker', 'journey_map',
   'headcount', 'restricted_zone', 'activity', 'weapon', 'fire', 'aggression', 'anpr', 'ai_feed',
+  // Activity history only lists AI detections today (User / System sources are
+  // not recorded yet), so a VMS-only account (aiEnabled false) would only ever
+  // see an empty page. Move it out of this set once those sources exist.
+  'event_log',
 ]);
 
 /**
@@ -114,7 +119,7 @@ const ROUTE_FEATURES = [
   { prefix: '/camera-setup',                any: ['camera_setup'] },
   { prefix: '/health',                      any: ['camera_health'] },
   { prefix: '/alerts',                      any: ['alerts'] },
-  { prefix: '/event-logs',                  any: ['event_log'] },
+  { prefix: '/event-logs',                  any: ['event_log'], ai: true },
   { prefix: '/watchlist',                   any: ['face_watchlist'], ai: true },
   // The ai-analytics Face Watchlist workspace runs on faceWatchlistMockData and
   // is reached only from the Weapon / Number-plate demo pages — the real one

@@ -7,6 +7,7 @@ import {
   UsersRound, PackageX, GitBranch, Car, CarFront, Wifi, Sparkles, Mail,
 } from 'lucide-react';
 import { aiService, describe } from '@/core/services/ai';
+import { systemAlertsService, describeSystem } from '@/core/services/systemAlerts';
 import { on as onSocket, connectSocket } from '@/core/services/socket';
 import { useGroups } from '@/core/hooks/useQueries';
 import EnhanceFaceDialog from '@/core/components/EnhanceFaceDialog';
@@ -31,9 +32,10 @@ const ICONS = {
 export default function Alerts() {
   const navigate = useNavigate();
   const [events, setEvents]       = useState([]);
+  const [sysEvents, setSysEvents] = useState([]);   // camera / NVR status (every plan)
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState(null);
-  const [filter, setFilter]       = useState('all');     // all | needsReview | recognised | unknown | watchlist
+  const [filter, setFilter]       = useState('all');     // all | needsReview | system | recognised | unknown | watchlist
   const [search, setSearch]       = useState('');
   const [sortDesc, setSortDesc]   = useState(true);
   const [selected, setSelected]   = useState(null);
@@ -41,7 +43,11 @@ export default function Alerts() {
   const [recipientsOpen, setRecipientsOpen] = useState(false);
   // Email alerts is its own account switch; off = no recipients editor here.
   const user = useAuthStore((s) => s.user);
-  const emailOn = makeEntitlement(user).has('email_alerts');
+  const ent = makeEntitlement(user);
+  const emailOn = ent.has('email_alerts');
+  // AI tabs and face stats only when the account has AI (VMS-only sees camera / NVR alerts).
+  const aiOn = ent.aiOn;
+  const filters = useMemo(() => (aiOn ? FILTERS : FILTERS.filter((f) => !f.ai)), [aiOn]);
 
   // Map monitorId → { name, groupName } so events show real camera labels
   const { data: groups = [] } = useGroups();
@@ -57,7 +63,13 @@ export default function Alerts() {
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const res = await aiService.listEvents({ limit: 200 });
+      const [aiRes, sysRes] = await Promise.allSettled([
+        aiOn ? aiService.listEvents({ limit: 200 }) : Promise.resolve([]),
+        systemAlertsService.list({ limit: 200 }),
+      ]);
+      if (aiRes.status === 'rejected' && sysRes.status === 'rejected') throw aiRes.reason;
+      setSysEvents(sysRes.status === 'fulfilled' ? sysRes.value : []);
+      const res = aiRes.status === 'fulfilled' ? aiRes.value : [];
       const list = Array.isArray(res) ? res
                  : Array.isArray(res?.data)   ? res.data
                  : Array.isArray(res?.events) ? res.events
@@ -67,7 +79,7 @@ export default function Alerts() {
       setError(err?.response?.status === 401 ? 'Session expired — log in again.'
              : err?.message || 'Could not reach the server.');
     } finally { setLoading(false); }
-  }, []);
+  }, [aiOn]);
   useEffect(() => { load(); }, [load]);
 
   // ── Live socket ────────────────────────────────────────────────────────────
@@ -82,20 +94,29 @@ export default function Alerts() {
       setEvents((prev) => [evt, ...prev].slice(0, 300));
     });
   }, []);
+  useEffect(() => {
+    return onSocket('system.alert', (evt) => {
+      setSysEvents((prev) => [evt, ...prev.filter((e) => e.id !== evt.id)].slice(0, 300));
+    });
+  }, []);
 
   // ── Derived: per-event view-models, filters, grouping ─────────────────────
   const enriched = useMemo(
-    () => events.map((e) => ({ raw: e, vm: describe(e, cameras) })),
-    [events, cameras],
+    () => [
+      ...events.map((e) => ({ raw: e, vm: describe(e, cameras) })),
+      ...sysEvents.map((e) => ({ raw: { ...e, id: `sys-${e.id}` }, vm: describeSystem(e) })),
+    ],
+    [events, sysEvents, cameras],
   );
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     let list = enriched;
-    if (filter === 'needsReview') list = list.filter((it) => !it.raw.acknowledgedAt && (it.vm.tone === 'warn' || it.vm.tone === 'critical'));
-    if (filter === 'recognised')  list = list.filter((it) => it.vm.tone === 'good' && !it.vm.isUnknown);
-    if (filter === 'unknown')     list = list.filter((it) => it.vm.isUnknown);
-    if (filter === 'watchlist')   list = list.filter((it) => it.vm.tone === 'critical');
+    if (filter === 'needsReview') list = list.filter((it) => (it.vm.system ? it.vm.problem : !it.raw.acknowledgedAt && (it.vm.tone === 'warn' || it.vm.tone === 'critical')));
+    if (filter === 'system')      list = list.filter((it) => it.vm.system);
+    if (filter === 'recognised')  list = list.filter((it) => !it.vm.system && it.vm.tone === 'good' && !it.vm.isUnknown);
+    if (filter === 'unknown')     list = list.filter((it) => !it.vm.system && it.vm.isUnknown);
+    if (filter === 'watchlist')   list = list.filter((it) => !it.vm.system && it.vm.tone === 'critical');
     if (q) list = list.filter((it) =>
       (it.vm.subject || '').toLowerCase().includes(q) ||
       (it.vm.cameraLabel || '').toLowerCase().includes(q) ||
@@ -126,14 +147,19 @@ export default function Alerts() {
   // ── Stat cards (real counts) ──────────────────────────────────────────────
   const stats = useMemo(() => {
     const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
-    let today = 0, watchlist = 0, unknown = 0, recognised = 0;
+    let today = 0, watchlist = 0, unknown = 0, recognised = 0, sysProblems = 0, sysRecovered = 0, nvrDown = 0;
     for (const it of enriched) {
       if (it.vm.when >= startOfDay) today++;
+      if (it.vm.system) {
+        if (it.raw.type === 'nvr.down') nvrDown++;
+        if (it.vm.problem) sysProblems++; else sysRecovered++;
+        continue;
+      }
       if (it.vm.tone === 'critical') watchlist++;
       if (it.vm.isUnknown)            unknown++;
       else if (it.vm.tone === 'good') recognised++;
     }
-    return { today, watchlist, unknown, recognised, total: enriched.length };
+    return { today, watchlist, unknown, recognised, sysProblems, sysRecovered, nvrDown, total: enriched.length };
   }, [enriched]);
 
   return (
@@ -141,7 +167,9 @@ export default function Alerts() {
       <PageHeader
         icon={Bell}
         title="Alerts"
-        description="Everything the AI saw across your camera network — recognised faces, strangers, and watchlist alerts."
+        description={aiOn
+          ? 'Everything that needs a look: cameras going offline, recognised faces, strangers and watchlist alerts.'
+          : 'Cameras and NVRs that went offline or came back online.'}
         actions={
           <>
             {liveOk ? <StatusBadge status="live" pulse /> : <StatusBadge status="offline" />}
@@ -163,6 +191,7 @@ export default function Alerts() {
 
       <PageContent scroll className="gap-5">
       {/* Stat cards — operator-thinking labels, not technical fields */}
+      {aiOn ? (
       <MetricGrid cols={4}>
         <MetricCard label="Watchlist alerts" value={stats.watchlist.toLocaleString()} icon={ShieldAlert} tone="danger"
                     alert={stats.watchlist > 0}
@@ -178,13 +207,28 @@ export default function Alerts() {
                     sub={`${stats.total} total in window`}
                     onClick={() => setFilter('all')} active={filter === 'all'} />
       </MetricGrid>
+      ) : (
+      <MetricGrid cols={4}>
+        <MetricCard label="Went offline" value={stats.sysProblems.toLocaleString()} icon={WifiOff} tone="warning"
+                    alert={stats.sysProblems > 0} sub="camera / NVR outages"
+                    onClick={() => setFilter('needsReview')} active={filter === 'needsReview'} />
+        <MetricCard label="NVR down" value={stats.nvrDown.toLocaleString()} icon={AlertTriangle} tone="danger"
+                    alert={stats.nvrDown > 0} sub={stats.nvrDown ? 'whole recorder offline' : 'all clear'}
+                    onClick={() => setFilter('system')} active={filter === 'system'} />
+        <MetricCard label="Back online" value={stats.sysRecovered.toLocaleString()} icon={Wifi} tone="success"
+                    sub="recoveries" onClick={() => setFilter('system')} />
+        <MetricCard label="Today" value={stats.today.toLocaleString()} icon={Clock} tone="neutral"
+                    sub={`${stats.total} in the last 7 days`}
+                    onClick={() => setFilter('all')} active={filter === 'all'} />
+      </MetricGrid>
+      )}
 
       {/* Filter + search bar */}
       <PageCard className="flex shrink-0 flex-wrap items-center gap-3 p-3">
         <div className="flex items-center gap-2 px-1 text-caption font-bold uppercase tracking-wider text-fg-muted">
           <Filter className="h-3.5 w-3.5" strokeWidth={2} /> Show
         </div>
-        <PageTabs tabs={FILTERS} active={filter} onChange={setFilter} />
+        <PageTabs tabs={filters} active={filter} onChange={setFilter} />
 
         <div className="ml-auto flex items-center gap-2 min-w-[220px] w-full md:w-[300px]">
           <div className="relative flex-1">
@@ -193,7 +237,7 @@ export default function Alerts() {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Find a name or camera…"
+              placeholder={aiOn ? 'Find a name or camera…' : 'Find a camera or NVR…'}
               className="h-9 w-full rounded-lg border border-line bg-surface pl-9 pr-3 text-small focus:border-brand/50 focus:outline-none focus:ring-2 focus:ring-brand/15"
             />
           </div>
@@ -210,7 +254,7 @@ export default function Alerts() {
       ) : loading && enriched.length === 0 ? (
         <SkeletonGrid />
       ) : visible.length === 0 ? (
-        <EmptyState filter={filter} />
+        <EmptyState filter={filter} aiOn={aiOn} />
       ) : (
         <div className="space-y-6">
           {groupedSections.map(([heading, items]) => (
@@ -220,9 +264,11 @@ export default function Alerts() {
                 <span className="text-small text-fg-subtle font-mono tabular-nums">{items.length}</span>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
-                {items.map(({ raw, vm }) => (
+                {items.map(({ raw, vm }) => (vm.system ? (
+                  <SystemAlertCard key={raw.id} vm={vm} onClick={() => navigate('/health')} />
+                ) : (
                   <EventCard key={raw.id} event={raw} vm={vm} onClick={() => setSelected({ raw, vm })} />
-                ))}
+                )))}
               </div>
             </section>
           ))}
@@ -254,9 +300,10 @@ export default function Alerts() {
 const FILTERS = [
   { id: 'all',         label: 'All',              Icon: Activity },
   { id: 'needsReview', label: 'Needs review',     Icon: AlertTriangle },
-  { id: 'watchlist',   label: 'Watchlist alerts', Icon: ShieldAlert },
-  { id: 'unknown',     label: 'Strangers',        Icon: UserX },
-  { id: 'recognised',  label: 'Recognised',       Icon: UserCheck },
+  { id: 'system',      label: 'Cameras & NVRs',   Icon: WifiOff },
+  { id: 'watchlist',   label: 'Watchlist alerts', Icon: ShieldAlert, ai: true },
+  { id: 'unknown',     label: 'Strangers',        Icon: UserX,       ai: true },
+  { id: 'recognised',  label: 'Recognised',       Icon: UserCheck,   ai: true },
 ];
 
 const TONE_BG = {
@@ -277,6 +324,36 @@ const TONE_BORDER = {
   critical: 'border-danger-line',
   neutral:  'border-line',
 };
+
+// ── System alert card (camera / NVR status, no snapshot) ─────────────────────
+
+function SystemAlertCard({ vm, onClick }) {
+  const Icon = ICONS[vm.iconName] || Activity;
+  return (
+    <button
+      onClick={onClick}
+      title="Open Camera Status"
+      className="relative text-left bg-surface border border-line rounded-xl overflow-hidden hover:border-brand/40 hover:shadow-md transition-all group flex items-start gap-3 p-3 pl-4"
+    >
+      <div className="absolute top-0 left-0 bottom-0 w-1" style={{ backgroundColor: vm.theme.hex }} />
+      <div className={`shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${TONE_BG[vm.tone]} ${TONE_TEXT[vm.tone]}`}>
+        <Icon size={16} />
+      </div>
+      <div className="min-w-0 flex-1">
+        <span className={`text-micro uppercase tracking-wider font-bold px-2 py-0.5 rounded-md border ${TONE_BG[vm.tone]} ${TONE_BORDER[vm.tone]} ${TONE_TEXT[vm.tone]}`}>
+          {vm.nounWhen}
+        </span>
+        <p className={`mt-1.5 text-body font-bold line-clamp-2 ${vm.tone === 'critical' ? 'text-danger-ink' : 'text-fg'}`}>
+          {vm.title}
+        </p>
+        <p className="text-caption font-medium text-fg-muted mt-0.5">
+          {vm.when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })} · {fmtRel(vm.when)}
+        </p>
+      </div>
+      <ChevronRight size={14} className="text-fg-disabled group-hover:text-brand transition mt-1" />
+    </button>
+  );
+}
 
 // ── Event card ───────────────────────────────────────────────────────────────
 
@@ -522,19 +599,22 @@ function ErrorState({ message, onRetry }) {
   );
 }
 
-function EmptyState({ filter }) {
-  const msg = filter === 'watchlist'  ? 'No watchlist alerts. All clear.'
+function EmptyState({ filter, aiOn }) {
+  const msg = filter === 'system'     ? 'No camera or NVR outages. All clear.'
+            : filter === 'watchlist'  ? 'No watchlist alerts. All clear.'
             : filter === 'unknown'    ? 'No strangers detected.'
             : filter === 'recognised' ? 'Nobody from the gallery seen yet.'
             : filter === 'needsReview'? 'Nothing needs your attention right now.'
-            : 'No activity in the visible window.';
+            : aiOn ? 'No activity in the visible window.' : 'No camera or NVR outages in the last 7 days.';
   return (
     <div className="bg-surface rounded-xl border border-line p-12 text-center">
       <div className="w-14 h-14 mx-auto rounded-full bg-success-soft flex items-center justify-center text-success-ink mb-3">
         <CheckCircle2 size={24} />
       </div>
       <p className="text-heading font-bold text-fg">{msg}</p>
-      <p className="text-body text-fg-muted mt-1">Events appear here automatically as the AI sees activity.</p>
+      <p className="text-body text-fg-muted mt-1">{aiOn
+        ? 'Alerts appear here automatically as cameras go offline or the AI sees activity.'
+        : 'Alerts appear here automatically when a camera or NVR goes offline.'}</p>
     </div>
   );
 }
