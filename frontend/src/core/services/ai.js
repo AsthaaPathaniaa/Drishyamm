@@ -14,6 +14,19 @@
 import api from '@/core/services/api';
 import { API_BASE } from '@/core/config/endpoints';
 
+/**
+ * The browser's IANA zone, e.g. "Asia/Kolkata". `undefined` when the runtime
+ * will not say -- axios then omits the param and the server falls back to the
+ * UTC day, which is what every client got before this.
+ */
+function browserTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ── REST surface ─────────────────────────────────────────────────────────────
 
 export const aiService = {
@@ -146,8 +159,14 @@ export const aiService = {
   // The AI service exposes the live + persisted counts; the Node backend
   // proxies under /ai/footfall/*. Shapes match the AI side verbatim, so any
   // future Postgres schema change there only needs a one-line update here.
+  // `tz` decides where "today" starts in the AI service's totals. Without it
+  // the day flips at UTC midnight -- 05:30 in IST, so the night shift lands in
+  // yesterday and the operator's "today" is missing it. The browser's own zone
+  // is the right answer: it is the day the person reading the page is having.
   footfallCameras() {
-    return api.get('/ai/footfall/cameras').then((r) => r.data?.data ?? null);
+    return api
+      .get('/ai/footfall/cameras', { params: { tz: browserTimeZone() } })
+      .then((r) => r.data?.data ?? null);
   },
   // Aggregated security report for a date range (SQL-side; covers all events).
   report(params = {}) {

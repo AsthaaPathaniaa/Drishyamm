@@ -942,6 +942,10 @@ const footfallCameras = asyncHandler(async (req, res) => {
   try {
     const { data } = await axios.get(`${AI_BASE}/footfall/cameras`, {
       headers: aiOperatorHeaders(req),
+      // `tz` is the caller's IANA zone, and it decides where "today" starts
+      // upstream. Dropping it here would leave every account on the UTC day
+      // (05:30 IST), which is the whole point of the parameter.
+      params: req.query?.tz ? { tz: String(req.query.tz) } : undefined,
       timeout: 5000,
     });
     res.json({ success: true, data });
