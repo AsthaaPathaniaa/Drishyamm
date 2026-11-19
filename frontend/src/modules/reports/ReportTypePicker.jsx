@@ -10,7 +10,8 @@ import {
 } from '@/core/ui/dropdown-menu';
 import { Input } from '@/core/ui/input';
 import { BRAND_SHEEN } from '@/core/ui/tone';
-import { REPORT_TYPES, typeMeta } from './report-vocabulary';
+import { typeMeta } from './report-vocabulary';
+import { useReportAccess } from './report-access';
 
 /**
  * Which report to make — one control, searchable.
@@ -30,16 +31,17 @@ export function ReportTypePicker({ value, onChange, className }) {
   const [query, setQuery] = useState('');
   const searchRef = useRef(null);
 
+  const { types } = useReportAccess();
   const chosen = typeMeta(value);
   const ChosenIcon = chosen.icon;
 
   // Label and blurb both, so "uptime" finds Camera Health.
   const matches = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return REPORT_TYPES;
-    return REPORT_TYPES.filter((t) =>
+    if (!needle) return types;
+    return types.filter((t) =>
       `${t.label} ${t.blurb}`.toLowerCase().includes(needle));
-  }, [query]);
+  }, [query, types]);
 
   return (
     <DropdownMenu

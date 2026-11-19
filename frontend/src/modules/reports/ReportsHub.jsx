@@ -42,7 +42,8 @@ import { reportService } from '@/core/services/reports';
 import ReportPreviewDialog from './ReportPreviewDialog';
 import ReportTypePicker from './ReportTypePicker';
 import { scopeCameraCount, scopeCameraWarning } from './scope-cameras';
-import { fmtPeriod, fmtStamp, nf, PERIODS, REPORT_TYPES, typeMeta } from './report-vocabulary';
+import { fmtPeriod, fmtStamp, nf, PERIODS, typeMeta } from './report-vocabulary';
+import { useReportAccess } from './report-access';
 
 const PAGE_SIZE = 8;
 
@@ -85,7 +86,8 @@ export default function ReportsHub() {
   const [days, setDays] = useState(7);
   const [siteId, setSiteId] = useState('all');
   const [groupId, setGroupId] = useState('all');
-  const [reportType, setReportType] = useState('ai_events');
+  const { types: reportTypes, defaultType } = useReportAccess();
+  const [reportType, setReportType] = useState(defaultType);
 
   // The saved list's own filter.
   const [listType, setListType] = useState('all');
@@ -156,10 +158,10 @@ export default function ReportsHub() {
   const scopeWarning = scopeCameraWarning({ count: scopeCameras, siteId, groupId });
   const noCameras = scopeCameras === 0;
 
-  const filtersActive = days !== 7 || siteId !== 'all' || groupId !== 'all' || reportType !== 'ai_events';
+  const filtersActive = days !== 7 || siteId !== 'all' || groupId !== 'all' || reportType !== defaultType;
 
   const reset = () => {
-    setDays(7); setSiteId('all'); setGroupId('all'); setReportType('ai_events');
+    setDays(7); setSiteId('all'); setGroupId('all'); setReportType(defaultType);
   };
 
   const remove = async (row) => {
@@ -326,7 +328,7 @@ export default function ReportsHub() {
               </SelectTrigger>
               <SelectContent align="start" position="popper" side="bottom" sideOffset={8}>
                 <SelectItem value="all">All types</SelectItem>
-                {REPORT_TYPES.map((t) => <SelectItem key={t.type} value={t.type}>{t.label}</SelectItem>)}
+                {reportTypes.map((t) => <SelectItem key={t.type} value={t.type}>{t.label}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>

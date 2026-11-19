@@ -14,16 +14,17 @@ import {
   UserCheck, UserX, Video, FileBarChart, PlayCircle, SlidersHorizontal, Layers,
 } from 'lucide-react';
 
-/** The eight cards on the hub, in the order they appear. */
+/** The eight cards on the hub, in the order they appear. `ai: true` = built from AI
+ *  detections, hidden for a VMS-only account (see report-access.js). */
 export const REPORT_TYPES = [
-  { type: 'ai_events',       label: 'AI Event Report',          blurb: 'All AI detections with event details.', icon: FileBarChart },
-  { type: 'face',            label: 'Face Detection Report',    blurb: 'Recognised and unknown faces.',         icon: ScanFace },
-  { type: 'occupancy',       label: 'Crowd & Occupancy Report', blurb: 'People count and crowd density.',       icon: Users },
-  { type: 'restricted_area', label: 'Restricted Area Report',   blurb: 'Zone violations and intrusions.',       icon: AlertTriangle },
+  { type: 'ai_events',       label: 'AI Event Report',          blurb: 'All AI detections with event details.', icon: FileBarChart, ai: true },
+  { type: 'face',            label: 'Face Detection Report',    blurb: 'Recognised and unknown faces.',         icon: ScanFace, ai: true },
+  { type: 'occupancy',       label: 'Crowd & Occupancy Report', blurb: 'People count and crowd density.',       icon: Users, ai: true },
+  { type: 'restricted_area', label: 'Restricted Area Report',   blurb: 'Zone violations and intrusions.',       icon: AlertTriangle, ai: true },
   { type: 'camera_health',   label: 'Camera Health Report',     blurb: 'Camera status and uptime.',             icon: Video },
   { type: 'recording',       label: 'Recording Report',         blurb: 'Recording availability and storage.',   icon: PlayCircle },
-  { type: 'incident',        label: 'Incident Report',          blurb: 'Detailed incident summary.',            icon: Layers },
-  { type: 'custom',          label: 'Custom Report',            blurb: 'Create your own report with custom filters.', icon: SlidersHorizontal },
+  { type: 'incident',        label: 'Incident Report',          blurb: 'Detailed incident summary.',            icon: Layers, ai: true },
+  { type: 'custom',          label: 'Custom Report',            blurb: 'Create your own report with custom filters.', icon: SlidersHorizontal, ai: true },
 ];
 
 export const typeMeta = (type) => REPORT_TYPES.find((t) => t.type === type)

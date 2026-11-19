@@ -1,11 +1,11 @@
-import { useMemo, useState, useCallback } from 'react';
+import { useMemo, useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Activity, Building2, Camera, Car, Cctv, ChevronDown, ChevronRight,
   HardDrive, History, MonitorPlay, Plus, Sparkles,
   ShieldAlert, ShieldCheck,
   UserRound, UserSearch,
-  AlertTriangle, Pin, Search, Clock, Tv, Video,
+  AlertTriangle, Pin, Search, Clock, Tv, Video, Wifi, WifiOff,
 } from 'lucide-react';
 import DirectStreamPlayer from '@/core/players/DirectStreamPlayer';
 import { useDashboardStats } from '@/core/hooks/useDashboardStats';
@@ -13,6 +13,8 @@ import { useQuery } from '@tanstack/react-query';
 import { useSearchStore } from '@/core/store/searchStore';
 import { useInvestigationStore } from '@/core/store/investigationStore';
 import { aiService, describe } from '@/core/services/ai';
+import { systemAlertsService, describeSystem } from '@/core/services/systemAlerts';
+import { on as onSocket } from '@/core/services/socket';
 import { MetricCard, MetricGrid } from '@/core/ui/metric-card';
 import { useAuthStore } from '@/core/store/authStore';
 import { makeEntitlement } from '@/core/nav/entitlements';
@@ -536,6 +538,28 @@ export default function Dashboard() {
   const { has, aiOn } = makeEntitlement(user);
   const goIf         = (key, to) => (has(key) ? () => navigate(to) : undefined);
 
+  // Camera / NVR status alerts (every plan, AI or not) for the Recent Alerts card.
+  const sysAlertsQ = useQuery({
+    queryKey: ['system-alerts', 'dashboard'],
+    queryFn: () => systemAlertsService.list({ limit: 20 }),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  const refetchSys = sysAlertsQ.refetch;
+  useEffect(() => onSocket('system.alert', () => { refetchSys(); }), [refetchSys]);
+  // AI alerts and camera / NVR alerts, newest first, six rows like before.
+  const recentAlerts = useMemo(() => {
+    const ai = (stats.recentAlerts || []).map((a) => ({
+      key: `ai-${a.id}`, raw: a, system: false,
+      ts: new Date(a.ts || a.occurred_at || a.timestamp || a.createdAt).getTime() || 0,
+    }));
+    const sys = (sysAlertsQ.data || []).map((e) => ({
+      key: `sys-${e.id}`, raw: e, system: true, vm: describeSystem(e),
+      ts: new Date(e.createdAt).getTime() || 0,
+    }));
+    return [...ai, ...sys].sort((a, b) => b.ts - a.ts).slice(0, 6);
+  }, [stats.recentAlerts, sysAlertsQ.data]);
+
   const [hourRange, setHourRange] = useState(HOUR_RANGES[0]);
   const hourly = useMemo(
     () => bucketEventsByHour(stats.events || [], hourRange.daysAgo),
@@ -864,7 +888,7 @@ export default function Dashboard() {
               All
             </button>
           </div>
-          {stats.recentAlerts.length === 0 ? (
+          {recentAlerts.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 py-6 text-center text-small text-fg-subtle">
               <ShieldCheck className="h-7 w-7 text-success" />
               <span className="font-semibold text-success-ink">No active alerts</span>
@@ -872,14 +896,39 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
-              {stats.recentAlerts.map((alert) => {
+              {recentAlerts.map((item) => {
+                if (item.system) {
+                  const { vm } = item;
+                  const SysIcon = vm.problem ? WifiOff : Wifi;
+                  const tint = vm.tone === 'critical' ? 'border-danger-line bg-danger-soft/50 hover:bg-danger-soft'
+                             : vm.problem ? 'border-warning-line bg-warning-soft/50 hover:bg-warning-soft'
+                             : 'border-line bg-surface hover:bg-surface-sunken opacity-80';
+                  return (
+                    <button
+                      key={item.key}
+                      onClick={() => navigate(has('alerts') ? '/alerts' : '/health')}
+                      className={`flex w-full items-center gap-2.5 rounded-lg border p-2 text-left transition ${tint}`}
+                    >
+                      <div className="flex h-12 w-14 shrink-0 items-center justify-center rounded-md bg-surface ring-1 ring-line" style={{ color: vm.theme.hex }}>
+                        <SysIcon className="h-5 w-5" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-small font-bold text-fg">{vm.title}</p>
+                        <p className="truncate text-micro font-medium text-fg-muted">{vm.nounWhen}</p>
+                        <p className="mt-0.5 text-micro font-mono text-fg-muted">{fmtRel(item.raw.createdAt)}</p>
+                      </div>
+                      {vm.problem && <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${vm.tone === 'critical' ? 'animate-pulse bg-danger' : 'bg-warning'}`} />}
+                    </button>
+                  );
+                }
+                const alert = item.raw;
                 // Same view-model the Alerts page uses, so an event is worded
                 // and coloured identically in both places.
                 const vm = describe(alert, stats.cameraLabels);
                 const critical = vm.tone === 'critical';
                 return (
                   <button
-                    key={alert.id}
+                    key={item.key}
                     onClick={() => navigate('/alerts')}
                     className={`flex w-full items-center gap-2.5 rounded-lg border p-2 text-left transition ${
                       critical

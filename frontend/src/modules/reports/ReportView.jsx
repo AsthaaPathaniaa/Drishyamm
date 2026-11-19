@@ -27,6 +27,7 @@ import { OperationsPage, PageHeader, PageContent } from '@/core/layout/Operation
 import { Button } from '@/core/ui/button';
 import { reportService } from '@/core/services/reports';
 import ReportBody from './ReportBody';
+import { useReportAccess } from './report-access';
 import { fmtPeriod, fmtWhen, nf, typeMeta } from './report-vocabulary';
 
 export default function ReportView() {
@@ -41,7 +42,10 @@ export default function ReportView() {
   const [error, setError] = useState('');
 
   const preview = !id;
-  const type = params.get('type') || 'ai_events';
+  const { types: allowedTypes, defaultType } = useReportAccess();
+  const askedType = params.get('type');
+  // A VMS-only account opening an AI report link falls back to Camera Health.
+  const type = askedType && allowedTypes.some((t) => t.type === askedType) ? askedType : defaultType;
   const days = Number(params.get('days')) || 7;
   const siteId = params.get('siteId') || undefined;
   const groupId = params.get('groupId') || undefined;
