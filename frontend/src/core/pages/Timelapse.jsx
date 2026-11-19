@@ -5,6 +5,7 @@ import {
   Loader2, Maximize, Pause, Play, RotateCcw, RotateCw, Volume2, VolumeX,
 } from 'lucide-react';
 import { cn } from '@/core/lib/utils';
+import TimeField from '@/core/ui/TimeField';
 import { PageCard } from '@/core/layout/OperationsPage';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger,
@@ -101,7 +102,6 @@ export default function Timelapse() {
   const draftEnd = atTime(day, to);
   const rangeProblem = !from || !to ? 'Choose a start and end time.' : draftEnd <= draftStart ? 'End time must be after start time.' : null;
   const dateInputRef = useRef(null);
-  const fromInputRef = useRef(null);
 
   // ── Generated timelapse ──────────────────────────────────────────────────
   const [plan, setPlan] = useState(null);     // { id, groupId, monitorId, day, start, end, ratio, recs }
@@ -142,7 +142,7 @@ export default function Timelapse() {
   const clips = useMemo(() => (plan ? clipsInRange(allClips, plan.start, plan.end) : []), [allClips, plan]);
 
   const pill = 'flex h-11 items-center gap-2 rounded-lg border border-line bg-surface px-3 transition hover:border-line-strong';
-  const timeInput = 'w-22 bg-transparent text-small font-medium tabular-nums text-fg outline-none [&::-webkit-calendar-picker-indicator]:hidden';
+  const timeInput = 'w-12 bg-transparent text-small font-medium tabular-nums text-fg outline-none [&::-webkit-calendar-picker-indicator]:hidden';
   const rangeHours = rangeProblem ? null : draftEnd - draftStart;
 
   return (
@@ -178,23 +178,17 @@ export default function Timelapse() {
           </div>
 
           <div className={cn(pill, 'w-full sm:w-auto focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/15')}>
-            <button type="button" tabIndex={-1} aria-hidden onClick={() => openPicker(fromInputRef.current)} className="text-fg-muted transition hover:text-fg">
-              <Clock className="h-4 w-4" />
-            </button>
-            <input
-              ref={fromInputRef}
-              type="time"
+            <TimeField
               value={from}
-              onChange={(e) => setFrom(e.target.value)}
-              aria-label="Start time"
+              onChange={(v) => setFrom(v)}
+              ariaLabel="Start time"
               className={timeInput}
             />
             <ArrowRight className="h-3.5 w-3.5 shrink-0 text-fg-subtle" />
-            <input
-              type="time"
+            <TimeField
               value={to}
-              onChange={(e) => setTo(e.target.value)}
-              aria-label="End time"
+              onChange={(v) => setTo(v)}
+              ariaLabel="End time"
               className={timeInput}
             />
           </div>

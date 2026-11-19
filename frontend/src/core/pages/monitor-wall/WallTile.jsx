@@ -12,7 +12,7 @@ import { playerQuality } from '@/core/lib/utils';
 import { useSnapshot } from '@/core/hooks/useSnapshot';
 import { NVR_PULL_LIMIT, lastSeen, pad2 } from './model';
 
-export function WallTile({ slot, monitorId, camera, still, focused, audible, onFocus, onExpand }) {
+export function WallTile({ slot, monitorId, camera, still, focused, audible, onFocus, onExpand, onFullscreen, hoverOnly }) {
   if (!monitorId) {
     return <div className="grid place-items-center bg-neutral-950 text-body text-white/25">Slot {pad2(slot + 1)} · no camera</div>;
   }
@@ -50,16 +50,18 @@ export function WallTile({ slot, monitorId, camera, still, focused, audible, onF
           className="absolute inset-0 h-full w-full"
         />
       )}
-      {/* Full-screen button — the same as double-clicking the tile, made
-          visible. Shows on hover (always on touch screens, which can't hover). */}
-      {onExpand && (
+      {/* Full-screen button: this one camera, browser full screen. Always
+          shown (brighter on hover), or only on hover with hoverOnly - touch
+          screens can't hover, so they always see it. Falls back to expand. */}
+      {(onFullscreen || onExpand) && (
         <button
           type="button"
-          onClick={(e) => { e.stopPropagation(); onExpand(); }}
+          data-fs-toggle
+          onClick={(e) => { e.stopPropagation(); (onFullscreen || onExpand)(); }}
           onDoubleClick={(e) => e.stopPropagation()}
           title="Full screen"
           aria-label={`Show ${camera.name} full screen`}
-          className="absolute right-2 top-2 z-10 grid h-8 w-8 place-items-center rounded-md border border-white/15 bg-black/55 text-white opacity-0 backdrop-blur-sm transition hover:bg-black/75 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+          className={`absolute right-2 top-2 z-10 grid h-8 w-8 place-items-center rounded-md border border-white/15 bg-black/55 text-white backdrop-blur-sm transition hover:bg-black/75 hover:opacity-100 focus-visible:opacity-100 group-hover:opacity-100 ${hoverOnly ? 'opacity-0 [@media(hover:none)]:opacity-100' : 'opacity-70'}`}
         >
           <Maximize2 className="h-4 w-4" />
         </button>
