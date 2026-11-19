@@ -627,15 +627,27 @@ class StreamOrchestrator:
             # from the UI starts counting without restarting the camera.
             ff_cfg = get_footfall_registry().get_config(self._ctx.camera_id)
             if ff_cfg is not None and ff_cfg.enabled:
-                src_boxes: list[tuple[float, float, float, float, float]] | None = None
+                # 5-tuples from YOLO, 6-tuples (with the face track id) from
+                # the face tracker. The registry takes either.
+                src_boxes: list[tuple] | None = None
                 body_source = settings.pipeline_person_detection_enabled and get_person_detector() is not None
                 if body_source:
                     src_boxes = person_boxes_this_frame
                 elif tracked:
-                    # Build (x1,y1,x2,y2,score) tuples from the face tracker.
-                    # Using tracked.observation.bbox keeps the source of
-                    # truth one place; the registry will re-track centroids
-                    # internally (it doesn't trust external track IDs).
+                    # Build (x1,y1,x2,y2,score,track_id) tuples from the face
+                    # tracker. Using tracked.observation.bbox keeps the source
+                    # of truth one place.
+                    #
+                    # The track_id is the point of the tuple. We are fed only
+                    # on frames that produced detections -- about once a second
+                    # under attention scheduling -- and a walking person moves
+                    # hundreds of pixels in that gap, so the registry's own
+                    # centroid matching used to start a new track on every
+                    # update and never reach its 3-frame minimum: a gate that
+                    # counted nothing. This tracker has already solved the
+                    # association properly (Kalman + Hungarian, ids that
+                    # survive a miss), so we hand the answer over instead of
+                    # making it guess again from one point.
                     src_boxes = []
                     for tf in tracked:
                         try:
@@ -643,6 +655,7 @@ class StreamOrchestrator:
                             src_boxes.append((
                                 float(x1), float(y1), float(x2), float(y2),
                                 float(tf.observation.det_score or 0.5),
+                                tf.track.track_id,
                             ))
                         except Exception:
                             continue

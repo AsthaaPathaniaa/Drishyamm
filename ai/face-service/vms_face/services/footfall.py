@@ -4,8 +4,10 @@ This service does two things:
 
   1. **Frame-by-frame**: when the orchestrator has fresh person (or face)
      boxes for a camera, it calls `registry.update(camera, w, h, boxes)`.
-     The per-camera tracker assigns stable IDs via simple Euclidean
-     distance matching, detects when each tracked person's anchor point
+     Each box may carry the caller's own track id, which is what the face
+     pipeline passes (its SORT tracker already knows who is who); boxes
+     without one are matched to a track by distance. Either way the counter
+     detects when each tracked person's anchor point
      crosses the operator's counting line -- a segment a->b at any angle --
      and increments either IN or OUT (which side is IN is up to the
      operator). Optional fall heuristic: bbox width > 1.2 * height triggers
@@ -20,7 +22,11 @@ This service does two things:
 Design choices worth remembering:
 
 - The tracker is process-local. If you scale to multiple orchestrator
-  processes per camera (you shouldn't), centroids won't match across them.
+  processes per camera (you shouldn't), neither centroids nor caller track
+  ids will match across them.
+- Prefer passing a track id. Centroid matching has to guess from a single
+  point, and the guess gets harder the slower the counter is fed -- which
+  attention scheduling made much slower than when this was written.
 - The line is a SEGMENT, not a full-width height: a crossing counts only
   when the step that changed sides passes between a and b (plus half a box
   of slack at each end), so a short line across one doorway ignores people
@@ -64,10 +70,32 @@ log = get_logger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────
 
-# Centroid-match radius (pixels). Centroids closer than this between
-# consecutive frames are considered the same tracked person. 60 px works
-# well for 1080p at 8 fps — at 25 fps you could shrink it.
-_TRACK_MATCH_RADIUS_PX = 60.0
+# ── Matching an observation to a track ───────────────────────────────────
+#
+# Preferred: the id the caller already has. The face pipeline tracks with
+# SORT (Kalman + Hungarian, services/face_tracker.py) and hands us its
+# track_id, which survives a detector miss and an occlusion. Nothing we
+# could compute from one centroid competes with that.
+#
+# Fallback, for a caller with no id (the YOLO body path): nearest centroid
+# within a radius. It used to be a flat 60 px "for 1080p at 8 fps", which
+# quietly stopped working once attention scheduling landed: at target_fps 4
+# with attention_latched_every_n 4 the counter is fed about ONCE A SECOND,
+# and a walking person covers far more than 60 px in that second. Every
+# update therefore started a fresh track, no track ever reached
+# _MIN_TRACK_FRAMES, and the gate counted nobody while looking healthy.
+#
+# So the radius is now how far the person could plausibly have got:
+#   * box height -- perspective. A near (big) box means the same real step
+#     is more pixels. Calibrated on FACE boxes, which are 40-80 px tall.
+#   * seconds since that track was last seen -- the gap we are bridging,
+#     which is what actually changed under us.
+# Floored at the old 60 px (a still person, a tiny box) and capped, because
+# past a point "could have walked there" stops being evidence of identity.
+_RADIUS_MIN_PX = 60.0
+_RADIUS_BOX_H_MULT = 2.0
+_RADIUS_TRAVEL_PX_PER_SEC = 300.0
+_RADIUS_MAX_PX = 250.0
 
 # How long an unmatched track stays alive before we forget it. Bumps
 # resilience to one-frame detector misses (person walks behind another).
@@ -283,8 +311,10 @@ class _CameraState:
     # camera_id is the dict key, but we also carry the tenant for flush.
     tenant_id: uuid.UUID
     config: FootfallConfig
+    # Numbering for tracks WE opened (an observation with no caller id).
     next_id: int = 1
-    tracks: dict[int, _Track] = field(default_factory=dict)
+    # Keyed either by one of those ints, or by _ext_key(caller's track id).
+    tracks: dict[Any, _Track] = field(default_factory=dict)
     # Pending deltas: counts accumulated since the last flush, keyed by the
     # minute they happened in. We accumulate per-minute so a late flush
     # doesn't merge crossings from 10:59:58 into the 11:00 bucket.
@@ -295,6 +325,20 @@ class _CameraState:
     live_out: int = 0
     live_falls: int = 0
     last_update_ts: float = 0.0
+
+
+def _ext_key(track_id: Any) -> tuple[str, Any]:
+    """Key for a track the CALLER identified. Tupled so a caller's id can
+    never collide with one of our own internally-numbered tracks."""
+    return ("ext", track_id)
+
+
+def _match_radius(box_h: float, since_last: float) -> float:
+    """How far from its last position an unidentified observation may be and
+    still be the same person. See the constants above for the reasoning."""
+    gap = min(max(since_last, 0.0), _TRACK_TTL_SEC)
+    r = _RADIUS_BOX_H_MULT * box_h + _RADIUS_TRAVEL_PX_PER_SEC * gap
+    return min(_RADIUS_MAX_PX, max(_RADIUS_MIN_PX, r))
 
 
 def _side_of(distance: float, box_h: float) -> int:
@@ -358,9 +402,40 @@ class FootfallRegistry:
     ) -> None:
         """Called when an orchestrator starts (or when the operator saves
         new footfall settings via the API). Creating fresh state per camera
-        means stale tracks from a previous config don't carry over."""
+        means stale tracks from a previous config don't carry over.
+
+        The COUNTS, though, are not stale -- they already happened. Replacing
+        the state used to throw away whatever had not reached Postgres yet, so
+        an operator nudging a gate's line at a busy doorway silently lost up to
+        _FLUSH_INTERVAL_SEC of real crossings, and the busier the gate the more
+        there was to lose. The pending buckets are carried out of the old state
+        and written before it is forgotten.
+
+        A flush failure is logged, not raised: by the time this runs the new
+        config is already committed, and failing here would report "not saved"
+        about a gate that was saved.
+        """
         async with self._lock:
+            previous = self._cameras.get(camera_id)
+            # Detach the deltas under the lock, write them outside it -- the
+            # same shape remove_camera uses, so no caller is held up behind a
+            # Postgres round-trip.
+            pending = previous.pending if previous is not None else None
+            previous_tenant = previous.tenant_id if previous is not None else tenant_id
+            if previous is not None:
+                previous.pending = {}
             self._cameras[camera_id] = _CameraState(tenant_id=tenant_id, config=config)
+
+        if pending:
+            try:
+                await self._write_buckets(camera_id, previous_tenant, pending)
+            except Exception as e:
+                log.warning(
+                    "footfall: could not flush counts before reconfiguring",
+                    camera_id=str(camera_id),
+                    buckets=len(pending),
+                    err=str(e),
+                )
 
     async def remove_camera(self, camera_id: uuid.UUID) -> None:
         async with self._lock:
@@ -385,8 +460,19 @@ class FootfallRegistry:
         anchor: str = "center",
     ) -> None:
         """Synchronous, non-blocking (no I/O). Safe to call from the
-        orchestrator's hot loop. `persons` is (x1, y1, x2, y2, score) per
-        detection, in pixels of a frame_w x frame_h picture.
+        orchestrator's hot loop.
+
+        `persons` is one tuple per detection, in pixels of a frame_w x
+        frame_h picture:
+
+            (x1, y1, x2, y2, score)             -- as before
+            (x1, y1, x2, y2, score, track_id)   -- with the caller's own id
+
+        The sixth field is optional, so the body/YOLO path and any older
+        caller keep working unchanged. When it IS there we match on it and
+        skip centroid guessing entirely: the face pipeline's ids come from a
+        Kalman tracker that has the whole frame history, and we have one
+        point. `track_id` is opaque -- any hashable value.
 
         `anchor` is the point of each box tested against the line: "feet"
         (bottom-centre) for whole-body boxes, so the line is drawn on the
@@ -406,49 +492,67 @@ class FootfallRegistry:
             bucket, {"in": 0, "out": 0, "falls": 0},
         )
 
-        # Build (px, py, w, h) -- the anchor point and box size -- per detection.
+        # Build (px, py, w, h, track_id) -- the anchor point, the box size and
+        # whoever the caller says this is -- per detection.
         new_obs = []
         for box in persons:
             try:
-                x1, y1, x2, y2, _score = box
-            except (TypeError, ValueError):
+                x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+                ext_id = box[5] if len(box) > 5 else None
+            except (TypeError, ValueError, IndexError):
                 continue
-            w, h = float(x2 - x1), float(y2 - y1)
+            w, h = x2 - x1, y2 - y1
             if w <= 0 or h <= 0:
                 continue
-            px = float(x1) + w * 0.5
-            py = float(y2) if feet else float(y1) + h * 0.5
-            new_obs.append((px, py, w, h))
+            px = x1 + w * 0.5
+            py = y2 if feet else y1 + h * 0.5
+            new_obs.append((px, py, w, h, ext_id))
 
-        # Match each observation to its closest existing track within the
-        # match radius. Greedy: not optimal (Hungarian would be), but at
-        # ~5-10 people per frame the loss is invisible.
-        used_tracks: set[int] = set()
-        for px, py, w, h in new_obs:
-            best_id, best_d = None, _TRACK_MATCH_RADIUS_PX + 1.0
-            for tid, tr in state.tracks.items():
-                if tid in used_tracks:
+        used_tracks: set[Any] = set()
+
+        # Pass 1: everything the caller identified. ALL of them, before any
+        # centroid matching happens -- otherwise a distance guess could claim
+        # the track an id owns, and the person it really belonged to would be
+        # given a new track and lose its frame count.
+        unidentified: list[tuple[float, float, float, float]] = []
+        for px, py, w, h, ext_id in new_obs:
+            if ext_id is None:
+                unidentified.append((px, py, w, h))
+                continue
+            key = _ext_key(ext_id)
+            tr = state.tracks.get(key)
+            if tr is not None and key not in used_tracks:
+                self._step_track(state, tr, px, py, w, h, line, bucket_counts, now_t, cfg)
+            else:
+                # An id we have not seen: a person the caller's tracker has
+                # just started following. Not centroid-matched to anything --
+                # its tracker already decided this is somebody new.
+                self._birth(state, key, px, py, w, h, line, bucket_counts, now_t, cfg)
+            used_tracks.add(key)
+
+        # Pass 2: observations with no id. Nearest track inside the radius
+        # that track has earned, per _match_radius -- so each candidate is
+        # judged on its own box size and its own gap, not one global number.
+        # Greedy, not Hungarian: at ~5-10 people per frame the loss is
+        # invisible.
+        for px, py, w, h in unidentified:
+            best_key, best_d = None, None
+            for key, tr in state.tracks.items():
+                if key in used_tracks:
                     continue
                 d = math.hypot(px - tr.x, py - tr.y)
-                if d < best_d:
-                    best_d, best_id = d, tid
-            if best_id is not None and best_d <= _TRACK_MATCH_RADIUS_PX:
-                tr = state.tracks[best_id]
-                self._step_track(state, tr, px, py, w, h, line, bucket_counts, now_t, cfg)
-                used_tracks.add(best_id)
+                if d <= _match_radius(h, now_t - tr.last_seen) and (best_d is None or d < best_d):
+                    best_key, best_d = key, d
+            if best_key is not None:
+                self._step_track(
+                    state, state.tracks[best_key], px, py, w, h, line, bucket_counts, now_t, cfg,
+                )
+                used_tracks.add(best_key)
             else:
-                # Brand-new person — assign an id and note which side it is on.
-                tid = state.next_id
+                key = state.next_id
                 state.next_id += 1
-                side = _side_of(signed_distance(px, py, *line), h)
-                tr = _Track(x=px, y=py, last_seen=now_t, side=side, rx=px, ry=py)
-                state.tracks[tid] = tr
-                used_tracks.add(tid)
-                # Fall heuristic check on first sight too.
-                if cfg.falls_enabled and w > h * 1.2:
-                    tr.fall_counted = True
-                    bucket_counts["falls"] += 1
-                    state.live_falls += 1
+                self._birth(state, key, px, py, w, h, line, bucket_counts, now_t, cfg)
+                used_tracks.add(key)
 
         # Age out stale tracks. Doing this every frame is O(N) but N is
         # tiny (active people on this camera). Without TTL, fallen_ids /
@@ -458,6 +562,30 @@ class FootfallRegistry:
             state.tracks.pop(tid, None)
 
         state.last_update_ts = now_t
+
+    @staticmethod
+    def _birth(
+        state: _CameraState,
+        key: Any,
+        px: float, py: float, w: float, h: float,
+        line: tuple[float, float, float, float],
+        bucket_counts: dict[str, int],
+        now_t: float,
+        cfg: FootfallConfig,
+    ) -> _Track:
+        """Open a track for a person seen for the first time, on whichever
+        side of the line they are already standing. Both matching passes come
+        through here, so "first sight" means one thing -- including the fall
+        heuristic, which has to fire on sight or a person who is already down
+        when the camera starts is never counted."""
+        side = _side_of(signed_distance(px, py, *line), h)
+        tr = _Track(x=px, y=py, last_seen=now_t, side=side, rx=px, ry=py)
+        state.tracks[key] = tr
+        if cfg.falls_enabled and w > h * 1.2:
+            tr.fall_counted = True
+            bucket_counts["falls"] += 1
+            state.live_falls += 1
+        return tr
 
     @staticmethod
     def _step_track(
@@ -564,58 +692,70 @@ class FootfallRegistry:
 
         async with session_scope() as session:
             for cam_id, st, pending in snapshots:
-                for bucket, counts in pending.items():
-                    stmt = pg_insert(FootfallMinuteBucket).values(
-                        tenant_id=st.tenant_id,
-                        camera_id=cam_id,
-                        bucket_minute=bucket,
-                        in_count=counts["in"],
-                        out_count=counts["out"],
-                        falls_count=counts["falls"],
-                    )
-                    # The bucket exists when an earlier flush already wrote
-                    # to the same (camera, minute). We add deltas; we never
-                    # overwrite — multiple flush cycles per minute is the
-                    # normal case (every 5 s).
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=["camera_id", "bucket_minute"],
-                        set_={
-                            "in_count":    FootfallMinuteBucket.in_count + counts["in"],
-                            "out_count":   FootfallMinuteBucket.out_count + counts["out"],
-                            "falls_count": FootfallMinuteBucket.falls_count + counts["falls"],
-                        },
-                    )
-                    await session.execute(stmt)
+                await self._upsert(session, cam_id, st.tenant_id, pending)
             await session.commit()
 
     async def _flush_one(self, camera_id: uuid.UUID, state: _CameraState, *, force: bool) -> None:
-        """Drain just one camera (used on remove_camera). Mirrors _flush_once's
-        logic but scoped tightly so it doesn't touch other cameras' state."""
+        """Drain just one camera (used on remove_camera), scoped tightly so it
+        doesn't touch other cameras' state."""
         if not state.pending and not force:
             return
         pending = state.pending
         state.pending = {}
+        await self._write_buckets(camera_id, state.tenant_id, pending)
+
+    # -- The one UPSERT -------------------------------------------------
+    #
+    # Three paths drain into Postgres: the periodic flusher, a camera being
+    # removed, and a camera being reconfigured. They differ only in which
+    # state they take the deltas from, so the write lives here once. Three
+    # copies of an ON CONFLICT clause is three places for the "add, never
+    # overwrite" rule to drift apart.
+
+    @staticmethod
+    async def _upsert(
+        session: Any,
+        camera_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        pending: dict[dt.datetime, dict[str, int]],
+    ) -> None:
+        """Apply one camera's per-minute deltas on an already-open session.
+        The caller commits."""
+        for bucket, counts in pending.items():
+            stmt = pg_insert(FootfallMinuteBucket).values(
+                tenant_id=tenant_id,
+                camera_id=camera_id,
+                bucket_minute=bucket,
+                in_count=counts["in"],
+                out_count=counts["out"],
+                falls_count=counts["falls"],
+            )
+            # The bucket exists when an earlier flush already wrote to the
+            # same (camera, minute). We ADD deltas; we never overwrite --
+            # several flush cycles per minute is the normal case (every 5 s),
+            # and so is a reconfigure landing inside a minute already written.
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["camera_id", "bucket_minute"],
+                set_={
+                    "in_count":    FootfallMinuteBucket.in_count + counts["in"],
+                    "out_count":   FootfallMinuteBucket.out_count + counts["out"],
+                    "falls_count": FootfallMinuteBucket.falls_count + counts["falls"],
+                },
+            )
+            await session.execute(stmt)
+
+    async def _write_buckets(
+        self,
+        camera_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        pending: dict[dt.datetime, dict[str, int]],
+    ) -> None:
+        """Write one camera's already-detached deltas in their own
+        transaction. Nothing to write is not an error."""
         if not pending:
             return
         async with session_scope() as session:
-            for bucket, counts in pending.items():
-                stmt = pg_insert(FootfallMinuteBucket).values(
-                    tenant_id=state.tenant_id,
-                    camera_id=camera_id,
-                    bucket_minute=bucket,
-                    in_count=counts["in"],
-                    out_count=counts["out"],
-                    falls_count=counts["falls"],
-                )
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["camera_id", "bucket_minute"],
-                    set_={
-                        "in_count":    FootfallMinuteBucket.in_count + counts["in"],
-                        "out_count":   FootfallMinuteBucket.out_count + counts["out"],
-                        "falls_count": FootfallMinuteBucket.falls_count + counts["falls"],
-                    },
-                )
-                await session.execute(stmt)
+            await self._upsert(session, camera_id, tenant_id, pending)
             await session.commit()
 
 

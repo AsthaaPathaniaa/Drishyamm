@@ -29,6 +29,7 @@ import datetime as dt
 import io
 import uuid
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -49,11 +50,39 @@ router = APIRouter(prefix="/footfall", tags=["footfall"])
 # ── Helpers ────────────────────────────────────────────────────────────
 
 
-def _today_midnight_utc() -> dt.datetime:
-    """Start of the current UTC day. We use UTC so multi-region deployments
-    don't have to agree on a zone — the frontend renders in local time."""
+def _today_midnight(tz: str | None = None) -> dt.datetime:
+    """Start of "today", as an aware UTC instant for the bucket query.
+
+    Without `tz`, the current UTC day — what every caller got before, and what
+    a deployment with no opinion still gets. The trouble with UTC alone is that
+    it is only midnight somewhere: in IST the day flipped at 05:30 local, so a
+    01:00 crossing was filed under yesterday and the operator's "today" total
+    was missing the whole night shift.
+
+    With an IANA name, midnight in THAT zone, converted to UTC. The caller
+    passes its own zone (the browser's, via the footfall page), so "today"
+    means the day the person reading the page is having.
+
+    An unusable zone falls back to UTC rather than raising: this feeds the
+    camera list behind a dashboard, and a 422 would leave the whole page blank
+    over a cosmetic detail. Worth knowing because the realistic cause is a
+    container with no tz database, not a bad request.
+    """
     now = dt.datetime.now(dt.timezone.utc)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    utc_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if not tz:
+        return utc_midnight
+    try:
+        # ZoneInfoNotFoundError is a KeyError; a path-like or non-string key
+        # raises ValueError / TypeError.
+        zone = ZoneInfo(tz)
+    except (KeyError, ValueError, TypeError) as e:
+        log.warning("footfall: unusable timezone, falling back to UTC", tz=tz, err=str(e))
+        return utc_midnight
+    local_midnight = now.astimezone(zone).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    return local_midnight.astimezone(dt.timezone.utc)
 
 
 async def _camera_or_404(
@@ -72,6 +101,13 @@ async def _camera_or_404(
 
 @router.get("/cameras")
 async def list_cameras(
+    tz: str | None = Query(
+        None,
+        description=(
+            "IANA zone the caller's day is measured in, e.g. Asia/Kolkata. "
+            "Omitted: the UTC day, as before."
+        ),
+    ),
     session: AsyncSession = Depends(db_session),
     tenant_id: uuid.UUID = Depends(current_tenant_id),
 ) -> dict[str, Any]:
@@ -90,7 +126,7 @@ async def list_cameras(
 
     # Per-camera today-so-far totals from Postgres. One query for all
     # cameras in this tenant, grouped by camera_id.
-    midnight = _today_midnight_utc()
+    midnight = _today_midnight(tz)
     today_rows = await session.execute(
         select(
             FootfallMinuteBucket.camera_id,
@@ -154,13 +190,20 @@ async def list_cameras(
 @router.get("/cameras/{camera_id}")
 async def camera_detail(
     camera_id: uuid.UUID,
+    tz: str | None = Query(
+        None,
+        description=(
+            "IANA zone the caller's day is measured in, e.g. Asia/Kolkata. "
+            "Omitted: the UTC day, as before."
+        ),
+    ),
     session: AsyncSession = Depends(db_session),
     tenant_id: uuid.UUID = Depends(current_tenant_id),
 ) -> dict[str, Any]:
     cam = await _camera_or_404(session, camera_id, tenant_id)
     cfg = FootfallConfig.from_camera_config(cam.config_json)
 
-    midnight = _today_midnight_utc()
+    midnight = _today_midnight(tz)
     r = await session.execute(
         select(
             func.sum(FootfallMinuteBucket.in_count),
