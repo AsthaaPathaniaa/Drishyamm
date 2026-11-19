@@ -130,6 +130,47 @@ async function listWindows(cameras, date = null, windowMinutes = 5) {
   return windows;
 }
 
+// Stream Service names segments by their start time in its own clock (UTC in
+// our containers). Trust that only when it agrees with the file's mtime;
+// otherwise mtime (when the segment was last written) is the honest bound.
+function segmentStartMs(day, filename, mtimeMs) {
+  const m = /^(\d{2})-(\d{2})-(\d{2})/.exec(filename);
+  const t = m ? Date.parse(`${day}T${m[1]}:${m[2]}:${m[3]}Z`) : NaN;
+  return Number.isFinite(t) && t <= mtimeMs + 5000 && t >= mtimeMs - 2 * 3600 * 1000 ? t : mtimeMs;
+}
+
+/**
+ * The newest non-empty segment for one camera (main or sub path), or null.
+ * Returns { key, file, mtimeMs, startedAtMs }.
+ */
+async function latestSegment(monitorId) {
+  let best = null;
+  for (const dir of [`cam_${monitorId}`, `cam_${monitorId}_sub`]) {
+    let days;
+    try { days = (await fs.promises.readdir(path.join(ROOT, dir))).filter((d) => DATE_RE.test(d)).sort().reverse(); }
+    catch { continue; }
+    for (const d of days) {
+      let files;
+      try { files = (await fs.promises.readdir(path.join(ROOT, dir, d))).filter((f) => f.toLowerCase().endsWith('.mp4')).sort().reverse(); }
+      catch { continue; }
+      let found = null;
+      for (const f of files) {
+        const file = path.join(ROOT, dir, d, f);
+        let st;
+        try { st = await fs.promises.stat(file); } catch { continue; }
+        if (!st.size) continue;
+        found = { key: `${dir}/${d}/${f}`, file, mtimeMs: st.mtimeMs, startedAtMs: segmentStartMs(d, f, st.mtimeMs) };
+        break;
+      }
+      if (found) {
+        if (!best || found.mtimeMs > best.mtimeMs) best = found;
+        break;
+      }
+    }
+  }
+  return best;
+}
+
 /**
  * Open a read stream for a local recording with HTTP Range support. Returns the
  * same shape as s3Service.getReadStream so streamRecording() is source-agnostic.
@@ -162,4 +203,4 @@ function getReadStream(key, range = null) {
   };
 }
 
-module.exports = { listGroupRecordings, listWindows, getReadStream, safeResolve, monitorIdFromKey, ROOT };
+module.exports = { listGroupRecordings, listWindows, latestSegment, getReadStream, safeResolve, monitorIdFromKey, ROOT };

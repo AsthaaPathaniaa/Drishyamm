@@ -1,6 +1,8 @@
 const { Router }  = require('express');
 const authenticate = require('../middleware/authenticate');
 const requireAiCapability = require('../middleware/requireAiCapability');
+const personTracker = require('../controllers/personTracker.controller');
+const { aiTenantId } = require('../utils/aiTenant');
 const requireFeature = require('../middleware/requireFeature');
 const ai          = require('../controllers/ai.controller');
 
@@ -25,6 +27,19 @@ router.get   ('/events',                   ai.listEvents);
 router.get   ('/events/histogram',         ai.eventHistogram);   // Playback timeline markers
 router.get   ('/reports',                  ai.getReport);
 router.get   ('/events/:id/snapshot',      ai.getSnapshotUrl);
+// Alert / detection images kept by the AI (s3://vms-snapshots/<tenant>/...).
+// The Alerts page used to load them through /person-tracker/snapshot, which
+// also demands the Personnel Search feature, so accounts without it saw no
+// alert images at all. Here only the AI plan (above) is needed — and only
+// this organisation's own images are served.
+router.get   ('/snapshot', (req, res, next) => {
+  const tid = aiTenantId(req.user);
+  const uri = String(req.query.uri || '');
+  if (!tid || !uri.startsWith(`s3://vms-snapshots/${tid}/`) || uri.includes('..')) {
+    return res.status(403).json({ success: false, message: 'Not your image' });
+  }
+  return next();
+}, personTracker.getSnapshot);
 router.post  ('/events/:id/ack',           ai.acknowledgeEvent);
 
 // Watchlist — individual face (proxy → smart-cam-ai)

@@ -50,6 +50,13 @@ export const DEFAULT_ON_KEYS = [
  */
 export const DEMO_KEYS = ['weapon', 'fire', 'aggression', 'anpr', 'activity'];
 
+/**
+ * Who may save zones — restricted zones, head-count rooms and gates, AI Feed
+ * detection areas — and so may re-take a camera's saved reference picture.
+ * Mirror of the backend's POST /stream/snapshot/:monitorId/refresh gate.
+ */
+export const ZONE_EDIT_KEYS = ['restricted_zone', 'headcount', 'ai_feed'];
+
 /** Is `key` on for this stored features value (null = full account)? Tier not checked. */
 export function featureOn(features, key) {
   if (DEMO_KEYS.includes(key)) return Array.isArray(features) && features.includes(key);

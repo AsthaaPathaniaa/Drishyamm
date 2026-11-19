@@ -532,6 +532,16 @@ function issueTicket({ userId, monitorId, path, variant, nvrUrl = null, once = f
   return ticket;
 }
 
+/**
+ * Ticket for the audio-only socket (liveAudio.service). Starts nothing: the
+ * audio stream starts when the socket connects and stops when it leaves.
+ */
+function issueAudioTicket({ userId, monitorId, path, nvrUrl = null }) {
+  const ticket = crypto.randomBytes(18).toString('base64url');
+  _tickets.set(ticket, { audio: true, userId, monitorId, path, nvrUrl, expires: Date.now() + TICKET_MS });
+  return ticket;
+}
+
 function redeemTicket(ticket) {
   const t = _tickets.get(ticket);
   _tickets.delete(ticket);
@@ -592,7 +602,9 @@ function attach(server) {
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => addViewer(ws, t));
+    wss.handleUpgrade(req, socket, head, (ws) => (t.audio
+      ? require('./liveAudio.service').addListener(ws, t)
+      : addViewer(ws, t)));
   });
   logger.info('liveRelay: WebSocket endpoint at /api/stream/live');
 }
@@ -605,4 +617,4 @@ function stats() {
   }));
 }
 
-module.exports = { attach, issueTicket, pin, isRunning, stopRelay, stats, viewerCount, releaseIfIdle, codecOf, sessionsOnHost, hasSource, _internals: { codecFromInit, isKeyframe, findBox, sweepStalled, relays: _relays } };
+module.exports = { attach, issueTicket, issueAudioTicket, pin, isRunning, stopRelay, stats, viewerCount, releaseIfIdle, codecOf, sessionsOnHost, hasSource, _internals: { codecFromInit, isKeyframe, findBox, sweepStalled, sourceReady, sourceUrl, relays: _relays } };

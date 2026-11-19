@@ -864,12 +864,17 @@ export default function Gallery({ onPlay, initialGroupId, initialCamera = 'all',
     setPage(1);
   }
 
-  // The selected camera stays in the list even when this day has no clips from it.
+  // Every camera of the selected office, not just those in the loaded page:
+  // filtered to one camera, the page only holds that camera's clips, and the
+  // list then offered nothing else to switch to. The selected camera stays in
+  // the list even when the office has no camera by that name any more.
+  const selectedGroup = groups.find((g) => g.id === selectedGroupId);
   const cameras = useMemo(() => {
-    const names = new Set(recordings.map((r) => r.cameraName).filter(Boolean));
+    const names = new Set((selectedGroup?.cameras || []).map((c) => c.name).filter(Boolean));
+    for (const r of recordings) if (r.cameraName) names.add(r.cameraName);
     if (cameraFilter !== 'all') names.add(cameraFilter);
-    return [...names].sort();
-  }, [recordings, cameraFilter]);
+    return [...names].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [selectedGroup, recordings, cameraFilter]);
 
   // Sorting is client-side over the loaded page, like the date grouping below.
   const sorted = useMemo(() => {

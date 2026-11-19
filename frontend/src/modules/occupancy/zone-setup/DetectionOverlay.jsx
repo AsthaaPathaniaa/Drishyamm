@@ -14,24 +14,30 @@
  */
 import { ShieldAlert, ShieldCheck, UserX, Video, VideoOff } from 'lucide-react';
 import { pointsToSvg } from '@/modules/headcount/zone-geometry';
+import { LEGACY_ASPECT, MediaAspectContext, boxStyle, useMediaAspect } from '@/core/players/media-aspect';
 import CleanFeed from './CleanFeed';
 
 export default function DetectionOverlay({ monitorId, polygon, frame, running, error, color = 'var(--brand)', others = [] }) {
   const boxes = frame?.boxes || [];
   const intruders = frame?.intruders || [];
   const authorised = frame?.authorised || [];
+  // Same shape as the picture, so the zone and the boxes sit where the
+  // detector put them (see media-aspect.js).
+  const [mediaAspect, setMediaAspect] = useMediaAspect();
 
   return (
     <div>
       <div
-        className="relative w-full select-none overflow-hidden rounded-lg bg-black"
-        style={{ aspectRatio: '16 / 9' }}
+        className="relative mx-auto w-full select-none overflow-hidden rounded-lg bg-black"
+        style={boxStyle(mediaAspect, LEGACY_ASPECT)}
       >
         {monitorId ? (
           // The clean camera feed, not the head-count detector's annotated
           // one: the boxes below are this page's own judgement, and the
           // detector's would be drawn on top of them.
-          <div className="absolute inset-0"><CleanFeed monitorId={monitorId} /></div>
+          <div className="absolute inset-0">
+            <MediaAspectContext.Provider value={setMediaAspect}><CleanFeed monitorId={monitorId} /></MediaAspectContext.Provider>
+          </div>
         ) : (
           <div className="absolute inset-0 grid place-items-center text-body text-white/40">
             Pick a camera to watch this zone

@@ -173,7 +173,7 @@ evidence_exports(id, tenant_id, case_id null, user_id, reason, files json /* pat
 7. **Honesty at night:** IR / greyscale tracks get `ir = true` and **no colour attributes**. The UI says "colour not available (night)" instead of silently missing results.
 8. **Sensitive attributes** (gender, age) stay **off by default** and per-tenant opt-in. No emotion or "suspicious-looking" scoring.
 9. **Retention:** index data lives exactly as long as the video it points at, except items pinned to a case (legal hold).
-10. **Licences:** check the commercial licence of every model weight and dataset before shipping. Large weights go through Git LFS (see `.gitattributes`).
+10. **Licences:** check the commercial licence of every model weight and dataset before shipping. Large weights go through Git LFS (see `.gitattributes`). Current status: [`LICENCES.md`](LICENCES.md).
 11. **Git:** one branch per feature (`<yourname>/investigation-i<N>-<feature>`) → PR to `main` → manager merges. Small PRs, one feature each. Pull `main` often.
 
 **Forensic-grade rules (added 2026-11-14):**

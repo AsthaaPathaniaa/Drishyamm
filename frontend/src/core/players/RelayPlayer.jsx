@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { subscribe } from '@/core/services/liveRelay';
-import { createMseSink, playSafe } from './relay/mseSink';
+import { listen as listenAudio } from '@/core/services/liveAudio';
+import { createMseSink } from './relay/mseSink';
 import PlayerFrame from './PlayerFrame';
 
 // A stream whose picture hasn't moved for this long counts as stalled.
@@ -35,6 +36,7 @@ export default function RelayPlayer({
   fit = 'contain',
   protocolBadge = true,
   onFallback,
+  onState,               // (state, error, frame) — see PlayerFrame
 }) {
   const subRef = useRef(null);
   const mainRef = useRef(null);
@@ -112,20 +114,20 @@ export default function RelayPlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [monitorId, wantMain]);
 
-  // Sound: only the <video> on screen may play it (in fullscreen the sub keeps
-  // running hidden under main — both audible would echo). Set on the elements
-  // directly: React doesn't reliably update the `muted` attribute.
+  // Sound comes on its own socket and <audio> element (services/liveAudio),
+  // only while this player is unmuted — never inside the video stream, where
+  // late camera audio held the picture back. The <video>s stay muted. Set on
+  // the elements directly: React doesn't reliably update `muted`.
   useEffect(() => {
-    const els = [[subRef.current, 'sub'], [mainRef.current, 'main']];
-    for (const [el, name] of els) {
-      if (!el) continue;
-      const want = muted || showing !== name;
-      if (el.muted !== want) {
-        el.muted = want;
-        if (!want && el.paused) playSafe(el);
-      }
+    for (const el of [subRef.current, mainRef.current]) {
+      if (el && !el.muted) el.muted = true;
     }
-  }, [muted, showing, wantMain]);
+  }, [showing, wantMain]);
+  useEffect(() => {
+    if (muted || !monitorId) return undefined;
+    // The sub carries the same microphone as main and is always running.
+    return listenAudio(monitorId, { variant: 'sub' });
+  }, [muted, monitorId]);
 
   return (
     <PlayerFrame
@@ -135,6 +137,7 @@ export default function RelayPlayer({
       state={state}
       error={error}
       onRetry={null}
+      onState={onState}
       muted
       controls={controls}
       aiOverlay={aiOverlay}

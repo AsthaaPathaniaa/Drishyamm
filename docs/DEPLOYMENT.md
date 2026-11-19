@@ -19,7 +19,7 @@ touching any server.
 |---|---|---|---|
 | Local dev | any | teammate laptop | `docker compose up -d` |
 | **Testing** | `main` | `<testing URL>`: **public via Tailscale Funnel, no site password** (only the app's own login) | automatically on every push/merge to `main` |
-| Production | `production` | Cloudflare Tunnel + gpu-bridge | automatically on push to `production` (own runner, label `production`; set up separately) |
+| Production | `production` | Cloudflare Tunnel + gpu-bridge | on push to `production`, **after approval** (runner `drishyam-prod`, label `production`). Runbook: [`deploy/production/README.md`](../deploy/production/README.md) |
 
 ```
  feature/<name>-<task> ──PR──▶ main ──push──▶ runner [self-hosted, testing] on the testing server
@@ -27,7 +27,7 @@ touching any server.
         │                     │ 1 approval       dirty check → checkout SHA → DB backup
    git merge origin/main      │                  → build → migrate → up -d → health → record SHA
    before opening the PR      │
-                              └──PR (maintainer)──▶ production ──push──▶ production runner (separate)
+                              └──PR (maintainer)──▶ production ──push──▶ approval ──▶ runner [self-hosted, production] on the prod server
 ```
 
 ---

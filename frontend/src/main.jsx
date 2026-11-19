@@ -1,7 +1,8 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { queryClient } from '@/core/lib/queryClient';
 import { TooltipProvider } from '@/core/ui/tooltip';
 import { ThemeProvider } from '@/core/context/ThemeContext';
 // Self-hosted type (Inter + JetBrains Mono), bundled so on-prem and air-gapped
@@ -59,17 +60,7 @@ import App from './App.jsx';
 //
 // refetchOnReconnect 'always' → if the laptop wakes from sleep or wifi flips,
 // pull fresh data once (one-shot, not on every focus).
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: 1,
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: 'always',
-      staleTime: 60_000,
-      gcTime:    10 * 60_000,
-    },
-  },
-});
+// (the client itself is in core/lib/queryClient.js)
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>

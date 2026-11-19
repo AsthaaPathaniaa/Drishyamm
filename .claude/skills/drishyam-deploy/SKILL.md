@@ -22,9 +22,10 @@ assuming a workflow, script, nginx entrypoint or Tailscale serve config exists.
 4. **Ask before destructive or hard-to-undo actions**: `git reset --hard`, `git clean`,
    deleting files/volumes (`docker compose down -v`, `docker volume rm`), dropping DBs,
    stopping the stack for long, firewall changes, history rewrites, force-push.
-5. **Production is not ours.** It deploys from the `production` branch with its own
-   runner (label `production`) on another machine. Don't create, change or run
-   anything that targets it.
+5. **Production changes only through its pipeline.** It deploys from the `production`
+   branch (`deploy-production.yml`, approval required, runner label `production` on the
+   prod server). Never edit, restart or `docker compose up` anything there by hand.
+   This skill covers testing; production's runbook is `deploy/production/README.md`.
 6. If the server checkout is dirty, **stop and show the diff**. Never discard it:
    someone edited the server by hand.
 

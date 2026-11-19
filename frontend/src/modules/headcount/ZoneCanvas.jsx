@@ -38,6 +38,9 @@ import {
 import {
   Eraser, Hexagon, Maximize, MousePointer2, PenLine, Square, Undo2,
 } from 'lucide-react';
+import { MediaChromeSlot } from '@/core/players/MediaChrome';
+import { MediaChromeScope, useMediaChromeSlot } from '@/core/players/media-chrome';
+import { MediaAspectContext, boxStyle, noteLegacyZones, ratioOf, useMediaAspect } from '@/core/players/media-aspect';
 import { MIN_CORNERS, pointsToSvg, simplifyPath } from './zone-geometry';
 
 const clamp01 = (n) => Math.min(1, Math.max(0, n));
@@ -63,6 +66,9 @@ export default function ZoneCanvas({
   className = '',
   color = 'var(--brand)',
   others = [],
+  // { camera, zones: [names] } of the shapes already saved on this view, to
+  // list in the console when the picture turns out not to be 16:9.
+  legacyNote = null,
 }) {
   const [mode, setMode] = useState(points.length ? 'adjust' : 'box');
   const [cursor, setCursor] = useState(null);      // rubber-band target
@@ -72,6 +78,13 @@ export default function ZoneCanvas({
   const [trace, setTrace] = useState(null);        // freehand samples
   const [drawing, setDrawing] = useState(false);   // a polygon is open
   const boxRef = useRef(null);
+  // The media's own buttons (Retry live, Update saved picture) sit above the drawing.
+  const [chromeEl, setChromeEl] = useMediaChromeSlot();
+  // The box takes the picture's shape, so a stored 0..1 point is a fraction
+  // of the picture itself (see media-aspect.js). `aspect` is only the
+  // fallback until the media reports.
+  const [mediaAspect, setMediaAspect] = useMediaAspect();
+  useEffect(() => { if (legacyNote) noteLegacyZones(mediaAspect, legacyNote); }, [mediaAspect, legacyNote]);
   // Whole edits to step back through. A ref: pushing to it must not re-render.
   const historyRef = useRef([]);
   const [canUndo, setCanUndo] = useState(false);
@@ -263,7 +276,7 @@ export default function ZoneCanvas({
       ) : null}
 
       <div
-        className={`group relative w-full select-none overflow-hidden rounded-lg bg-black ${
+        className={`group relative mx-auto w-full select-none overflow-hidden rounded-lg bg-black ${
           dragIdx !== null ? 'cursor-grabbing' : editing ? 'cursor-default' : 'cursor-crosshair'
         }`}
         onClick={onClick}
@@ -273,14 +286,23 @@ export default function ZoneCanvas({
         onPointerMove={onMove}
         onPointerUp={onUp}
         ref={boxRef}
-        style={{ aspectRatio: aspect, touchAction: 'none' }}
+        style={{ ...boxStyle(mediaAspect, aspect), touchAction: 'none' }}
       >
         {/* `media` is any picture of the view (a live player); `src` an image
             URL. Either way it is inert: the pointer belongs to the drawing. */}
         {media ? (
-          <div className="pointer-events-none absolute inset-0">{media}</div>
+          <div className="pointer-events-none absolute inset-0">
+            <MediaAspectContext.Provider value={setMediaAspect}>
+              <MediaChromeScope value={chromeEl}>{media}</MediaChromeScope>
+            </MediaAspectContext.Provider>
+          </div>
         ) : src ? (
-          <img alt="" className="pointer-events-none h-full w-full select-none object-contain" src={src} />
+          <img
+            alt=""
+            className="pointer-events-none h-full w-full select-none object-contain"
+            onLoad={(e) => setMediaAspect(ratioOf(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight))}
+            src={src}
+          />
         ) : (
           <div className="absolute inset-0 grid place-items-center text-[12px] text-white/40">
             No camera selected
@@ -475,6 +497,7 @@ export default function ZoneCanvas({
             </span>
           </div>
         ) : null}
+        <MediaChromeSlot slotRef={setChromeEl} />
       </div>
 
       {footer ? (
