@@ -93,7 +93,7 @@ import CleanFeed from './CleanFeed';
 import GateEditor from './GateEditor';
 import GateLineEditor from './GateLineEditor';
 import {
-  CanvasFrame, ResultNote, SetupGrid, SetupHeader, StepTitle,
+  CanvasFrame, CanvasLoading, ResultNote, SetupGrid, SetupHeader, StepTitle,
 } from './SetupChrome';
 import { useZoneDetections } from './useZoneDetections';
 import { defaultAccess } from './access-data';
@@ -123,7 +123,8 @@ export default function ZoneSetup() {
   // Live polling off: this page writes rules. The zone list still loads once,
   // so the camera registry and the current counts are real.
   const {
-    regionZones, cameras, camByMonitor, rooms: saved, setRooms, gates, refreshGates, ready, errors,
+    regionZones, cameras, camByMonitor, rooms: saved, setRooms, gates, refreshGates, ready,
+    gatesReady, errors,
   } = useOccupancy({ live: false });
   // The footfall camera list could not be read. Every camera then looks
   // unknown to the service, so the gate editors must say the service is down
@@ -281,6 +282,23 @@ export default function ZoneSetup() {
   );
 
   if (gateCamera) {
+    // The gates come from their own call, which the camera list does not wait
+    // for. Mounting the editor before it answers is what hid saved lines: the
+    // editor seeded itself from a gate that was not there yet.
+    if (!gatesReady) {
+      return (
+        <OperationsPage>
+          <SetupHeader onCancel={cancel} />
+          <PageContent className="gap-3" scroll>
+            <Panel bodyClass="p-3" icon={Waypoints} title={<StepTitle n={1} text="Place the line" />}>
+              <CanvasFrame>
+                <CanvasLoading label={`Loading the saved line for ${gateCamera.label}…`} />
+              </CanvasFrame>
+            </Panel>
+          </PageContent>
+        </OperationsPage>
+      );
+    }
     const colors = colorsOnCamera(saved, gateCam);
     return (
       <>
@@ -365,6 +383,7 @@ export default function ZoneSetup() {
         dirtyRef={dirtyRef}
         flash={flash}
         footfallDown={footfallDown}
+        gatesReady={gatesReady}
         group={group}
         isNew={pending?.id === zone.id}
         key={zone.id}
@@ -500,7 +519,7 @@ function seedFrom(zone, saved, camByMonitor) {
 function ZoneEditorPage({
   zone, saved, regionZones, cameras, camByMonitor, camParam, group, onGroup, gates, onRefreshGates, isNew,
   pendingId, onPickZone, onPickGate, onStopGate, onAddZone, onAskDelete, onCam, onSaved, onCancel,
-  ready, dirtyRef, flash, footfallDown,
+  ready, dirtyRef, flash, footfallDown, gatesReady,
 }) {
   const [draft, setDraft] = useState(() => seedFrom(zone, saved, camByMonitor));
   const [baseline, setBaseline] = useState(() => JSON.stringify(draft));
@@ -806,6 +825,7 @@ function ZoneEditorPage({
                     cameraName={nameOf(activeCam)}
                     footfallDown={footfallDown}
                     gate={gates[activeCam]}
+                    gatesReady={gatesReady}
                     key={`line:${activeCam}`}
                     monitorId={activeCam}
                     onDirty={setLineDirty}

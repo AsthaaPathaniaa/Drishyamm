@@ -12,6 +12,7 @@
  * this browser: a gate has to count identically whichever screen set it up.
  */
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   ArrowDownUp, CircleAlert, DoorOpen, Loader2, Save, Waypoints,
 } from 'lucide-react';
@@ -26,13 +27,16 @@ import GateCanvas from './GateCanvas';
 import {
   CanvasFrame, ResultNote, SetupGrid, SetupHeader, StepTitle,
 } from './SetupChrome';
+import { AI_BLOCKED, PLAN_PATH } from './gate-ai';
+import { CHANGED_ELSEWHERE } from './gate-sync';
 import { useGateDraft } from './useGateDraft';
 
 export default function GateEditor({
   monitorId, cameraName, gate, others, rail, onCancel, onSaved, dirtyRef, flash, footfallDown,
 }) {
   const {
-    draft, set, baseline, known, dirty, saving, result, save, stop,
+    draft, set, baseline, known, dirty, saving, result, save, stop, aiBlocked,
+    conflict, reloadStored,
   } = useGateDraft({ gate, cameraName, onSaved });
   useEffect(() => { dirtyRef.current = dirty; }, [dirty, dirtyRef]);
   // `stop` no longer raises its own window.confirm -- asking is the caller's
@@ -53,7 +57,7 @@ export default function GateEditor({
             ) : null}
             <button
               className="inline-flex h-9 shrink-0 items-center gap-2 rounded-lg bg-brand px-3.5 text-body font-semibold text-white shadow-sm transition hover:bg-brand-hover disabled:opacity-60"
-              disabled={saving || !known || !dirty}
+              disabled={saving || !known || !dirty || aiBlocked}
               onClick={save}
               type="button"
             >
@@ -67,6 +71,34 @@ export default function GateEditor({
 
       <PageContent className="gap-3" scroll>
         <ResultNote flash={flash} result={result} />
+
+        {conflict ? (
+          <p className="flex flex-wrap items-center gap-2 rounded-xl border border-warning-line bg-warning-soft px-3.5 py-2.5 text-body leading-relaxed text-warning-ink" role="alert">
+            <CircleAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
+            <span>{CHANGED_ELSEWHERE} Your unsaved line is still here — reloading drops it.</span>
+            <button
+              className="ml-auto shrink-0 rounded-lg border border-warning-line bg-surface px-2.5 py-1 text-body font-semibold text-warning-ink transition hover:bg-warning-soft"
+              onClick={reloadStored}
+              type="button"
+            >
+              Reload
+            </button>
+          </p>
+        ) : null}
+
+        {aiBlocked ? (
+          <p className="flex items-start gap-1.5 rounded-xl border border-warning-line bg-warning-soft px-3.5 py-2.5 text-body leading-relaxed text-warning-ink">
+            <CircleAlert className="mt-px h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
+            <span>
+              {AI_BLOCKED}, and this plan does not include AI. The line can be placed, but
+              saving it would leave the gate at 0: nothing would be watching the camera to
+              see anyone cross.{' '}
+              <Link className="font-semibold underline underline-offset-2 hover:no-underline" to={PLAN_PATH}>
+                See your plan
+              </Link>
+            </span>
+          </p>
+        ) : null}
 
         {!known ? (
           <p className="flex items-start gap-1.5 rounded-xl border border-warning-line bg-warning-soft px-3.5 py-2.5 text-body leading-relaxed text-warning-ink">

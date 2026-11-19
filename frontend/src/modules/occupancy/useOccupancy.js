@@ -53,6 +53,10 @@ export function useOccupancy({ live = true } = {}) {
   const [points, setPoints]     = useState([]);
   const [rooms, setRooms]       = useState(() => loadRooms());
   const [ready, setReady]       = useState(false);
+  // `ready` belongs to the head-count poll. Gates come from a DIFFERENT call,
+  // so they need their own flag: waiting on `ready` let the gate editors mount
+  // with no gates and show the default line over a saved one.
+  const [gatesReady, setGatesReady] = useState(false);
   const [errors, setErrors]     = useState({});
   const [updatedAt, setUpdatedAt] = useState(null);
 
@@ -90,6 +94,11 @@ export function useOccupancy({ live = true } = {}) {
       note('footfall', null);
     } catch {
       note('footfall', 'The footfall service is not responding.');
+    } finally {
+      // Answered, either way. A failure is a finished question too: the
+      // editors then say the service is down (errors.footfall) instead of
+      // waiting for a list that is not coming.
+      setGatesReady(true);
     }
   }, [note]);
 
@@ -229,7 +238,7 @@ export function useOccupancy({ live = true } = {}) {
   );
 
   return {
-    ready, errors, updatedAt, health,
+    ready, gatesReady, errors, updatedAt, health,
     lineZones, regionZones, congestion, macro, timeline, heatmap,
     rooms, setRooms,
     camByMonitor, cameras,
