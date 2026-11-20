@@ -33,11 +33,20 @@ env_value() { [[ -f $ENV_FILE ]] && sed -n "s/^$1=//p" "$ENV_FILE" | tail -1 || 
 mode="${1:-${GPU_ADDON:-$(env_value GPU_ADDON)}}"
 mode="${mode:-auto}"
 
+# Command output is captured before it is searched: under pipefail,
+# `cmd | grep -q/-m1` fails at random when grep stops reading early and cmd
+# dies on SIGPIPE (deploy.sh hit exactly that), which here would drop the
+# NVIDIA add-on and restart the AI without its GPU.
 nvidia_gpu() {
-  command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -m1 '^GPU '
+  local out
+  command -v nvidia-smi >/dev/null 2>&1 || return 1
+  out="$(nvidia-smi -L 2>/dev/null)" || return 1
+  grep -m1 '^GPU ' <<<"$out"
 }
 docker_has_nvidia() {
-  docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"nvidia"' && return 0
+  local runtimes
+  runtimes="$(docker info --format '{{json .Runtimes}}' 2>/dev/null || true)"
+  [[ $runtimes == *'"nvidia"'* ]] && return 0
   compgen -G '/etc/cdi/nvidia*.y*ml' >/dev/null || compgen -G '/var/run/cdi/nvidia*.y*ml' >/dev/null
 }
 render_nodes() { compgen -G '/dev/dri/renderD*' | tr '\n' ' '; }

@@ -123,12 +123,19 @@ main() {
   # ── 5. build + up ─────────────────────────────────────────────────────────
   step "5/7 docker compose build + up"
   docker compose build --quiet
+  # Read the service list ONCE, then search the text. Not `config | grep -q`:
+  # grep -q exits at the first match, compose then dies on SIGPIPE while still
+  # writing, and pipefail turns that into "no edge". It did on 2026-11-20
+  # (1 in ~20 runs here): the console build was skipped and the edge served a
+  # two-day-old one.
+  local services
+  services="$(docker compose config --services 2>/dev/null || true)"
   # Testing edge only: build the operator console for it to serve
   # (deploy/testing/nginx.conf). Built inside smart-cam-app so it bakes in
   # exactly the VITE_* the dev server runs with; into dist.next, then swapped,
   # so a failed build leaves the previous one serving. Runs as the container's
   # user, so the swap happens in there too (the files are its own).
-  if docker compose config --services 2>/dev/null | grep -qx edge \
+  if grep -qx edge <<<"$services" \
      && [[ "${SKIP_FRONTEND_BUILD:-0}" != 1 ]]; then
     echo "    frontend: production build for the edge"
     docker compose run --rm --no-deps -T -e VITE_COPY_PUBLIC_DIR=0 smart-cam-app sh -ec '
@@ -144,7 +151,7 @@ main() {
   # recreates on a compose change, and a checkout replaces the file (new
   # inode), so the running edge would keep the old config — even through
   # `nginx -s reload`. Recreate it when its config changed (~1 s blip).
-  if docker compose config --services 2>/dev/null | grep -qx edge \
+  if grep -qx edge <<<"$services" \
      && [[ "$prev" != "$sha" ]] \
      && ! git diff --quiet "$prev" "$sha" -- deploy/testing/nginx.conf; then
     echo "    edge: nginx.conf changed -> recreate edge"
