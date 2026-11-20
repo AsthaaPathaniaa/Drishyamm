@@ -1,6 +1,7 @@
 # Drishyam: the full stack (VMS + AI). Runs on any Docker host, GPU or not.
 #
-# GPUs are add-ons, chosen per host with COMPOSE_FILE in .env:
+# GPUs are add-ons, picked per host by scripts/gpu-addon.sh (deploy.sh runs it
+# on every deploy; run it once on a new machine), which sets COMPOSE_FILE in .env:
 #   docker-compose.nvidia.yml   NVIDIA GPU (+ NVIDIA Container Toolkit): AI on the
 #                               GPU, NVENC for live H.265 -> H.264 transcodes
 #   docker-compose.vaapi.yml    Intel/AMD graphics on Linux: VAAPI transcodes

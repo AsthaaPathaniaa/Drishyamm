@@ -121,7 +121,7 @@ reachability term it fought the supervisor on every poll).
 |---|---|
 | Docker Desktop + Compose v2 | The whole stack is containers. On Windows, WSL2 backend. |
 | Node.js 20 | Matches `node:20-bookworm-slim` in both Dockerfiles and `node-version: 20` in CI. Needed only if you run backend/frontend outside Docker. |
-| A GPU (optional) | `docker-compose.yml` runs without one. Add `docker-compose.nvidia.yml` (NVIDIA + Container Toolkit) or `docker-compose.vaapi.yml` (Intel/AMD on Linux) through `COMPOSE_FILE`. See §3.4. |
+| A GPU (optional) | `docker-compose.yml` runs without one. `scripts/gpu-addon.sh` adds `docker-compose.nvidia.yml` (NVIDIA + Container Toolkit) or `docker-compose.vaapi.yml` (Intel/AMD on Linux) for the GPU it finds. See §3.4. |
 | ~40 GB free disk | CUDA base image alone is large; face-reconstruct pulls ~640 MB of weights on first run. |
 | A MySQL client (optional) | Handy: `docker exec drisyam-original-mysql mysql -uroot drishyamvms`. |
 
@@ -186,7 +186,13 @@ volumes. Your data survives a careless teardown.
 ### 3.4 GPU or no GPU
 
 `docker-compose.yml` starts on any Docker host. GPUs are add-on files, picked per machine with
-`COMPOSE_FILE` in `.env`:
+`COMPOSE_FILE` in `.env`. You don't choose by hand: after creating `.env`, run
+
+```bash
+scripts/gpu-addon.sh        # detects the GPU, writes COMPOSE_FILE in .env
+```
+
+(servers run it on every deploy). It picks:
 
 | Machine | `COMPOSE_FILE` | What runs where |
 |---|---|---|

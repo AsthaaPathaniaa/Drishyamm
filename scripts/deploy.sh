@@ -12,7 +12,9 @@
 #   1. Refuse to run if the working tree is dirty. A dirty tree means someone edited
 #      the server by hand; we stop and show it, never overwrite it.
 #   2. Fetch and check out the exact SHA (detached HEAD). It must be on
-#      origin/$DEPLOY_BRANCH.
+#      origin/$DEPLOY_BRANCH. Then pick this host's GPU add-on
+#      (scripts/gpu-addon.sh: docker-compose.nvidia.yml / .vaapi.yml / none)
+#      and save it in .env as COMPOSE_FILE, before any docker compose call.
 #   3. Back up MySQL (drishyamvms) + Postgres (vms_face) to $BACKUP_DIR.
 #   4. npm ci (backend/frontend) when a lockfile changed: node_modules live in
 #      named volumes, so a rebuilt image alone wouldn't bring new dependencies.
@@ -27,6 +29,7 @@
 #   SKIP_BACKUP=1   skip step 3
 #   HEALTH_URLS     space-separated "url=timeout_s" pairs (default: app, backend, AI, edge)
 #   DEPLOY_ACTOR    who triggered it (default: $GITHUB_ACTOR or $USER)
+#   GPU_ADDON       nvidia | vaapi | none | auto           (default: .env, else auto)
 #
 # Exit codes: 0 ok · 1 failed (details on stderr) · 2 bad usage.
 # Rollback = run this again with the previous good SHA (workflow_dispatch).
@@ -87,6 +90,12 @@ main() {
   prev="$(git rev-parse HEAD)"
   git -c advice.detachedHead=false checkout --quiet --detach "$sha"
   echo "    $prev -> $sha  ($(git log -1 --format=%s "$sha"))"
+  # The GPU this host has decides which compose add-on runs (see the script).
+  # Exported too: a COMPOSE_FILE in the runner's environment would beat .env.
+  if [[ -x scripts/gpu-addon.sh ]]; then
+    COMPOSE_FILE="$(scripts/gpu-addon.sh)"
+    export COMPOSE_FILE
+  fi
 
   # ── 3. backup ─────────────────────────────────────────────────────────────
   step "3/7 back up databases"

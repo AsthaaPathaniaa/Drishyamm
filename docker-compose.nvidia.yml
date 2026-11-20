@@ -1,7 +1,8 @@
 # NVIDIA GPU add-on for docker-compose.yml.
 #
-# For hosts with an NVIDIA GPU and the NVIDIA Container Toolkit. Add it to
-# COMPOSE_FILE in .env (deploy/testing adds its own file after it):
+# For hosts with an NVIDIA GPU and the NVIDIA Container Toolkit.
+# scripts/gpu-addon.sh adds it to COMPOSE_FILE in .env when it finds both
+# (deploy.sh runs it on every deploy):
 #   COMPOSE_FILE=docker-compose.yml:docker-compose.nvidia.yml
 #
 # What it gives each service:

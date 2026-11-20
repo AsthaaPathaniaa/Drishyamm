@@ -62,8 +62,11 @@ no bind mounts, SPA on :80.
 
 ### GPU add-ons
 
-`docker-compose.yml` has no GPU requirement. Each host adds the file for its
-hardware through `COMPOSE_FILE` in `.env` (details: docs/dev/00-getting-started.md §3.4):
+`docker-compose.yml` has no GPU requirement. `scripts/gpu-addon.sh` adds the
+file for the host's hardware to `COMPOSE_FILE` in `.env`; `deploy.sh` runs it
+right after checking out the commit, before any `docker compose` command, so
+the choice follows the hardware with nothing to configure. Pin it with
+`GPU_ADDON=nvidia|vaapi|none` in `.env` (details: docs/dev/00-getting-started.md §3.4):
 
 | Host | Add | Gives |
 |---|---|---|
@@ -76,10 +79,10 @@ Check after a deploy:
 transcoder's encoder (`h264_nvenc` here), and `docker compose exec smart-cam-ai
 nvidia-smi -L` lists the GPU.
 
-`COMPOSE_FILE` must only name files the deployed commit has. Before
-redeploying a commit older than the add-on files (rollback), take
-`docker-compose.nvidia.yml` out of `COMPOSE_FILE` again: that commit's
-`docker-compose.yml` still has `gpus: all` itself.
+Rolling back to a commit from before the add-on files: the *Deploy testing*
+workflow takes them out of `COMPOSE_FILE` before running that commit's older
+`deploy.sh` (that commit's `docker-compose.yml` has `gpus: all` itself), and the
+next deploy of a newer commit puts them back.
 
 ### Services and ports
 
