@@ -1,3 +1,12 @@
+# Drishyam: the full stack (VMS + AI). Runs on any Docker host, GPU or not.
+#
+# GPUs are add-ons, chosen per host with COMPOSE_FILE in .env:
+#   docker-compose.nvidia.yml   NVIDIA GPU (+ NVIDIA Container Toolkit): AI on the
+#                               GPU, NVENC for live H.265 -> H.264 transcodes
+#   docker-compose.vaapi.yml    Intel/AMD graphics on Linux: VAAPI transcodes
+#   (neither)                   AI on the CPU (slow), transcodes on the CPU
+# e.g. COMPOSE_FILE=docker-compose.yml:docker-compose.nvidia.yml
+# Never rename services: code and env refer to them. See docs/DEPLOYMENT.md.
 x-ai-env: &id001
   BACKEND_URL: http://smart-cam-backend:5000
   SERVICE_TOKEN: ${SERVICE_TOKEN}
@@ -69,8 +78,6 @@ x-ai-env: &id001
   OMP_NUM_THREADS: '1'
   OPENBLAS_NUM_THREADS: '1'
   WATCHFILES_FORCE_POLLING: 'true'
-  NVIDIA_VISIBLE_DEVICES: all
-  NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
 x-ai-volumes: &id002
 - ./ai/face-service/vms_face:/srv/app/face_detection/vms_face
 - ./models/insightface:/root/.insightface
@@ -84,7 +91,6 @@ x-ai-service:
   image: drishyam/face-service:latest
   restart: unless-stopped
   environment: *id001
-  gpus: all
   volumes: *id002
 services:
   mysql:
@@ -331,7 +337,6 @@ services:
     image: drishyam/face-service:latest
     restart: unless-stopped
     environment: *id001
-    gpus: all
     volumes: *id002
     container_name: drishyam-ai
     command:
@@ -372,7 +377,6 @@ services:
     image: drishyam/face-service:latest
     restart: unless-stopped
     environment: *id001
-    gpus: all
     volumes: *id002
     container_name: drishyam-ai-worker
     command:
@@ -480,11 +484,10 @@ services:
   head-count:
     build:
       context: ./ai/head-count
-      dockerfile: Dockerfile.gpu
+      dockerfile: Dockerfile
     image: drishyam/head-count:latest
     container_name: drishyam-head-count
     restart: unless-stopped
-    gpus: all
     environment:
       TZ: ${TZ:-Asia/Kolkata}
       BACKEND_URL: http://smart-cam-backend:5000
@@ -505,13 +508,12 @@ services:
     image: drishyam/head-count:latest
     container_name: drishyam-zone-guard
     restart: unless-stopped
-    gpus: all
     environment:
       TZ: ${TZ:-Asia/Kolkata}
       BACKEND_URL: http://smart-cam-backend:5000
       SERVICE_TOKEN: ${SERVICE_TOKEN}
       OPENCV_FFMPEG_CAPTURE_OPTIONS: rtsp_transport;tcp
-      ZONE_SIM_MONITORS: ${ZONE_GUARD_MONITORS:-all}
+      ZONE_SIM_MONITORS: ${ZONE_GUARD_MONITORS:-none}
       ZONE_SIM_SOURCES: ${ZONE_GUARD_SOURCES:-}
       ZONE_SIM_MODEL: /models/yolov8n.pt
       ZONE_SIM_FPS: '4'
@@ -568,7 +570,6 @@ services:
     image: drishyam/face-reconstruct:latest
     container_name: drishyam-face-reconstruct
     restart: unless-stopped
-    gpus: all
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
@@ -585,7 +586,6 @@ services:
       context: ./media/transcoder
     container_name: drishyam-transcoder
     restart: unless-stopped
-    gpus: all
     environment:
       PORT: 8004
       MEDIAMTX_RTSP_BASE: rtsp://mediamtx:8554

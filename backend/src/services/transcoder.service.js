@@ -10,8 +10,9 @@
  *
  * ROBUSTNESS
  * ----------
- *   • Encoder auto-detection — picks h264_nvenc, h264_qsv, or h264_amf
- *     when available (5-10× lower CPU than libx264). Falls back cleanly.
+ *   • Encoder auto-detection — test-encodes with h264_nvenc, h264_vaapi
+ *     (Intel/AMD on Linux), h264_qsv, h264_amf in turn and uses the first that
+ *     works (5-10× lower CPU than libx264). Falls back to libx264 cleanly.
  *   • No source-readiness gate — FFmpeg is the on-demand source's reader, so
  *     spawning it is what makes Stream Service start the NVR pull. Waiting for
  *     the source to be ready first deadlocked fire-and-forget callers (see
@@ -40,7 +41,9 @@
  */
 
 const { spawn } = require('node:child_process');
+const fs        = require('node:fs');
 const config    = require('../config/env');
+const videoEncoder = require('./videoEncoder');
 const logger    = require('../config/logger');
 const queues    = require('../queues');
 
@@ -150,31 +153,18 @@ async function paceNvrOpen(monitorId, { urgent = false, priority, ticket } = {})
 const ALLOW_HW_ENCODERS = process.env.TRANSCODER_ALLOW_HW === 'true';
 
 // ── Encoder auto-detection ───────────────────────────────────────────────────
-// Cached at first call. Returns the best encoder this machine supports,
-// in this priority: NVIDIA → Intel QSV → AMD → libx264 (CPU fallback).
-//
-// We probe `ffmpeg -encoders`. That tells us the encoder is BUILT IN, but
-// not whether the actual hardware is present and the driver loads. So we
-// keep libx264 as a runtime fallback if the hardware encoder fails on the
-// very first transcoder spawn — see ensureTranscoder.
+// Cached at first call: the first encoder that passes a short test encode,
+// trying NVIDIA (NVENC) → Intel/AMD on Linux (VAAPI) → Intel QSV → AMD AMF →
+// libx264 (CPU). Each one is TRIED, not looked up in `ffmpeg -encoders`, which
+// only says what ffmpeg was built with (videoEncoder.js). One that passes the
+// test but still fails at runtime is demoted below and the next is tried.
+// The GOP/keyframe interval is owned by buildFfmpegArgs, not the encoders.
 
 let _encoderProbeDone = false;
-let _encoderName      = 'libx264';
-let _encoderArgs      = ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency'];
-
-// Use the most universally-compatible args for each hardware encoder.
-// Newer NVENC/QSV/AMF have richer options (-tune ll, -rc cbr, p1-p7 presets,
-// -low_power, -usage lowlatency) but those break on older drivers/hardware
-// with "-22 Invalid argument". The args below work on every generation we
-// care about; we trade ~5% quality for not crashing.
-// NOTE: GOP/keyframe interval is NOT set here — it is owned centrally by
-// buildFfmpegArgs (profileArgs come after these args, so a -g there wins).
-// Standardized to ~1s there to keep parts keyframe-aligned with mediamtx.
-const HW_ENCODERS = [
-  ['h264_nvenc', ['-c:v', 'h264_nvenc', '-preset', 'fast',     '-bf', '0']],
-  ['h264_qsv',   ['-c:v', 'h264_qsv',   '-preset', 'veryfast', '-bf', '0']],
-  ['h264_amf',   ['-c:v', 'h264_amf',   '-quality', 'speed',   '-bf', '0']],
-];
+let _encoderProbe     = null;   // in-flight detection, shared by concurrent spawns
+let _encoder          = videoEncoder.SOFTWARE;
+let _encoderName      = _encoder.name;
+const ENCODER_TEST_TIMEOUT_MS = 15_000;  // first CUDA/VAAPI init can take seconds
 
 // Runtime-failure tracking. If an encoder crashes within RUNTIME_FAILURE_WINDOW_MS
 // of starting, we count it. After RUNTIME_FAILURE_THRESHOLD strikes the encoder
@@ -185,47 +175,52 @@ const RUNTIME_FAILURE_THRESHOLD  = 2;
 let _encoderFailureCount = 0;
 let _demotedEncoders     = new Set();   // 'h264_nvenc', 'h264_qsv', etc.
 
-async function detectEncoder({ force = false } = {}) {
-  if (_encoderProbeDone && !force) return { name: _encoderName, args: _encoderArgs };
-
-  if (!ALLOW_HW_ENCODERS) {
-    _encoderName = 'libx264';
-    _encoderArgs = ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency'];
-    _encoderFailureCount = 0;
-    logger.info('transcoder: using software encoder libx264');
-    _encoderProbeDone = true;
-    return { name: _encoderName, args: _encoderArgs };
-  }
-
-  const list = await new Promise((resolve) => {
-    const p = spawn('ffmpeg', ['-hide_banner', '-encoders'], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    let buf = '';
-    p.stdout.on('data', (c) => { buf += c.toString(); });
-    p.on('error', () => resolve(''));
-    p.on('exit',  () => resolve(buf));
-  });
-
-  // Skip any hardware encoder that's been demoted at runtime (driver issues etc.)
-  for (const [name, args] of HW_ENCODERS) {
-    if (_demotedEncoders.has(name)) continue;
-    if (list.includes(name)) {
-      _encoderName = name;
-      _encoderArgs = args;
-      _encoderFailureCount = 0;
-      logger.info('transcoder: hardware encoder selected', { name });
-      _encoderProbeDone = true;
-      return { name, args };
+/** Run ffmpeg with `args`; true when it exits 0 within ENCODER_TEST_TIMEOUT_MS. */
+function runFfmpegTest(args) {
+  return new Promise((resolve) => {
+    let p;
+    try {
+      p = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'ignore'] });
+    } catch (_) {
+      resolve(false);
+      return;
     }
-  }
+    const timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch (_) {} resolve(false); }, ENCODER_TEST_TIMEOUT_MS);
+    p.on('error', () => { clearTimeout(timer); resolve(false); });
+    p.on('exit', (code) => { clearTimeout(timer); resolve(code === 0); });
+  });
+}
 
-  _encoderName = 'libx264';
-  _encoderArgs = ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency'];
-  _encoderFailureCount = 0;
-  logger.info('transcoder: using software encoder libx264');
-  _encoderProbeDone = true;
-  return { name: _encoderName, args: _encoderArgs };
+function encoderResult() {
+  return { name: _encoderName, args: _encoder.args, encoder: _encoder };
+}
+
+async function detectEncoder({ force = false } = {}) {
+  if (_encoderProbeDone && !force) return encoderResult();
+  if (_encoderProbe && !force) return _encoderProbe;
+
+  _encoderProbe = (async () => {
+    if (!ALLOW_HW_ENCODERS) logger.info('transcoder: using software encoder libx264 (TRANSCODER_ALLOW_HW is not true)');
+    _encoder = await videoEncoder.selectEncoder({
+      allowHw: ALLOW_HW_ENCODERS,
+      run: runFfmpegTest,
+      vaapiDevice: videoEncoder.findVaapiDevice({
+        envDevice: process.env.TRANSCODER_VAAPI_DEVICE,
+        listDir: fs.readdirSync,
+      }),
+      skip: _demotedEncoders,
+      log: (msg, meta) => logger.info(`transcoder: ${msg}`, meta),
+    });
+    _encoderName = _encoder.name;
+    _encoderFailureCount = 0;
+    _encoderProbeDone = true;
+    return encoderResult();
+  })();
+  try {
+    return await _encoderProbe;
+  } finally {
+    _encoderProbe = null;
+  }
 }
 
 /**
@@ -254,7 +249,13 @@ const PROBE_ARGS = [
   '-analyzeduration', process.env.TRANSCODER_ANALYZE_US || '500000',
 ];
 
-function buildFfmpegArgs(sourceUrl, targetUrl, encoderArgs, { lowProfile = false } = {}) {
+function buildFfmpegArgs(sourceUrl, targetUrl, encoderIn, { lowProfile = false } = {}) {
+  const enc = videoEncoder.asEncoder(encoderIn);
+  const encoderArgs = enc.args;
+  // A GPU-surface encoder (VAAPI) takes its frames uploaded at the END of the
+  // filter chain, in its own pixel format, so scaling still runs on the
+  // decoded frames and -pix_fmt yuv420p must not be forced on it.
+  const vf = (chain) => (enc.hwUpload ? `${chain},${enc.hwUpload}` : chain);
   // GOP / keyframe interval — single source of truth for ALL encoders (these
   // args come after ...encoderArgs, so they override any -g a HW encoder set).
   // Standardized to ~1 second so it matches the 1s LL-HLS part duration in
@@ -269,7 +270,7 @@ function buildFfmpegArgs(sourceUrl, targetUrl, encoderArgs, { lowProfile = false
   const profileArgs = lowProfile
     ? [
         ...fastestSw,
-        '-vf', 'scale=-2:360,fps=12',
+        '-vf', vf('scale=-2:360,fps=12'),
         '-b:v', '450k',
         '-maxrate', '550k',
         '-bufsize', '900k',
@@ -282,7 +283,7 @@ function buildFfmpegArgs(sourceUrl, targetUrl, encoderArgs, { lowProfile = false
     : [
         // Cap at 1080p: some NVR channels are 3200x1800, which costs ~3x the
         // encode of 1080p for no visible gain in a browser tile/fullscreen.
-        '-vf', "scale=-2:'min(1080,ih)'",
+        '-vf', vf("scale=-2:'min(1080,ih)'"),
         '-g', '25',          // ~1s GOP @ 25fps (was effectively 50 = 2s)
         '-keyint_min', '25',
       ];
@@ -297,6 +298,7 @@ function buildFfmpegArgs(sourceUrl, targetUrl, encoderArgs, { lowProfile = false
     '-flags',          'low_delay',
     '-avoid_negative_ts', 'make_zero',
     ...PROBE_ARGS,
+    ...enc.inputArgs,          // e.g. -vaapi_device /dev/dri/renderD128
     '-i',              sourceUrl,
     // Map the video explicitly. Auto-mapping skips a stream whose size the
     // short probe did not see yet (H.265 before its first keyframe:
@@ -307,7 +309,7 @@ function buildFfmpegArgs(sourceUrl, targetUrl, encoderArgs, { lowProfile = false
 
     // ── Video transcode ──
     ...encoderArgs,
-    '-pix_fmt',  'yuv420p',
+    ...(enc.hwUpload ? [] : ['-pix_fmt', 'yuv420p']),
     '-profile:v', 'main',
     ...profileArgs,
     '-sc_threshold', '0',     // no scene-cut keyframes (predictable GOP)
@@ -450,7 +452,7 @@ async function spawnPathTranscoder(monitorId, {
   if (!sourceReady) await paceNvrOpen(monitorId, { urgent: variant === 'main' });
   else await nvrHostOf(monitorId); // cached; runningOnHost() needs every camera's host
 
-  const { args: encoderArgs } = await detectEncoder();
+  const { encoder } = await detectEncoder();
 
   const host = config.streamService.rtspHost || 'localhost';
   const port = config.streamService.rtspPort || 8554;
@@ -459,7 +461,7 @@ async function spawnPathTranscoder(monitorId, {
 
   let proc;
   try {
-    proc = spawn('ffmpeg', buildFfmpegArgs(sourceUrl, targetUrl, encoderArgs, { lowProfile }), {
+    proc = spawn('ffmpeg', buildFfmpegArgs(sourceUrl, targetUrl, encoder, { lowProfile }), {
       stdio: ['ignore', 'ignore', 'pipe'],
     });
   } catch (err) {
@@ -877,5 +879,5 @@ module.exports = {
   transcodedLowPathName,
   isTranscodedPath,
   // exposed for testing / status panels
-  _internals: { detectEncoder, MAX_CONCURRENT, STALL_TIMEOUT_MS, IDLE_TIMEOUT_MS },
+  _internals: { detectEncoder, buildFfmpegArgs, MAX_CONCURRENT, STALL_TIMEOUT_MS, IDLE_TIMEOUT_MS },
 };

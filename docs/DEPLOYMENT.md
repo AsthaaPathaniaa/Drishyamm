@@ -40,7 +40,7 @@ touching any server.
 | Docker | Docker Engine 29 (docker-ce), `nvidia` runtime, starts on boot |
 | GPU | RTX 5090 32 GB, used directly by the AI containers (no remote GPU) |
 | Checkout | `/home/systools-pc/Desktop/Projects/Drishyamm` (compose project `drishyamm`) |
-| Compose file | `docker-compose.yml` (+ testing overlay for the nginx entrypoint, Phase 1) |
+| Compose files | `COMPOSE_FILE=docker-compose.yml:docker-compose.nvidia.yml:deploy/testing/docker-compose.testing.yml` in `.env` (base + NVIDIA GPU add-on + testing edge) |
 | Secrets | `.env`, `backend/.env`: gitignored, only on the server |
 | URL | `<testing URL>`, Tailscale **Funnel** → `127.0.0.1:8080` (`edge` nginx) |
 | Public access | open to anyone with the URL. The app's JWT login protects `/api`; **`/ai/`, `/hls/`, `/live/` have no auth** (AI runs with dev bypass) and self-registration is open. Maintainer's explicit choice, 2026-11-13. |
@@ -59,6 +59,27 @@ bind-mounted (backend under `nodemon`, frontend on the Vite dev server):
 
 Production (`deploy/production/docker-compose.prod.yml`) differs: prebuilt images,
 no bind mounts, SPA on :80.
+
+### GPU add-ons
+
+`docker-compose.yml` has no GPU requirement. Each host adds the file for its
+hardware through `COMPOSE_FILE` in `.env` (details: docs/dev/00-getting-started.md §3.4):
+
+| Host | Add | Gives |
+|---|---|---|
+| NVIDIA + Container Toolkit (this server) | `docker-compose.nvidia.yml` | AI on CUDA; NVENC for live H.265 → H.264 transcodes |
+| Intel / AMD graphics (Linux) | `docker-compose.vaapi.yml` | VAAPI transcodes; AI on the CPU |
+| none | nothing | everything on the CPU |
+
+Check after a deploy:
+`docker compose logs smart-cam-backend | grep "encoder selected"` names the
+transcoder's encoder (`h264_nvenc` here), and `docker compose exec smart-cam-ai
+nvidia-smi -L` lists the GPU.
+
+`COMPOSE_FILE` must only name files the deployed commit has. Before
+redeploying a commit older than the add-on files (rollback), take
+`docker-compose.nvidia.yml` out of `COMPOSE_FILE` again: that commit's
+`docker-compose.yml` still has `gpus: all` itself.
 
 ### Services and ports
 
