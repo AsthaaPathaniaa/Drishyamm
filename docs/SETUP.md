@@ -1,8 +1,13 @@
 # Setting up Drishyam on a new machine
 
-Everything runs in Docker on one NVIDIA GPU host. This guide takes a blank
-machine to a working console with a camera on screen, then covers access from
-other computers, production hardening and moving data from an existing box.
+Everything runs in Docker on one host. This guide assumes an NVIDIA GPU host,
+which is what the AI is sized for. After creating `.env`, run
+`scripts/gpu-addon.sh`: it finds the GPU and adds `docker-compose.nvidia.yml`
+to `COMPOSE_FILE`. Hosts without one run the same stack on the CPU, or with
+Intel/AMD video encoding (`docker-compose.vaapi.yml`): see docs/dev/00-getting-started.md §3.4.
+It takes a blank machine to a working console with a camera on screen, then
+covers access from other computers, production hardening and moving data from
+an existing box.
 
 ## 1. Prerequisites
 

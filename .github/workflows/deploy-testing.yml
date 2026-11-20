@@ -49,6 +49,13 @@ jobs:
             SHA="$PUSH_SHA"
           fi
           echo "Deploying $SHA"
+          # A commit from before the GPU add-on files (a rollback) runs its own,
+          # older deploy.sh, which doesn't pick them: take them out of
+          # COMPOSE_FILE here, or compose refuses to start (missing file). That
+          # commit's docker-compose.yml carries `gpus: all` itself.
+          if [ -f .env ] && ! git cat-file -e "$SHA:docker-compose.nvidia.yml" 2>/dev/null; then
+            sed -i -E '/^COMPOSE_FILE=/ s#:docker-compose\.(nvidia|vaapi)\.yml##g' .env
+          fi
           # Run the deploy script from the commit being deployed (older commits
           # without one fall back to main's), not the copy currently on disk.
           if git cat-file -e "$SHA:scripts/deploy.sh" 2>/dev/null; then SRC="$SHA"; else SRC=origin/main; fi

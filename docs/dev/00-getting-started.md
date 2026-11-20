@@ -121,7 +121,7 @@ reachability term it fought the supervisor on every poll).
 |---|---|
 | Docker Desktop + Compose v2 | The whole stack is containers. On Windows, WSL2 backend. |
 | Node.js 20 | Matches `node:20-bookworm-slim` in both Dockerfiles and `node-version: 20` in CI. Needed only if you run backend/frontend outside Docker. |
-| NVIDIA GPU + driver | **Required for the full stack.** `smart-cam-ai`, `smart-cam-ai-worker`, `smart-cam-transcoder`, `face-reconstruct` *and* `smart-cam-backend` all declare `gpus: all`. See §3.4 for the no-GPU path. |
+| A GPU (optional) | `docker-compose.yml` runs without one. `scripts/gpu-addon.sh` adds `docker-compose.nvidia.yml` (NVIDIA + Container Toolkit) or `docker-compose.vaapi.yml` (Intel/AMD on Linux) for the GPU it finds. See §3.4. |
 | ~40 GB free disk | CUDA base image alone is large; face-reconstruct pulls ~640 MB of weights on first run. |
 | A MySQL client (optional) | Handy: `docker exec drisyam-original-mysql mysql -uroot drishyamvms`. |
 
@@ -183,31 +183,32 @@ the plain `drisyam` project. Two MySQL servers on one data directory corrupts it
 A useful side effect of `external: true`: `docker compose down -v` **cannot** delete those
 volumes. Your data survives a careless teardown.
 
-### 3.4 If you don't have an NVIDIA GPU
+### 3.4 GPU or no GPU
 
-`gpus: all` on `smart-cam-backend` means even the API container won't start on a GPU-less
-machine (`could not select device driver "" with capabilities: [[gpu]]`). Don't fight compose —
-run the two Node services natively against the containerised infra:
+`docker-compose.yml` starts on any Docker host. GPUs are add-on files, picked per machine with
+`COMPOSE_FILE` in `.env`. You don't choose by hand: after creating `.env`, run
 
 ```bash
-# 1. GPU-free infrastructure only
-docker compose -p drisyam-original -f docker-compose.drisyam-original.yml \
-  up -d mysql redis stream-service
-
-# 2. Point smart-cam-backend/.env at the host-published ports
-#    DB_HOST=127.0.0.1  DB_PORT=3307
-#    REDIS_URL=redis://127.0.0.1:6379
-#    STREAM_SERVICE_API_URL=http://localhost:9997
-#    STREAM_SERVICE_HLS_URL=http://localhost:8898
-#    STREAM_SERVICE_RTSP_HOST=localhost
-
-cd smart-cam-backend && npm install && npm run dev     # :5000
-cd ../smart-cam-app  && npm install && npm run dev     # :5173
+scripts/gpu-addon.sh        # detects the GPU, writes COMPOSE_FILE in .env
 ```
 
-You lose face recognition, journey, headcount and transcoding. Everything else — auth, camera
-CRUD, groups/sites, retention, live WebRTC, recordings, the health page — works. That is more than
-enough surface for a first change.
+(servers run it on every deploy). It picks:
+
+| Machine | `COMPOSE_FILE` | What runs where |
+|---|---|---|
+| NVIDIA GPU + NVIDIA Container Toolkit | `docker-compose.yml:docker-compose.nvidia.yml` | AI on CUDA; live H.265 → H.264 transcodes on NVENC |
+| Intel / AMD graphics (Linux) | `docker-compose.yml:docker-compose.vaapi.yml` | AI on the CPU; transcodes on VAAPI |
+| No usable GPU | `docker-compose.yml` (or leave `COMPOSE_FILE` unset) | everything on the CPU |
+
+Without an NVIDIA GPU the AI services run on the CPU: slow, fine for a few cameras or for
+working on anything else. The backend picks its video encoder by **test-encoding** with NVENC,
+then VAAPI, then QSV/AMF, and falls back to libx264 (`backend/src/services/videoEncoder.js`); the
+log line `transcoder: hardware encoder selected` says which one it got.
+
+VAAPI in the backend image uses Debian 12's drivers: Intel up to 12th–14th gen and AMD work;
+newer Intel (Arrow Lake, Lunar Lake) needs a newer base image and falls back to the CPU until then.
+`docker-compose.scale.yml` (many AI shards on one big GPU) is NVIDIA-only; add it after
+`docker-compose.nvidia.yml`.
 
 ### 3.5 First login
 

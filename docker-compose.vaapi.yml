@@ -1,0 +1,19 @@
+# Intel / AMD graphics add-on for docker-compose.yml (Linux, VAAPI).
+#
+# Gives the backend the host's GPU render nodes so live H.265 -> H.264
+# transcodes can run on Intel or AMD graphics instead of the CPU.
+# scripts/gpu-addon.sh adds it to COMPOSE_FILE in .env on hosts with a
+# /dev/dri render node and no usable NVIDIA GPU:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.vaapi.yml
+#
+# The backend tries NVENC, then VAAPI, then the CPU, and uses the first that
+# passes a test encode (videoEncoder.js), so this file is safe alongside
+# docker-compose.nvidia.yml too. With several GPUs, pick the render node with
+# TRANSCODER_VAAPI_DEVICE (e.g. /dev/dri/renderD128) in backend/.env.
+#
+# Check what the host offers: `vainfo --display drm --device /dev/dri/renderD128`.
+
+services:
+  smart-cam-backend:
+    devices:
+      - /dev/dri:/dev/dri

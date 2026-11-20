@@ -1,7 +1,10 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # Face pipeline at scale (Phase 2 layout, docs/FACE_SYSTEM_DESIGN.md)
 #
-#   docker compose -f docker-compose.yml -f docker-compose.scale.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.nvidia.yml \
+#                  -f docker-compose.scale.yml up -d
+#
+# NVIDIA only: this layout exists to share one big GPU between shards.
 #
 # What changes vs the single-process default:
 #   * 4 inference servers (smart-cam-infer..-3) hold the detector + recognizer
@@ -14,11 +17,16 @@
 # smaller shards is the scaling knob on one box.
 #
 # Every added service `extends` smart-cam-ai from docker-compose.yml, so it
-# gets the same image, GPU, volumes and full environment. Needs Docker
-# Compose >= 2.24 (for `!reset`).
+# gets the same image, volumes and full environment. `extends` reads that
+# file alone, without docker-compose.nvidia.yml, so the GPU is given here.
+# Needs Docker Compose >= 2.24 (for `!reset`).
 # ═══════════════════════════════════════════════════════════════════════════
 
 x-shard-env: &shard-env
+  # Each service below sets its own `environment`, which replaces (not merges)
+  # an anchor's, so the NVIDIA settings ride along here.
+  NVIDIA_VISIBLE_DEVICES: all
+  NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
   AI_SHARD_COUNT: "5"
   AI_SHARD_PRIMARY_OWNS_CAMERAS: "false"
   AI_SHARD_PEERS: http://smart-cam-ai:8001,http://smart-cam-ai-1:8001,http://smart-cam-ai-2:8001,http://smart-cam-ai-3:8001,http://smart-cam-ai-4:8001
@@ -28,6 +36,15 @@ x-infer: &infer
   extends:
     file: docker-compose.yml
     service: smart-cam-ai
+  # The GPU, as a device reservation: Compose rejects `gpus:` on a service
+  # built from an anchor that `extends` ("cannot override services.x.gpus").
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
   command: ["python", "-m", "vms_face.workers.infer_server"]
   healthcheck:
     test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 9010), 2).close()"]
@@ -40,6 +57,15 @@ x-shard: &shard
   extends:
     file: docker-compose.yml
     service: smart-cam-ai
+  # The GPU, as a device reservation: Compose rejects `gpus:` on a service
+  # built from an anchor that `extends` ("cannot override services.x.gpus").
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
   # No alembic: shard 0 owns migrations.
   command: ["sh", "-c", "uvicorn vms_face.api.main:app --host 0.0.0.0 --port 8001"]
 

@@ -1,0 +1,36 @@
+# NVIDIA GPU add-on for docker-compose.yml.
+#
+# For hosts with an NVIDIA GPU and the NVIDIA Container Toolkit.
+# scripts/gpu-addon.sh adds it to COMPOSE_FILE in .env when it finds both
+# (deploy.sh runs it on every deploy):
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.nvidia.yml
+#
+# What it gives each service:
+#   smart-cam-backend       NVENC for live H.265 -> H.264 transcodes (it picks
+#                           its encoder by test-encoding, so without this file
+#                           it uses VAAPI or the CPU instead; see videoEncoder.js)
+#   smart-cam-ai, -worker   face detection/recognition on CUDA (else CPU)
+#   head-count, zone-guard  YOLO on CUDA, from the GPU image (Dockerfile.gpu)
+#   face-reconstruct        CodeFormer on CUDA (profile `enhance`)
+#   smart-cam-transcoder    NVENC-only per-camera transcoder (profile `media`)
+#
+# Without an NVIDIA GPU, leave this file out: the stack still starts.
+
+x-nvidia: &nvidia
+  gpus: all
+  environment:
+    NVIDIA_VISIBLE_DEVICES: all
+    NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+
+services:
+  smart-cam-backend: *nvidia
+  smart-cam-ai: *nvidia
+  smart-cam-ai-worker: *nvidia
+  head-count:
+    <<: *nvidia
+    build:
+      context: ./ai/head-count
+      dockerfile: Dockerfile.gpu
+  zone-guard: *nvidia
+  face-reconstruct: *nvidia
+  smart-cam-transcoder: *nvidia
