@@ -48,6 +48,23 @@ export function createMseSink(video, { onFirstFrame, onError } = {}) {
   let lastGrowAt = 0;
   let appended = 0;
   let stallReported = false;
+  let decoderBroke = false;
+
+  // The decoder couldn't start, or broke, on what we attached: the element
+  // reports MEDIA_ERR_DECODE (3) or MEDIA_ERR_SRC_NOT_SUPPORTED (4). This is
+  // the only sign of a codec that MediaSource accepted but the decoder can't
+  // play (chrome://media-internals: DECODER_ERROR_NOT_SUPPORTED). Reported
+  // once per init as 'decoder', so the player can ask the relay for H.264
+  // instead of counting it towards the WebRTC fallback.
+  function onMediaError() {
+    if (destroyed || !url || decoderBroke) return;
+    const code = video.error?.code;
+    if (code !== 3 && code !== 4) return;
+    decoderBroke = true;
+    queue = [];
+    onError?.('decoder');
+  }
+  video.addEventListener('error', onMediaError);
 
   function teardown() {
     if (tick) { clearInterval(tick); tick = null; }
@@ -60,7 +77,7 @@ export function createMseSink(video, { onFirstFrame, onError } = {}) {
   }
 
   function pump() {
-    if (!sb || sb.updating || !queue.length || destroyed) return;
+    if (!sb || sb.updating || !queue.length || destroyed || decoderBroke) return;
     const next = queue.length > 1 && !started ? concat(queue.splice(0)) : queue.shift();
     try {
       sb.appendBuffer(next);
@@ -68,6 +85,10 @@ export function createMseSink(video, { onFirstFrame, onError } = {}) {
       if (err?.name === 'QuotaExceededError') {
         queue.unshift(next);
         trim(true);
+      } else if (video.error) {
+        // Appends are refused because the element has already failed: report
+        // the cause once instead of one error per frame.
+        onMediaError();
       } else {
         onError?.(err?.message || 'append failed');
       }
@@ -131,6 +152,7 @@ export function createMseSink(video, { onFirstFrame, onError } = {}) {
     init(meta, initU8, gop) {
       if (destroyed) return;
       teardown();
+      decoderBroke = false;
       mime = meta.mime;
       ms = new MSE();
       if (window.ManagedMediaSource && ms instanceof window.ManagedMediaSource) video.disableRemotePlayback = true;
@@ -145,7 +167,7 @@ export function createMseSink(video, { onFirstFrame, onError } = {}) {
           sb = ms.addSourceBuffer(mime);
           sb.mode = 'segments';
           sb.addEventListener('updateend', onUpdateEnd);
-          sb.addEventListener('error', () => onError?.('decode error'));
+          sb.addEventListener('error', () => (video.error ? onMediaError() : onError?.('decode error')));
           pump();
         } catch (err) {
           onError?.(err?.message || 'unsupported codec');
@@ -168,6 +190,7 @@ export function createMseSink(video, { onFirstFrame, onError } = {}) {
     error(msg, attempt) { if (attempt > 2) onError?.(msg); },
     destroy() {
       destroyed = true;
+      video.removeEventListener('error', onMediaError);
       teardown();
       try { video.removeAttribute('src'); video.load(); } catch { /* ignore */ }
     },

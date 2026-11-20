@@ -14,11 +14,17 @@
  * H.265 the browser can't decode: the first init tells us the codec; if
  * MediaSource refuses it we reconnect asking the server for the H.264 sidecar
  * (transcode=1) and remember that per camera, so the next load goes straight
- * there.
+ * there. If MediaSource accepts it but the decoder then fails (the player
+ * reports it through decoderFailed()), we switch the same way. Each note says
+ * why it was written and is dropped once that no longer holds
+ * (relayCodecMemo.js).
  */
 import api from '@/core/services/api';
 import { API_BASE } from '@/core/config/endpoints';
 import { canDecodeHevc } from '@/core/services/codecSupport';
+import {
+  memoForDecoderFailure, memoForDevice, memoForMime, memoStillApplies,
+} from '@/core/services/relayCodecMemo';
 
 const GRACE_MS = 10_000;
 const conns = new Map(); // key → connection
@@ -33,16 +39,22 @@ export function mimeSupported(mime) {
   try { return !!(MSE && MSE.isTypeSupported(mime)); } catch { return false; }
 }
 
-// Per camera+variant: needs the H.264 sidecar on this device (learned once).
+// Per camera+variant: needs the H.264 sidecar on this device. The note says
+// why (relayCodecMemo.js); one that no longer holds is dropped here, so a
+// browser that has learned H.265 since goes back to the camera's own stream.
 const memoKey = (id, variant) => `relay.transcode.${id}.${variant}`;
 function needsTranscode(id, variant) {
   const forced = forcedDecoder();
   if (forced === 'transcode') return true;
   if (forced === 'native') return false;
-  try { return localStorage.getItem(memoKey(id, variant)) === '1'; } catch { return false; }
+  let memo = null;
+  try { memo = localStorage.getItem(memoKey(id, variant)); } catch { return false; }
+  if (memoStillApplies(memo, { deviceDecodesHevc: canDecodeHevc(), isTypeSupported: mimeSupported, now: Date.now() })) return true;
+  if (memo) rememberTranscode(id, variant, null);
+  return false;
 }
-function rememberTranscode(id, variant, yes) {
-  try { if (yes) localStorage.setItem(memoKey(id, variant), '1'); else localStorage.removeItem(memoKey(id, variant)); } catch { /* storage off */ }
+function rememberTranscode(id, variant, memo) {
+  try { if (memo) localStorage.setItem(memoKey(id, variant), memo); else localStorage.removeItem(memoKey(id, variant)); } catch { /* storage off */ }
 }
 
 /** `?decoder=native|transcode|webrtc` in the page URL overrides the choice (testing). */
@@ -140,7 +152,7 @@ async function open(c) {
       params: { variant: c.variant, transcode: c.transcode ? '1' : '0', hevc: canDecodeHevc() ? '1' : '0' },
     });
     ticket = data.ticket;
-    if (data.transcode && !c.transcode) { c.transcode = true; rememberTranscode(c.monitorId, c.variant, true); }
+    if (data.transcode && !c.transcode) { c.transcode = true; rememberTranscode(c.monitorId, c.variant, memoForDevice()); }
   } catch (err) {
     return retryLater(c, err?.response?.data?.message || err.message);
   }
@@ -164,7 +176,7 @@ async function open(c) {
         // Can this device decode what the camera sends? If not, ask for the
         // H.264 sidecar instead and remember it for this camera.
         if (!c.transcode && !mimeSupported(msg.mime)) {
-          rememberTranscode(c.monitorId, c.variant, true);
+          rememberTranscode(c.monitorId, c.variant, canDecodeHevc() ? memoForMime(msg.mime) : memoForDevice());
           c.transcode = true;
           ws.close();
           return;
@@ -232,6 +244,42 @@ export function subscribe(monitorId, variant, sink) {
       c.closeTimer = setTimeout(() => { if (c.refCount === 0) destroy(c); }, GRACE_MS);
     }
   };
+}
+
+/**
+ * The browser's decoder failed on this camera's own stream although
+ * MediaSource accepted its type: seen on Linux with the screen on one GPU and
+ * video decoding forced onto another, where chrome://gpu lists H.265 and the
+ * decoder then fails to start. Switch to the server's H.264 sidecar over this
+ * same relay and remember it for a while (relayCodecMemo.js). This is much
+ * faster than the player's WebRTC fallback, which needs the H.264 sidecar
+ * anyway and first spends seconds on /stream/start and WHEP negotiation.
+ *
+ * Other streams in this tab with the same codec would fail the same way, so
+ * they switch now too instead of each failing first.
+ *
+ * Returns false when there is nothing to switch to (no such stream, or it is
+ * already the sidecar); the caller then treats it as an ordinary error.
+ */
+export function decoderFailed(monitorId, variant) {
+  const c = conns.get(`${monitorId}|${variant}`);
+  if (!c || c.closed || c.transcode || !c.meta) return false;
+  const codec = c.meta.codec;
+  const memo = memoForDecoderFailure(Date.now());
+  for (const x of conns.values()) {
+    if (x.closed || x.transcode || !x.meta || x.meta.codec !== codec) continue;
+    x.transcode = true;
+    rememberTranscode(x.monitorId, x.variant, memo);
+    x.meta = null; x.init = null; x.gop = []; x.retry = 0; x.error = null;
+    for (const s of x.sinks) s.reset?.();
+    // Detach first so nothing more from the native socket reaches the sinks,
+    // then reopen asking for the sidecar.
+    const ws = x.ws;
+    x.ws = null;
+    try { ws?.close(); } catch { /* closed */ }
+    open(x);
+  }
+  return true;
 }
 
 /** monitorIds with a player on screen right now (sub or main). */

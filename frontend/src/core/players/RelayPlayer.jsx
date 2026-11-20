@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { subscribe } from '@/core/services/liveRelay';
+import { decoderFailed, subscribe } from '@/core/services/liveRelay';
 import { listen as listenAudio } from '@/core/services/liveAudio';
 import { createMseSink } from './relay/mseSink';
 import PlayerFrame from './PlayerFrame';
@@ -73,7 +73,13 @@ export default function RelayPlayer({
 
     const subSink = createMseSink(subEl, {
       onFirstFrame: () => { if (alive) setState('playing'); },
-      onError: fail,
+      // The browser can't decode the camera's own codec after all: switch this
+      // stream to the server's H.264 over the relay before counting it as a
+      // relay failure, which would hand the tile to the slower WebRTC path.
+      onError: (msg) => {
+        if (msg === 'decoder' && decoderFailed(monitorId, 'sub')) return;
+        fail(msg);
+      },
     });
     const unsubSub = subscribe(monitorId, 'sub', subSink);
 
@@ -83,7 +89,9 @@ export default function RelayPlayer({
     if (wantMain) {
       mainSink = createMseSink(mainEl, {
         onFirstFrame: () => { if (alive) setState('playing'); },
-        onError: () => { /* main is optional: the sub keeps playing */ },
+        // Main is optional (the sub keeps playing), but a decoder that can't
+        // play its codec would leave fullscreen on the sub for good.
+        onError: (msg) => { if (msg === 'decoder') decoderFailed(monitorId, 'main'); },
       });
       unsubMain = subscribe(monitorId, 'main', mainSink);
 
