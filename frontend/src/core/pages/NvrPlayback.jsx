@@ -151,7 +151,7 @@ export default function NvrPlayback() {
   const monitorRef = useRef(monitorId);
   const phaseRef = useRef('idle');
   const rateRef = useRef(1);
-  const mutedRef = useRef(true);       // starts muted, like the cloud player
+  const mutedRef = useRef(false);      // starts with sound; playOrMute mutes if the browser refuses
   const wallRef = useRef(null);       // playhead wall clock, updated on every timeupdate
   const pausedAtRef = useRef(null);
   const startRef = useRef(null);
@@ -170,7 +170,7 @@ export default function NvrPlayback() {
   const [rate, setRateState] = useState(1);
   const [uiVisible, setUiVisible] = useState(true);
   const [speedOpen, setSpeedOpen] = useState(false);
-  const [muted, setMuted] = useState(true);
+  const [muted, setMuted] = useState(false);
   // The browser refused to play with sound: show the player as muted.
   const forcedMute = useCallback(() => { mutedRef.current = true; setMuted(true); }, []);
   const [toast, setToast] = useState(null);
