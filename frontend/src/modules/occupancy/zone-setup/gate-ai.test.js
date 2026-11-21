@@ -102,7 +102,7 @@ test('detection areas are never sent, so turning AI on cannot wipe one', async (
   assert.equal('detectionZones' in m.calls.enable[0].payload, false);
   assert.deepEqual(
     Object.keys(enableAiPayload(row())).sort(),
-    ['enabled', 'fps', 'journeyMapping', 'mode', 'priority', 'purpose', 'unknownAlerts', 'watchlistAlerts'],
+    ['detectionInputSize', 'enabled', 'fps', 'journeyMapping', 'mode', 'priority', 'purpose', 'unknownAlerts', 'watchlistAlerts'],
   );
 });
 

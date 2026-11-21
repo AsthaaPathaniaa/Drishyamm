@@ -29,6 +29,8 @@
  * are injected (see useGateDraft.js for the real ones).
  */
 
+import { buildEnablePayload } from '../../../core/services/aiCamera.js';
+
 /** Where an account's plan is shown. /pricing is parked (App.jsx), so this is it. */
 export const PLAN_PATH = '/settings?tab=organization';
 
@@ -72,17 +74,7 @@ export function gatePurpose(row) {
  * setting the camera already had is carried, not reset to a default.
  */
 export function enableAiPayload(row) {
-  const ai = row?.ai || {};
-  return {
-    enabled: true,
-    mode: 'continuous',
-    fps: ai.fps || 4,
-    purpose: gatePurpose(row),
-    priority: ai.priority || 'normal',
-    unknownAlerts: ai.unknownAlerts !== false,
-    watchlistAlerts: ai.watchlistAlerts !== false,
-    journeyMapping: ai.journeyMapping !== false,
-  };
+  return buildEnablePayload(row, { purpose: gatePurpose(row) });
 }
 
 /**
