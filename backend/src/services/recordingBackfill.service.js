@@ -56,6 +56,7 @@ const streamRouter     = require('./streamRouter.service');
 const streamingService = require('./drishyamStreaming.service');
 const edgeRelay        = require('./edgeRelay.service');
 const nvrLoad          = require('./nvrLoad.service');
+const { AAC_AUDIO_ARGS } = require('../utils/nvrAudio');
 
 let Camera, CameraGroup;
 const loadModels = () => {
@@ -313,7 +314,8 @@ function pullFrom(job, sourceUrl) {
       '-fflags', '+genpts',
       '-i', sourceUrl,
       '-t', String(durSec),
-      '-map', '0:v:0', '-c:v', 'copy', '-an',             // as recorded; NVR audio is G.711
+      '-map', '0:v:0', '-c:v', 'copy',                    // video as recorded
+      ...AAC_AUDIO_ARGS,                                  // NVR G.711 → AAC
       '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
       '-f', 'mp4', '-y', tmp,
     ];
@@ -359,7 +361,7 @@ function splitClips(src, dir, startMs) {
   return new Promise((resolve) => {
     const proc = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-y', '-i', src,
-      '-map', '0:v:0', '-c', 'copy',
+      '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy',   // keep the audio track
       '-f', 'segment', '-segment_time', String(CLIP_SEC), '-reset_timestamps', '1',
       '-segment_format', 'mp4', '-segment_format_options', 'movflags=+faststart',
       '-segment_list', list, '-segment_list_type', 'csv',

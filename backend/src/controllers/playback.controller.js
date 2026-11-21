@@ -23,6 +23,7 @@
 const { spawn } = require('node:child_process');
 const asyncHandler = require('../middleware/asyncHandler');
 const AppError = require('../utils/AppError');
+const { AAC_AUDIO_ARGS } = require('../utils/nvrAudio');
 const { Camera, CameraGroup } = require('../models');
 const vendors = require('../services/vendors');
 const streamRouter = require('../services/streamRouter.service');
@@ -87,8 +88,9 @@ function spawnTranscode(pathN, nvrRtsp, edgeJob = null, { copy = false } = {}) {
     '-hide_banner', '-loglevel', 'error',
     '-rtsp_transport', 'tcp',
     '-i', nvrRtsp,
-    '-an',                                   // drop NVR G711 audio (HLS trouble)
-    ...video,
+    // NVR audio is G.711, which HLS can't carry: re-encoded to AAC.
+    '-map', '0:v:0', ...video,
+    ...AAC_AUDIO_ARGS,
     '-f', 'rtsp', '-rtsp_transport', 'tcp', `${MEDIAMTX_RTSP}/${pathN}`,
   ];
   const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -347,8 +349,8 @@ function exportArgs(nvrRtsp, durationSec, format) {
     '-rtsp_transport', 'tcp',
     '-i', nvrRtsp,
     '-t', String(durationSec),
-    '-an',
-    ...video,
+    '-map', '0:v:0', ...video,
+    ...AAC_AUDIO_ARGS,                       // G.711 → AAC, so the clip has sound
     // Fragmented MP4: bytes (and the browser's download progress) start within
     // seconds instead of after the whole clip has been encoded.
     '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
