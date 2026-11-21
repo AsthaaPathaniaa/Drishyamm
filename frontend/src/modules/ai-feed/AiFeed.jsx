@@ -32,6 +32,8 @@ import {
 import { useGroups } from '@/core/hooks/useQueries';
 import { siteService } from '@/core/services/site';
 import { aiService } from '@/core/services/ai';
+import { buildDisablePayload, buildEnablePayload } from '@/core/services/aiCamera';
+import AiSetupDrawer from '@/core/components/AiSetupDrawer';
 import { on as onSocket, connectSocket } from '@/core/services/socket';
 import { AI_BASE, AI_WS } from '@/core/config/endpoints';
 import { cn } from '@/core/lib/utils';
@@ -236,8 +238,11 @@ export default function AiFeed() {
   }, [selectedId, demo, setCameraDetections]);
 
   // Fast poll for the selected camera, slower sweep for every AI-enabled one.
+  // Only when AI is on for it: a camera with AI off has no detections, and
+  // polling it anyway floods the console when the AI service is down.
+  const selectedAiOn = aiByMonitor.get(selectedId)?.ai?.enabled === true;
   useEffect(() => {
-    if (!selectedId || demo) return undefined;
+    if (!selectedId || demo || !selectedAiOn) return undefined;
     const poll = async () => {
       try {
         const r = await fetch(`${AI_BASE}/api/detections/${encodeURIComponent(selectedId)}`);
@@ -247,7 +252,7 @@ export default function AiFeed() {
     poll();
     const t = setInterval(poll, 350);
     return () => clearInterval(t);
-  }, [selectedId, demo, setCameraDetections]);
+  }, [selectedId, demo, selectedAiOn, setCameraDetections]);
 
   useEffect(() => {
     if (demo) return undefined;
@@ -285,18 +290,12 @@ export default function AiFeed() {
   }, [selectedId, demo]);
 
   // ── AI lifecycle (start/keep the model running on a camera) ──────────────
-  const lifecyclePayload = (camera, ai, enabled) => ({
-    enabled,
-    mode: 'continuous',
-    fps: ai.fps || 8,
-    detectionInputSize: ai.detectionInputSize || 960,
-    detectionZones: ai.detectionZones || [],
-    purpose: ai.purpose || camera.name || 'AI Feed',
-    priority: ai.priority || 'normal',
-    unknownAlerts: ai.unknownAlerts !== false,
-    watchlistAlerts: ai.watchlistAlerts !== false,
-    journeyMapping: ai.journeyMapping !== false,
-  });
+  // Built by the shared helper so AI Feed, Camera Setup and Occupancy send
+  // the same body. Zones are only sent where AI Feed edits them.
+  const lifecyclePayload = (camera, ai, enabled) => {
+    const row = { name: camera.name, groupName: camera.groupName, ai };
+    return enabled ? buildEnablePayload(row) : buildDisablePayload(row);
+  };
 
   const ensureCameraLifecycle = useCallback(async (monitorId) => {
     const camera = cameras.find((item) => item.monitorId === monitorId);
@@ -328,24 +327,23 @@ export default function AiFeed() {
     }
   }, [demo, ensureCameraLifecycle]);
 
-  const handleEnableAi = useCallback(async (cam) => {
+  // "Set up AI" opens the same drawer Camera Setup → AI Detection uses, right
+  // here, so the operator sees which features they are turning on without
+  // leaving the feed. The camera detail drawer is closed first so two side
+  // panels never stack.
+  const [setupMonitorId, setSetupMonitorId] = useState('');
+  const setupRow = setupMonitorId ? aiByMonitor.get(setupMonitorId) || null : null;
+  const handleEnableAi = useCallback((cam) => {
     const monitorId = cam?.monitorId;
     if (!monitorId || demo) return;
-    const camera = cameras.find((item) => item.monitorId === monitorId);
-    if (!camera?.id) return;
-    const ai = aiByMonitor.get(monitorId)?.ai || {};
+    setOpenCameraId('');
     setSelectedId(monitorId);
-    try {
-      const response = await aiService.updateCameraAiLifecycle(camera.id, lifecyclePayload(camera, ai, true));
-      await loadAiRows();
-      if (response.reconcile && response.reconcile.ok === false) {
-        throw new Error(response.reconcile.error || 'AI service did not start this camera.');
-      }
-      setEngineStatus((prev) => ({ ...prev, error: null }));
-    } catch (e) {
-      setEngineStatus({ running: false, detecting: false, error: e.message || 'AI start failed' });
-    }
-  }, [aiByMonitor, cameras, demo, loadAiRows]);
+    setSetupMonitorId(monitorId);
+  }, [demo]);
+  const handleAiSaved = useCallback(async () => {
+    await loadAiRows();
+    setEngineStatus((prev) => ({ ...prev, error: null }));
+  }, [loadAiRows]);
 
   // Keep the selected camera's model alive, and sweep the rest every 15 s.
   useEffect(() => {
@@ -946,6 +944,8 @@ export default function AiFeed() {
         onSave={handleSaveZones}
         onSelectCamera={handleSelect}
       />
+
+      <AiSetupDrawer camera={setupRow} onClose={() => setSetupMonitorId('')} onSaved={handleAiSaved} />
 
       <RegisterFaceDialog open={registerOpen} onOpenChange={setRegisterOpen} initialName={registerName} />
     </OperationsPage>

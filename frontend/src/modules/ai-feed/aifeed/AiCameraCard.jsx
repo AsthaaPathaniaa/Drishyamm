@@ -143,7 +143,7 @@ export default function AiCameraCard({
         className="inline-flex h-5 shrink-0 items-center gap-1 rounded bg-brand px-1.5 text-micro font-bold normal-case tracking-normal text-white transition hover:bg-brand-hover"
       >
         <ScanFace className="h-3 w-3" strokeWidth={2.2} />
-        Enable AI
+        Set up AI
       </button>
     );
   }
