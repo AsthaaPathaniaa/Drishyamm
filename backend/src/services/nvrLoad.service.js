@@ -22,8 +22,9 @@
 //                 backfill), registered with track()
 //   • Interactive work (someone is replaying or exporting footage) claims the
 //     NVR with claim(). While a claim is held, background work on that NVR
-//     (warm-keeper, backfill) does not start, and listeners of 'interactive'
-//     stop what they can give back.
+//     (warm-keeper, backfill, AI detection) does not start, and listeners of
+//     'interactive' stop what they can give back. 'released' (host) fires when
+//     the last claim on an NVR ends, so paused work can resume promptly.
 //   • Background work only starts while the NVR has room below its limit
 //     minus NVR_INTERACTIVE_RESERVE, so a person opening playback always finds
 //     a free session.
@@ -98,7 +99,9 @@ function claim(host) {
     if (released) return;
     released = true;
     const n = (_claims.get(host) || 1) - 1;
-    if (n > 0) _claims.set(host, n); else _claims.delete(host);
+    if (n > 0) { _claims.set(host, n); return; }
+    _claims.delete(host);
+    events.emit('released', host);
   };
 }
 
