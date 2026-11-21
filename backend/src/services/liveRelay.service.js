@@ -108,6 +108,10 @@ function codecFromInit(init) {
 // re-encodes it to AAC (the video stays a stream copy). G.711 at 8 kHz mono
 // costs next to nothing to encode. RELAY_AUDIO=0 turns it off.
 const AUDIO_ON = process.env.RELAY_AUDIO !== '0';
+// NVR playback (`once` relays) carries audio on its own switch: RELAY_AUDIO=0
+// is about live-view latency, which a recording replay doesn't have.
+// PLAYBACK_AUDIO=0 turns playback audio off.
+const PLAYBACK_AUDIO_ON = process.env.PLAYBACK_AUDIO !== '0';
 const AUDIO_CODEC = 'mp4a.40.2'; // AAC-LC
 
 // The track ID of the video track in an init segment (the trak whose handler
@@ -261,9 +265,10 @@ async function spawnRelay(relay) {
     if (relay.nvrUrl) { input = relay.nvrUrl; relay.direct = true; }
   }
   if (relay.stopped) return;
-  // Live view carries the camera's audio as AAC. NVR playback (once) stays
-  // video only: its player has no sound control and is always muted.
-  const audio = AUDIO_ON && !relay.once;
+  // Live view and NVR playback (once) carry the camera's audio as AAC, each on
+  // its own switch. Playback fills audio gaps with silence (aresample) so a
+  // late NVR audio packet can't hold the picture back in MediaSource.
+  const audio = relay.once ? PLAYBACK_AUDIO_ON : AUDIO_ON;
   const args = [
     '-hide_banner', '-loglevel', process.env.RELAY_TRACE ? 'debug' : 'error', '-nostdin',
     '-rtsp_transport', 'tcp',
@@ -285,6 +290,7 @@ async function spawnRelay(relay) {
     // `?`: a camera without audio just has none.
     ...(audio ? [
       '-map', '0:a:0?', '-c:a', 'aac', '-ar', '48000', '-ac', '1', '-b:a', '64k',
+      ...(relay.once ? ['-af', 'aresample=async=1'] : []),
       // Don't hold video back more than 1 s waiting for audio.
       '-max_interleave_delta', '1000000',
     ] : []),

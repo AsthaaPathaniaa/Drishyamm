@@ -4,7 +4,7 @@ import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-quer
 import Hls from 'hls.js';
 import {
   AlertTriangle, ArrowRight, Bookmark, Camera as CameraIcon, CalendarDays, Check, ChevronDown, CirclePlay,
-  Clock, Loader2, Maximize, Pause, Play, RotateCcw, RotateCw, Video, VolumeX,
+  Clock, Loader2, Maximize, Pause, Play, RotateCcw, RotateCw, Video, Volume2, VolumeX,
 } from 'lucide-react';
 import { cn } from '@/core/lib/utils';
 import TimeField from '@/core/ui/TimeField';
@@ -32,6 +32,18 @@ const LAST_CAMERA_KEY = 'playback.lastCamera';
 const END_GRACE_MS = 3000;          // slack between the NVR's end of footage and our clock
 const STALL_MS = 20_000;            // no new video for this long while playing = the replay died
 const RESUME_RESTART_MS = 20_000;   // the NVR keeps replaying while paused; past this, resume re-asks from the paused moment
+// Play, and if the browser refuses sound without a click (autoplay policy, e.g.
+// a session that restarts on its own while unmuted), play muted instead of
+// leaving the picture stopped.
+function playOrMute(video, onForcedMute) {
+  video.play().catch((err) => {
+    if (err?.name !== 'NotAllowedError' || video.muted) return;
+    video.muted = true;
+    onForcedMute?.();
+    video.play().catch(() => {});
+  });
+}
+
 const HLS_CONFIG = {
   startPosition: 0,                 // from the first second the NVR sent, not the live edge
   backBufferLength: 180,            // keep 3 min behind the playhead for instant rewind
@@ -131,6 +143,7 @@ export default function NvrPlayback() {
   const monitorRef = useRef(monitorId);
   const phaseRef = useRef('idle');
   const rateRef = useRef(1);
+  const mutedRef = useRef(true);       // starts muted, like the cloud player
   const wallRef = useRef(null);       // playhead wall clock, updated on every timeupdate
   const pausedAtRef = useRef(null);
   const startRef = useRef(null);
@@ -147,6 +160,9 @@ export default function NvrPlayback() {
   const [rate, setRateState] = useState(1);
   const [uiVisible, setUiVisible] = useState(true);
   const [speedOpen, setSpeedOpen] = useState(false);
+  const [muted, setMuted] = useState(true);
+  // The browser refused to play with sound: show the player as muted.
+  const forcedMute = useCallback(() => { mutedRef.current = true; setMuted(true); }, []);
   const [toast, setToast] = useState(null);
   const [thumbs, setThumbs] = useState(loadThumbs);
   const [bookmarkVersion, setBookmarkVersion] = useState(0);
@@ -318,7 +334,7 @@ export default function NvrPlayback() {
           if (gen !== genRef.current) return;
           setPhase('playing');
           video.playbackRate = rateRef.current;
-          video.play().catch(() => {});
+          playOrMute(video, forcedMute);
         });
         hls.on(Hls.Events.ERROR, (_e, d) => {
           if (!d?.fatal || gen !== genRef.current) return;
@@ -340,7 +356,7 @@ export default function NvrPlayback() {
           if (gen !== genRef.current) return;
           setPhase('playing');
           video.playbackRate = rateRef.current;
-          video.play().catch(() => {});
+          playOrMute(video, forcedMute);
         }, { once: true });
         video.addEventListener('error', () => {
           if (gen !== genRef.current) return;
@@ -353,7 +369,7 @@ export default function NvrPlayback() {
       }
     };
     run();
-  }, [setPhase]);
+  }, [setPhase, forcedMute]);
 
   // Fast path: the NVR's own stream (H.265 as recorded, no server transcode)
   // over the backend live relay WebSocket into MediaSource. Every frame is
@@ -395,7 +411,7 @@ export default function NvrPlayback() {
         video.currentTime = video.buffered.start(0);
         setPhase('playing');
         video.playbackRate = rateRef.current;
-        video.play().catch(() => {});
+        playOrMute(video, forcedMute);
       }
       trim(false);
       pump();
@@ -454,7 +470,7 @@ export default function NvrPlayback() {
       // stall check sees the end and carries on from there.
       if (!r.started) fallbackRef.current?.(gen);
     };
-  }, [setPhase]);
+  }, [setPhase, forcedMute]);
 
   // Replay from `target` (epoch ms). Inside the range it plays to the range's
   // end; outside it (day view) to the end of that day. Sessions are cut into
@@ -614,7 +630,14 @@ export default function NvrPlayback() {
       startRef.current?.(wallRef.current ?? winRef.current.start);
       return;
     }
-    v.play().catch(() => {});
+    playOrMute(v, forcedMute);
+  }, [forcedMute]);
+
+  const toggleMute = useCallback(() => {
+    const next = !mutedRef.current;
+    mutedRef.current = next;
+    setMuted(next);
+    if (videoRef.current) videoRef.current.muted = next;
   }, []);
 
   const seekTo = useCallback((target, { preroll = false } = {}) => {
@@ -626,13 +649,13 @@ export default function NvrPlayback() {
       for (let i = 0; i < v.buffered.length; i += 1) {
         if (pos >= v.buffered.start(i) && pos <= v.buffered.end(i) - 0.5) {
           v.currentTime = pos;
-          if (v.paused) v.play().catch(() => {});
+          if (v.paused) playOrMute(v, forcedMute);
           return;
         }
       }
     }
     startRef.current?.(t);
-  }, []);
+  }, [forcedMute]);
 
   const nudge = useCallback((sec) => {
     seekTo((wallRef.current ?? winRef.current.start) + sec * 1000);
@@ -960,7 +983,7 @@ export default function NvrPlayback() {
                 <video
                   ref={videoRef}
                   playsInline
-                  muted
+                  muted={muted}
                   onTimeUpdate={onTimeUpdate}
                   onProgress={onTimeUpdate}
                   onPlay={onPlay}
@@ -1161,9 +1184,9 @@ export default function NvrPlayback() {
                           </div>
                         ) : null}
                       </div>
-                      <span title="No audio: NVR playback carries video only">
-                        <PlayerButton label="No audio in NVR playback" disabled><VolumeX className="h-4 w-4" /></PlayerButton>
-                      </span>
+                      <PlayerButton label={muted ? 'Unmute' : 'Mute'} onClick={toggleMute}>
+                        {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+                      </PlayerButton>
                       <PlayerButton label="Save snapshot" onClick={snapshot} disabled={phase !== 'playing'}>
                         <CameraIcon className="h-4 w-4" />
                       </PlayerButton>
