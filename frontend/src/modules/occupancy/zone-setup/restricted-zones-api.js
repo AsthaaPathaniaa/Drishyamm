@@ -13,15 +13,22 @@
  *   boundary [[x,y]] 0..1        points [{x,y}] 0..100 + rect
  *   access.mode                  alertOnEntry + allowed[]
  *   access.roles                 allowed[]
- *   access.scheduleMode/Hours    schedule + window
+ *   access.scheduleMode/Hours    schedule + armWindow
  *   severity critical|warn|info  priority critical|high|medium|low
  *   alertAfterSec                dwellSec
+ *   maxCapacity                  maxOccupancy
  *
  * What does NOT fit, and is kept on the browser alongside: the individual
- * whitelist, the capacity numbers, the loitering ceiling and the privacy mode.
- * The server model has no field for any of them, and inventing keys it will
- * drop would be worse than a split an operator can see — the panel says which
- * half is enforced where.
+ * whitelist, the loitering ceiling and the privacy mode. The server model has
+ * no field for those, and inventing keys it will drop would be worse than a
+ * split an operator can see — the panel says which half is enforced where.
+ *
+ * CORRECTION: this header used to list "the capacity numbers" among the fields
+ * the server cannot hold. That was wrong. `restricted_zones.maxOccupancy` has
+ * always existed and the intrusion engine has always read it; the REST route
+ * just never accepted the field. So a zone an operator configured by capacity
+ * reached the engine with no limit, and a zone meant to alert only when it is
+ * over its cap alarmed on every person instead. The capacity now round-trips.
  */
 import api from '@/core/services/api';
 
@@ -97,6 +104,12 @@ export function toApi(room, { cameraName } = {}) {
       ? { from: access.scheduleHours?.[0] || '09:00', to: access.scheduleHours?.[1] || '17:00' }
       : null,
     dwellSec: Number(room.alertAfterSec) || 0,
+    // The capacity rule the engine enforces. Sent even when it is 0 or absent,
+    // so clearing a limit clears it on the server too rather than leaving the
+    // last one armed. The engine treats 0/null as "no capacity rule" and falls
+    // back to entry alerts, which is what an operator who removed the limit
+    // asked for.
+    maxOccupancy: Number(room.maxCapacity) > 0 ? Math.round(Number(room.maxCapacity)) : null,
   };
 }
 
@@ -110,9 +123,14 @@ export function toApi(room, { cameraName } = {}) {
 export function fromApi(zone) {
   if (!zone?.monitorId) return null;
 
+  // The column is `armWindow` ("window" is reserved in the DB), and the route
+  // returns the row as it is stored. This used to read `zone.window` — the name
+  // the WRITE side uses, which the controller maps on the way in — so a custom
+  // schedule was saved correctly and then always read back as undefined, and
+  // the zone reverted to "always" on the next sync.
+  const win = zone.armWindow || zone.window || null;
   const named = NAMED_WINDOWS[zone.schedule];
-  const hours = named
-    || (zone.window ? [zone.window.from, zone.window.to] : null);
+  const hours = named || (win ? [win.from, win.to] : null);
 
   const allowed = Array.isArray(zone.allowed) ? zone.allowed : [];
   const mode = zone.alertOnEntry === false ? 'public' : (allowed.length ? 'restricted' : 'lockout');
@@ -124,6 +142,10 @@ export function fromApi(zone) {
     boundary: toAppBoundary(zone.points),
     severity: PRIORITY_TO_SEVERITY[zone.priority] || 'critical',
     alertAfterSec: Number(zone.dwellSec) || 0,
+    // Only when the server holds one. A partial room is merged over the local
+    // record, so returning `undefined` here would blank a capacity the operator
+    // set before this field round-tripped; omitting the key preserves it.
+    ...(Number(zone.maxOccupancy) > 0 ? { maxCapacity: Number(zone.maxOccupancy) } : null),
     access: {
       mode,
       roles: allowed,
