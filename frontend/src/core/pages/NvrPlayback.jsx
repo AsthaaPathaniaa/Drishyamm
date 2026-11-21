@@ -4,7 +4,7 @@ import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-quer
 import Hls from 'hls.js';
 import {
   AlertTriangle, ArrowRight, Bookmark, Camera as CameraIcon, CalendarDays, Check, ChevronDown, CirclePlay,
-  Clock, Loader2, Maximize, Pause, Play, RotateCcw, RotateCw, Video, VolumeX,
+  Clock, Loader2, Maximize, Pause, Play, RotateCcw, RotateCw, Video, Volume2, VolumeX,
 } from 'lucide-react';
 import { cn } from '@/core/lib/utils';
 import TimeField from '@/core/ui/TimeField';
@@ -31,7 +31,32 @@ const EVENTS_PAGE = 100;
 const LAST_CAMERA_KEY = 'playback.lastCamera';
 const END_GRACE_MS = 3000;          // slack between the NVR's end of footage and our clock
 const STALL_MS = 20_000;            // no new video for this long while playing = the replay died
+// Over the relay an open socket means the replay is alive: a busy NVR can go
+// quiet for half a minute and then carry on. Restarting would throw the
+// buffer away and queue a new session behind the stalled one, so the player
+// waits (buffering spinner) until the socket has been silent this long.
+const RELAY_SILENT_MS = 90_000;
 const RESUME_RESTART_MS = 20_000;   // the NVR keeps replaying while paused; past this, resume re-asks from the paused moment
+// When the buffer runs dry the player holds (paused, spinner) until it has a
+// lead again, instead of playing a fraction of a second and stopping again.
+// On a recorder link slower than real time the lead is sized so playback then
+// runs PLAY_RUN_S without a stop: lead = PLAY_RUN_S × (speed − link rate).
+const LEAD_MIN_S = 2;
+const LEAD_MAX_S = 30;
+const PLAY_RUN_S = 20;
+const DRY_S = 0.4;                  // less than this ahead while playing = the buffer ran dry
+// Play, and if the browser refuses sound without a click (autoplay policy, e.g.
+// a session that restarts on its own while unmuted), play muted instead of
+// leaving the picture stopped.
+function playOrMute(video, onForcedMute) {
+  video.play().catch((err) => {
+    if (err?.name !== 'NotAllowedError' || video.muted) return;
+    video.muted = true;
+    onForcedMute?.();
+    video.play().catch(() => {});
+  });
+}
+
 const HLS_CONFIG = {
   startPosition: 0,                 // from the first second the NVR sent, not the live edge
   backBufferLength: 180,            // keep 3 min behind the playhead for instant rewind
@@ -131,6 +156,7 @@ export default function NvrPlayback() {
   const monitorRef = useRef(monitorId);
   const phaseRef = useRef('idle');
   const rateRef = useRef(1);
+  const mutedRef = useRef(false);      // starts with sound; playOrMute mutes if the browser refuses
   const wallRef = useRef(null);       // playhead wall clock, updated on every timeupdate
   const pausedAtRef = useRef(null);
   const startRef = useRef(null);
@@ -143,10 +169,15 @@ export default function NvrPlayback() {
   const [error, setError] = useState(null);
   const [wallMs, setWallMs] = useState(null);
   const [bufferedMs, setBufferedMs] = useState(null);
+  const [buffering, setBuffering] = useState(null);   // { rate, lead, target } while holding for footage
+  const holdRef = useRef(false);                        // paused by the buffering hold, not by the viewer
   const [playing, setPlaying] = useState(false);
   const [rate, setRateState] = useState(1);
   const [uiVisible, setUiVisible] = useState(true);
   const [speedOpen, setSpeedOpen] = useState(false);
+  const [muted, setMuted] = useState(false);
+  // The browser refused to play with sound: show the player as muted.
+  const forcedMute = useCallback(() => { mutedRef.current = true; setMuted(true); }, []);
   const [toast, setToast] = useState(null);
   const [thumbs, setThumbs] = useState(loadThumbs);
   const [bookmarkVersion, setBookmarkVersion] = useState(0);
@@ -255,10 +286,10 @@ export default function NvrPlayback() {
   }, [events, wallMs]);
 
   // ── Session ───────────────────────────────────────────────────────────────
-  const flash = useCallback((text) => {
+  const flash = useCallback((text, ms = 1800) => {
     setToast(text);
     clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 1800);
+    toastTimer.current = setTimeout(() => setToast(null), ms);
   }, []);
 
   const pokeUi = useCallback(() => {
@@ -318,7 +349,7 @@ export default function NvrPlayback() {
           if (gen !== genRef.current) return;
           setPhase('playing');
           video.playbackRate = rateRef.current;
-          video.play().catch(() => {});
+          playOrMute(video, forcedMute);
         });
         hls.on(Hls.Events.ERROR, (_e, d) => {
           if (!d?.fatal || gen !== genRef.current) return;
@@ -340,7 +371,7 @@ export default function NvrPlayback() {
           if (gen !== genRef.current) return;
           setPhase('playing');
           video.playbackRate = rateRef.current;
-          video.play().catch(() => {});
+          playOrMute(video, forcedMute);
         }, { once: true });
         video.addEventListener('error', () => {
           if (gen !== genRef.current) return;
@@ -353,7 +384,7 @@ export default function NvrPlayback() {
       }
     };
     run();
-  }, [setPhase]);
+  }, [setPhase, forcedMute]);
 
   // Fast path: the NVR's own stream (H.265 as recorded, no server transcode)
   // over the backend live relay WebSocket into MediaSource. Every frame is
@@ -368,7 +399,7 @@ export default function NvrPlayback() {
       : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}${API_BASE}`;
     const ws = new WebSocket(`${wsBase}/api/stream/live?ticket=${encodeURIComponent(ticket)}`);
     ws.binaryType = 'arraybuffer';
-    const r = { ws, ms: null, sb: null, url: null, queue: [], mime: null, expectInit: false, started: false, dead: false, lastTrim: 0 };
+    const r = { ws, ms: null, sb: null, url: null, queue: [], mime: null, expectInit: false, started: false, dead: false, lastTrim: 0, lastDataAt: Date.now() };
     relayRef.current = r;
 
     const trim = (force) => {
@@ -395,13 +426,14 @@ export default function NvrPlayback() {
         video.currentTime = video.buffered.start(0);
         setPhase('playing');
         video.playbackRate = rateRef.current;
-        video.play().catch(() => {});
+        playOrMute(video, forcedMute);
       }
       trim(false);
       pump();
     };
     ws.onmessage = (e) => {
       if (r.dead || gen !== genRef.current) return;
+      r.lastDataAt = Date.now();
       if (typeof e.data === 'string') {
         let msg = null;
         try { msg = JSON.parse(e.data); } catch { return; }
@@ -448,13 +480,14 @@ export default function NvrPlayback() {
       pump();
     };
     ws.onclose = () => {
+      r.closed = true;                             // nothing more is coming: the hold plays out what's left
       if (r.dead || gen !== genRef.current) return;
       // Closed before a single frame: the NVR had nothing, or refused. Let the
       // HLS path try (it reports "no footage" properly). After playing, the
       // stall check sees the end and carries on from there.
       if (!r.started) fallbackRef.current?.(gen);
     };
-  }, [setPhase]);
+  }, [setPhase, forcedMute]);
 
   // Replay from `target` (epoch ms). Inside the range it plays to the range's
   // end; outside it (day view) to the end of that day. Sessions are cut into
@@ -495,6 +528,11 @@ export default function NvrPlayback() {
       const data = await playbackService.start({ monitorId: mon, start: iso(startMs), end: iso(endMs), relay, hevc: canDecodeHevc() });
       if (gen !== genRef.current) { playbackService.stop(data.pathName).catch(() => {}); return; }
       sessionRef.current.pathName = data.pathName;
+      // The recorder is already serving all the streams it serves well
+      // (backend nvrLoad): say so, rather than leave the player to stall.
+      if (data.nvrLoad?.full) {
+        flash(`Recorder busy: ${data.nvrLoad.inUse} of ${data.nvrLoad.limit} streams in use. Playback may pause; closing other live views frees it.`, 8000);
+      }
       if (data.mode === 'relay' && data.ticket) attachRelay(data.ticket, gen);
       else attach(data.hlsUrl, gen);
     } catch (e) {
@@ -502,7 +540,7 @@ export default function NvrPlayback() {
       setPhase('error');
       setError(e?.response?.data?.message || 'Could not start NVR playback.');
     }
-  }, [attach, attachRelay, setPhase, teardown]);
+  }, [attach, attachRelay, flash, setPhase, teardown]);
 
   const onStreamLost = useCallback((gen) => {
     const s = sessionRef.current;
@@ -545,14 +583,59 @@ export default function NvrPlayback() {
     const id = setInterval(() => {
       const v = videoRef.current;
       const s = sessionRef.current;
-      if (!v || !s || v.paused || !s.played) { lastChange = Date.now(); return; }
+      if (!v || !s || (v.paused && !holdRef.current) || !s.played) { lastChange = Date.now(); return; }
       let end = 0;
       try { end = v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0; } catch { /* ignore */ }
       if (end > lastEnd + 0.1) { lastEnd = end; lastChange = Date.now(); return; }
+      const r = relayRef.current;
+      if (r && !r.closed && Date.now() - r.lastDataAt < RELAY_SILENT_MS) { lastChange = Date.now(); return; }
       if (Date.now() - lastChange > STALL_MS && v.currentTime >= end - 0.5) lostRef.current?.(s.gen);
     }, 2000);
     return () => clearInterval(id);
   }, [phase]);
+
+  // Buffering hold (see LEAD_MIN_S). The link rate is measured from how fast
+  // the buffered end grows, in seconds of footage per second of wall time.
+  useEffect(() => {
+    if (phase !== 'playing') return undefined;
+    const samples = [];
+    const id = setInterval(() => {
+      const v = videoRef.current;
+      const s = sessionRef.current;
+      if (!v || !s) return;
+      let end = 0;
+      try { end = v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0; } catch { /* ignore */ }
+      const now = performance.now();
+      samples.push([now, end]);
+      while (samples.length > 2 && now - samples[0][0] > 15_000) samples.shift();
+      const [t0, e0] = samples[0];
+      const linkRate = now - t0 >= 4000 ? Math.max(0, (end - e0) / ((now - t0) / 1000)) : null;
+      const speed = v.playbackRate || 1;
+      const target = linkRate != null && linkRate < speed * 0.95
+        ? Math.min(LEAD_MAX_S, Math.max(LEAD_MIN_S, PLAY_RUN_S * (speed - linkRate)))
+        : LEAD_MIN_S;
+      const lead = Math.max(0, end - v.currentTime);
+      const closed = !!relayRef.current?.closed;
+      const info = { rate: linkRate, lead: Math.floor(lead), target: Math.ceil(target) };
+      if (holdRef.current) {
+        if (lead >= target || closed) {
+          holdRef.current = false;
+          setBuffering(null);
+          playOrMute(v, forcedMute);
+        } else {
+          setBuffering((prev) => (prev && prev.lead === info.lead && prev.target === info.target
+            && Math.round((prev.rate ?? -1) * 100) === Math.round((info.rate ?? -1) * 100) ? prev : info));
+        }
+        return;
+      }
+      if (!v.paused && s.played && lead < DRY_S && !closed) {
+        holdRef.current = true;
+        v.pause();
+        setBuffering(info);
+      }
+    }, 500);
+    return () => { clearInterval(id); holdRef.current = false; setBuffering(null); };
+  }, [phase, forcedMute]);
 
   useEffect(() => () => { genRef.current += 1; teardown(); }, [teardown]);
   useEffect(() => {
@@ -600,7 +683,10 @@ export default function NvrPlayback() {
     s.played = true;
     if (!s.thumbed) { s.thumbed = true; setTimeout(() => grabThumb(s), 1200); }
   };
-  const onPause = () => { setPlaying(false); setUiVisible(true); pausedAtRef.current = Date.now(); };
+  const onPause = () => {
+    if (holdRef.current) return;     // the buffering hold: still "playing" for the viewer
+    setPlaying(false); setUiVisible(true); pausedAtRef.current = Date.now();
+  };
 
   // ── Controls ──────────────────────────────────────────────────────────────
   const togglePlay = useCallback(() => {
@@ -609,12 +695,25 @@ export default function NvrPlayback() {
     if (ph === 'ended') { startRef.current?.(winRef.current.start); return; }
     const v = videoRef.current;
     if (ph !== 'playing' || !v) return;
+    if (holdRef.current) {           // pause pressed while buffering: stay paused once it's ready
+      holdRef.current = false;
+      setBuffering(null);
+      setPlaying(false); setUiVisible(true); pausedAtRef.current = Date.now();
+      return;
+    }
     if (!v.paused) { v.pause(); return; }
     if (pausedAtRef.current && Date.now() - pausedAtRef.current > RESUME_RESTART_MS) {
       startRef.current?.(wallRef.current ?? winRef.current.start);
       return;
     }
-    v.play().catch(() => {});
+    playOrMute(v, forcedMute);
+  }, [forcedMute]);
+
+  const toggleMute = useCallback(() => {
+    const next = !mutedRef.current;
+    mutedRef.current = next;
+    setMuted(next);
+    if (videoRef.current) videoRef.current.muted = next;
   }, []);
 
   const seekTo = useCallback((target, { preroll = false } = {}) => {
@@ -626,13 +725,15 @@ export default function NvrPlayback() {
       for (let i = 0; i < v.buffered.length; i += 1) {
         if (pos >= v.buffered.start(i) && pos <= v.buffered.end(i) - 0.5) {
           v.currentTime = pos;
-          if (v.paused) v.play().catch(() => {});
+          holdRef.current = false;
+          setBuffering(null);
+          if (v.paused) playOrMute(v, forcedMute);
           return;
         }
       }
     }
     startRef.current?.(t);
-  }, []);
+  }, [forcedMute]);
 
   const nudge = useCallback((sec) => {
     seekTo((wallRef.current ?? winRef.current.start) + sec * 1000);
@@ -960,7 +1061,7 @@ export default function NvrPlayback() {
                 <video
                   ref={videoRef}
                   playsInline
-                  muted
+                  muted={muted}
                   onTimeUpdate={onTimeUpdate}
                   onProgress={onTimeUpdate}
                   onPlay={onPlay}
@@ -984,7 +1085,7 @@ export default function NvrPlayback() {
                 </div>
 
                 {toast ? (
-                  <div className="pointer-events-none absolute left-1/2 top-16 z-30 -translate-x-1/2 rounded-full bg-black/75 px-3 py-1.5 text-caption font-semibold text-white">
+                  <div className="pointer-events-none absolute left-1/2 top-16 z-30 w-max max-w-[90%] -translate-x-1/2 rounded-2xl bg-black/75 px-3 py-1.5 text-center text-caption font-semibold text-white">
                     {toast}
                   </div>
                 ) : null}
@@ -1019,6 +1120,26 @@ export default function NvrPlayback() {
                       <Loader2 className="h-8 w-8 animate-spin text-brand" />
                       <p className="text-body font-semibold text-white">Fetching footage from the NVR…</p>
                       <p className="text-small text-white/60">On-demand playback takes a few seconds to start.</p>
+                    </div>
+                  </div>
+                ) : null}
+
+                {phase === 'playing' && buffering ? (
+                  <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center bg-slate-950/40">
+                    <div className="flex max-w-sm flex-col items-center gap-2 rounded-2xl bg-black/70 px-4 py-3 text-center">
+                      <Loader2 className="h-7 w-7 animate-spin text-brand" />
+                      <p className="text-small font-semibold text-white">
+                        {buffering.rate != null && buffering.rate < rate * 0.95
+                          ? 'The recorder is sending footage slower than real time'
+                          : 'Buffering footage…'}
+                      </p>
+                      <p className="text-caption tabular-nums text-white/70">
+                        {buffering.lead} of {buffering.target} s buffered
+                        {buffering.rate != null ? ` · link ${buffering.rate.toFixed(2)}× real time` : ''}
+                      </p>
+                      {buffering.rate != null && buffering.rate < rate * 0.95 ? (
+                        <p className="text-caption text-white/60">Playback resumes once enough is buffered. Background streams on this recorder are paused while you watch.</p>
+                      ) : null}
                     </div>
                   </div>
                 ) : null}
@@ -1161,9 +1282,9 @@ export default function NvrPlayback() {
                           </div>
                         ) : null}
                       </div>
-                      <span title="No audio: NVR playback carries video only">
-                        <PlayerButton label="No audio in NVR playback" disabled><VolumeX className="h-4 w-4" /></PlayerButton>
-                      </span>
+                      <PlayerButton label={muted ? 'Unmute' : 'Mute'} onClick={toggleMute}>
+                        {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+                      </PlayerButton>
                       <PlayerButton label="Save snapshot" onClick={snapshot} disabled={phase !== 'playing'}>
                         <CameraIcon className="h-4 w-4" />
                       </PlayerButton>

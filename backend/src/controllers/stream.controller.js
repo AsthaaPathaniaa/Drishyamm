@@ -352,6 +352,9 @@ const liveTicket = asyncHandler(async (req, res) => {
   if (!camera) throw new AppError('Camera not found', 404);
   const variant = req.query.variant === 'main' ? 'main' : 'sub';
   const relay = require('../services/liveRelay.service');
+  // A person opening live view gets the camera back even while a replay from
+  // its NVR has the background streams parked (nvrFocus).
+  await require('../services/nvrFocus.service').unparkCamera(monitorId).catch(() => {});
   // ?audio=1: the camera's sound on its own socket (liveAudio.service), read
   // from the raw camera path — the H.264 sidecar carries no audio.
   if (req.query.audio === '1') {
