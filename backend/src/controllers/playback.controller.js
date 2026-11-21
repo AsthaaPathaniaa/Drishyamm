@@ -151,11 +151,13 @@ function claimNvr(cam, kind) {
   const host = nvrHost(cam);
   // Live view addresses the camera by its own host; normally the NVR's.
   const hosts = [...new Set([host, cam.camera.host].filter(Boolean))];
-  const releases = hosts.map((h) => nvrLoad.claim(h));
+  // The claim is this user's: only their own background streams yield.
+  const userId = cam.camera.userId ?? null;
+  const releases = hosts.map((h) => nvrLoad.claim(h, userId));
   if (kind) releases.push(nvrLoad.track(host, kind));
   for (const h of hosts) {
     require('../services/streamWarm.service')
-      .yieldForMain({ host: h, monitorId: cam.camera.monitorId }).catch(() => {});
+      .yieldForMain({ host: h, monitorId: cam.camera.monitorId, userId }).catch(() => {});
   }
   const load = nvrLoad.usage(host);
   if (load.full) {

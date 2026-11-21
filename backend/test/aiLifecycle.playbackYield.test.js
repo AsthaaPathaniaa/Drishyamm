@@ -6,7 +6,7 @@
 jest.mock('../src/config/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../src/config/env', () => ({ aiServiceUrl: 'http://ai' }));
 jest.mock('../src/services/aiClockSkew', () => ({ recordAiClock: () => {} }));
-jest.mock('../src/services/entitlements.service', () => ({ getAiEntitledUserIds: async () => new Set(['u1']) }));
+jest.mock('../src/services/entitlements.service', () => ({ getAiEntitledUserIds: async () => new Set(['u1', 'u2']) }));
 const mockCameras = [];
 jest.mock('../src/models', () => ({ Camera: { findAll: async () => mockCameras }, CameraGroup: {} }));
 jest.mock('../src/services/liveRelay.service', () => ({ sessionsOnHost: () => 0 }));
@@ -39,12 +39,14 @@ beforeEach(() => {
   for (const k of Object.keys(mockRuntime)) delete mockRuntime[k];
 });
 
-test('playback on an NVR pauses detection there only, and ending it resumes', async () => {
-  mockCameras.push(cam('a', '10.0.0.1'), cam('b', '10.0.0.2'));
+test("a user's playback pauses detection on their cameras on that NVR only, and ending it resumes", async () => {
+  const otherUsers = { ...cam('o', '10.0.0.1'), userId: 'u2' };
+  mockCameras.push(cam('a', '10.0.0.1'), cam('b', '10.0.0.2'), otherUsers);
   mockRuntime.a = { running: true };
   mockRuntime.b = { running: true };
+  mockRuntime.o = { running: true };
 
-  const release = nvrLoad.claim('10.0.0.1');
+  const release = nvrLoad.claim('10.0.0.1', 'u1');
   await ai.reconcile();
   expect(mockPosts).toEqual(['stop-camera a']);
   expect(ai._internals.paused.has('a')).toBe(true);
@@ -59,7 +61,7 @@ test('playback on an NVR pauses detection there only, and ending it resumes', as
 });
 
 test("a camera is matched by its group's NVR host too", () => {
-  nvrLoad.claim('10.0.0.9');
+  nvrLoad.claim('10.0.0.9', 'u1');
   expect(ai._internals.yieldsToPlayback(cam('c', null, '10.0.0.9'))).toBe(true);
   expect(ai._internals.yieldsToPlayback(cam('d', '10.0.0.3'))).toBe(false);
 });
@@ -68,7 +70,7 @@ test('a camera with AI off is never started by the resume', async () => {
   const off = cam('e', '10.0.0.1');
   off.settings.ai.enabled = false;
   mockCameras.push(off);
-  nvrLoad.claim('10.0.0.1')();
+  nvrLoad.claim('10.0.0.1', 'u1')();
   await ai.reconcile();
   expect(mockPosts).toEqual([]);
 });

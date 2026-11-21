@@ -25,16 +25,17 @@ const nvrLoad = require('../src/services/nvrLoad.service');
 const { _internals: { sessions, stopSession, sweepEndedRelaySessions, claimNvr } } = require('../src/controllers/playback.controller');
 
 const cam = (over = {}) => ({
-  camera: { monitorId: 'm1', host: '10.0.0.1' }, group: { host: '10.0.0.1' }, deviceType: 'hikvision', edge: null, ...over,
+  camera: { monitorId: 'm1', host: '10.0.0.1', userId: 'u1' }, group: { host: '10.0.0.1' }, deviceType: 'hikvision', edge: null, ...over,
 });
 
 beforeEach(() => { nvrLoad._internals.reset(); sessions.clear(); mockRunning.clear(); mockYield.mockClear(); });
 
 test('playback claims its NVR, tracks its pull and frees warm sub-streams there', () => {
   const nvr = claimNvr(cam(), 'playback');
-  expect(nvrLoad.interactiveActive('10.0.0.1')).toBe(true);
+  expect(nvrLoad.interactiveActive('10.0.0.1', 'u1')).toBe(true);
+  expect(nvrLoad.interactiveActive('10.0.0.1', 'u2')).toBe(false);   // only this user's work yields
   expect(nvrLoad.usage('10.0.0.1').byKind.playback).toBe(1);
-  expect(mockYield).toHaveBeenCalledWith({ host: '10.0.0.1', monitorId: 'm1' });
+  expect(mockYield).toHaveBeenCalledWith({ host: '10.0.0.1', monitorId: 'm1', userId: 'u1' });
   nvr.release();
   nvr.release();
   expect(nvrLoad.interactiveActive('10.0.0.1')).toBe(false);
@@ -42,7 +43,7 @@ test('playback claims its NVR, tracks its pull and frees warm sub-streams there'
 });
 
 test('a camera addressed by its own host claims that host too', () => {
-  const nvr = claimNvr(cam({ camera: { monitorId: 'm1', host: '10.0.0.7' } }), null);
+  const nvr = claimNvr(cam({ camera: { monitorId: 'm1', host: '10.0.0.7', userId: 'u1' } }), null);
   expect(nvrLoad.interactiveActive('10.0.0.1')).toBe(true);
   expect(nvrLoad.interactiveActive('10.0.0.7')).toBe(true);
   nvr.release();
@@ -75,5 +76,5 @@ test('a relay replay whose relay ended is closed by the sweep; a connecting or r
   mockRunning.add('pb_running');
   sweepEndedRelaySessions(now);
   expect([...sessions.keys()].sort()).toEqual(['pb_connecting', 'pb_running']);
-  expect(nvrLoad._internals.claims.get('10.0.0.1')).toBe(2);
+  expect(nvrLoad._internals.claims.get('10.0.0.1|u1')).toBe(2);
 });

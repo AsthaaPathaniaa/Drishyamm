@@ -509,11 +509,12 @@ async function runJobs(jobs) {
   const budgetEnd = Date.now() + PASS_BUDGET_MS;
   const inFlight = new Set();
   const stopGuard = await guardLive(jobs, inFlight);
-  // Someone opened playback/export on an NVR we are pulling from directly:
-  // give those sessions back now. A stopped job counts as 'busy' (retried on
-  // the next pass, not a failure).
-  const onInteractive = (host) => {
-    const victims = [...inFlight].filter((j) => !j.edge && j.host === host);
+  // A camera's owner opened playback/export on an NVR we are pulling their
+  // camera from directly: give those sessions back now (other accounts' jobs
+  // carry on). A stopped job counts as 'busy' (retried on the next pass, not
+  // a failure).
+  const onInteractive = (host, userId) => {
+    const victims = [...inFlight].filter((j) => !j.edge && j.host === host && (j.camera.userId ?? null) === userId);
     for (const j of victims) { j.stopped = true; try { j.proc?.kill('SIGTERM'); } catch { /* gone */ } }
     if (victims.length) logger.info('backfill: playback opened on this NVR, yielding', { host, stopped: victims.length });
   };
@@ -538,7 +539,7 @@ async function runJobs(jobs) {
           // Direct NVR: only within its session budget, and never while
           // someone is replaying from it. Deferred to the next pass (not
           // skipped in place: with nothing running the pass would never end).
-          if (!job.edge && nvrLoad.backgroundRoom(job.host) <= 0) { queue.splice(i, 1); deferred++; continue; }
+          if (!job.edge && nvrLoad.backgroundRoom(job.host, job.camera.userId ?? null) <= 0) { queue.splice(i, 1); deferred++; continue; }
           queue.splice(i, 1);
           job.releaseLease = job.edge ? null : nvrLoad.track(job.host, 'backfill');
           if (!job.edge) active++;

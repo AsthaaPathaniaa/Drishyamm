@@ -1,6 +1,7 @@
-// While footage is replayed from an NVR, every background Stream Service path
-// of its cameras is parked (source → publisher, so nothing re-opens the NVR)
-// and idle live relays there stop; paths a person watches stay. When the claim
+// While a user replays footage from an NVR, the background Stream Service
+// paths of THAT USER's cameras there are parked (source → publisher, so
+// nothing re-opens the NVR) and their idle live relays stop; paths a person
+// watches, and other users' cameras on the same NVR, stay. When the claim
 // ends everything gets its source back (2026-11-21: AI + warm-keeper pulls left
 // recorded playback at 0.12-0.5x real time on a ~1 Mbit/s NVR uplink).
 
@@ -12,11 +13,12 @@ jest.mock('../src/config/redis', () => ({
   del: jest.fn(async (k) => { delete mockStore[k]; }),
 }));
 jest.mock('../src/models', () => ({
-  Camera: { findAll: async () => [
-    { monitorId: 'a', host: '10.0.0.1', group: null },
-    { monitorId: 'b', host: null, group: { host: '10.0.0.1' } },
-    { monitorId: 'c', host: '10.0.0.2', group: null },
-  ] },
+  Camera: { findAll: async ({ where }) => [
+    { monitorId: 'a', host: '10.0.0.1', group: null, userId: 'u1' },
+    { monitorId: 'b', host: null, group: { host: '10.0.0.1' }, userId: 'u1' },
+    { monitorId: 'c', host: '10.0.0.2', group: null, userId: 'u1' },
+    { monitorId: 'x', host: '10.0.0.1', group: null, userId: 'u2' },
+  ].filter((c) => !where?.userId || c.userId === where.userId) },
   CameraGroup: {},
 }));
 const mockConfigs = {};
@@ -47,7 +49,7 @@ jest.mock('../src/services/liveRelay.service', () => ({
   viewerCount: (p) => mockViewers[p] || 0,
   hostOf: (r) => r.host || null,
   releaseIdleWhere: (belongs) => {
-    const relays = [['cam_a_sub', {}], ['nvr_direct_x', { host: '10.0.0.1' }], ['cam_c_sub', {}]];
+    const relays = [['cam_a_sub', {}], ['cam_x_sub', { host: '10.0.0.1' }], ['cam_c_sub', {}]];
     const out = relays.filter(([p, r]) => belongs(p, r)).map(([p]) => p);
     mockReleased.push(...out);
     return out;
@@ -78,13 +80,14 @@ beforeEach(async () => {
   Object.assign(mockConfigs, {
     cam_a: rtsp('a'), cam_a_sub: rtsp('a_sub'), cam_b: { source: 'rtsp://nvr/b', sourceOnDemand: false },
     cam_b_sub: rtsp('b_sub'), cam_c: rtsp('c'), cam_c_sub: rtsp('c_sub'),
+    cam_x: rtsp('x'), cam_x_sub: rtsp('x_sub'),
   });
   await focus.start();
 });
 
-test('a claim parks the NVR\'s unwatched paths and idle relays; release restores them', async () => {
+test("a user's claim parks their unwatched paths and idle relays on that NVR; release restores them", async () => {
   mockPathList.push({ name: 'cam_a_sub_h264', readers: [{ type: 'webRTCSession' }] });   // someone watches a live
-  const release = nvrLoad.claim('10.0.0.1');
+  const release = nvrLoad.claim('10.0.0.1', 'u1');
   await settle();
 
   expect(mockConfigs.cam_a.source).toBe('publisher');
@@ -92,7 +95,9 @@ test('a claim parks the NVR\'s unwatched paths and idle relays; release restores
   expect(mockConfigs.cam_b.source).toBe('publisher');                         // via its group's NVR
   expect(mockConfigs.cam_b.sourceOnDemand).toBe(false);
   expect(mockConfigs.cam_c.source).toBe('rtsp://nvr/c');                      // other NVR untouched
-  expect(mockReleased.sort()).toEqual(['cam_a_sub', 'nvr_direct_x']);
+  expect(mockConfigs.cam_x.source).toBe('rtsp://nvr/x');                      // other user, same NVR: untouched
+  expect(mockConfigs.cam_x_sub.source).toBe('rtsp://nvr/x_sub');
+  expect(mockReleased).toEqual(['cam_a_sub']);                                // not the other user's relay
   expect(mockStopVariant).toHaveBeenCalledWith('a', 'main');
   expect(Object.keys(mockStore['nvrFocus:parked']).sort()).toEqual(['cam_a', 'cam_b', 'cam_b_sub']);
 
@@ -104,8 +109,14 @@ test('a claim parks the NVR\'s unwatched paths and idle relays; release restores
   expect(mockStore['nvrFocus:parked']).toBeUndefined();
 });
 
-test('opening live view of a parked camera gives it back at once', async () => {
+test('a claim without a user parks nothing', async () => {
   nvrLoad.claim('10.0.0.1');
+  await settle();
+  expect(mockPatches).toEqual([]);
+});
+
+test('opening live view of a parked camera gives it back at once', async () => {
+  nvrLoad.claim('10.0.0.1', 'u1');
   await settle();
   await focus.unparkCamera('a');
   expect(mockConfigs.cam_a.source).toBe('rtsp://nvr/a');
@@ -115,7 +126,7 @@ test('opening live view of a parked camera gives it back at once', async () => {
 test('paths left parked by a previous run are restored on start', async () => {
   focus.stop();
   mockConfigs.cam_c.source = 'publisher';
-  mockStore['nvrFocus:parked'] = { cam_c: { host: '10.0.0.2', source: 'rtsp://nvr/c', sourceOnDemand: true } };
+  mockStore['nvrFocus:parked'] = { cam_c: { host: '10.0.0.2', userId: 'u1', source: 'rtsp://nvr/c', sourceOnDemand: true } };
   await focus.start();
   expect(mockConfigs.cam_c.source).toBe('rtsp://nvr/c');
   expect(mockStore['nvrFocus:parked']).toBeUndefined();

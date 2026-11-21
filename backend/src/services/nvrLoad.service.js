@@ -21,10 +21,12 @@
 //       leases    other ffmpeg pulls we start (playback HLS transcode, export,
 //                 backfill), registered with track()
 //   • Interactive work (someone is replaying or exporting footage) claims the
-//     NVR with claim(). While a claim is held, background work on that NVR
-//     (warm-keeper, backfill, AI detection) does not start, and listeners of
-//     'interactive' stop what they can give back. 'released' (host) fires when
-//     the last claim on an NVR ends, so paused work can resume promptly.
+//     NVR for that user with claim(host, userId). While it holds, background
+//     work for THAT USER's cameras on that NVR (warm-keeper, backfill, AI
+//     detection, snapshots, nvrFocus) does not start, and listeners of
+//     'interactive' (host, userId) stop what they can give back. Other users
+//     on the same NVR are not affected. 'released' (host, userId) fires when
+//     that user's last claim there ends (after the grace).
 //   • Background work only starts while the NVR has room below its limit
 //     minus NVR_INTERACTIVE_RESERVE, so a person opening playback always finds
 //     a free session.
@@ -62,9 +64,9 @@ const IDLE_STOP_MS = 120_000;    // stop polling Stream Service when nobody asks
 
 const events = new EventEmitter();
 const _leases = new Map();       // host → Map<id, kind>
-const _claims = new Map();       // host → number of interactive holds
+const _claims = new Map();       // `${host}|${userId}` → number of interactive holds
 const _media = new Map();        // host → ready Stream Service paths (last refresh)
-const _grace = new Map();        // host → timer: last claim ended, still held for CLAIM_GRACE_MS
+const _grace = new Map();        // `${host}|${userId}` → timer: last claim ended, still held for CLAIM_GRACE_MS
 let _leaseSeq = 0;
 let _hostOfPath = new Map();     // Stream Service path name → NVR host
 let _hostMapAt = 0;
@@ -95,31 +97,55 @@ function track(host, kind) {
  * yields until release() is called. Emits 'interactive' (host) so running
  * background pulls can give their sessions back.
  */
-function claim(host) {
+function claim(host, userId = null) {
   if (!host) return () => {};
   touch();
-  if (_grace.has(host)) { clearTimeout(_grace.get(host)); _grace.delete(host); }
-  _claims.set(host, (_claims.get(host) || 0) + 1);
-  events.emit('interactive', host);
+  const k = claimKey(host, userId);
+  if (_grace.has(k)) { clearTimeout(_grace.get(k)); _grace.delete(k); }
+  _claims.set(k, (_claims.get(k) || 0) + 1);
+  events.emit('interactive', host, userId);
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    const n = (_claims.get(host) || 1) - 1;
-    if (n > 0) { _claims.set(host, n); return; }
-    _claims.delete(host);
-    if (!CLAIM_GRACE_MS) { events.emit('released', host); return; }
+    const n = (_claims.get(k) || 1) - 1;
+    if (n > 0) { _claims.set(k, n); return; }
+    _claims.delete(k);
+    if (!CLAIM_GRACE_MS) { events.emit('released', host, userId); return; }
     const t = setTimeout(() => {
-      _grace.delete(host);
-      if (!_claims.get(host)) events.emit('released', host);
+      _grace.delete(k);
+      if (!_claims.get(k)) events.emit('released', host, userId);
     }, CLAIM_GRACE_MS);
     t.unref?.();
-    _grace.set(host, t);
+    _grace.set(k, t);
   };
 }
 
-function interactiveActive(host) {
-  return (_claims.get(host) || 0) > 0 || _grace.has(host);
+// Claims are per (NVR, user): one person's playback holds back only that
+// person's own background work (their cameras' AI, warm tiles, recording,
+// backfill, snapshots). Other accounts on the same NVR are not touched.
+const claimKey = (host, userId) => `${host}|${userId ?? '*'}`;
+
+/**
+ * Is `userId` replaying from `host` (or within the grace after it)? Without a
+ * userId: is anyone?
+ */
+function interactiveActive(host, userId) {
+  if (!host) return false;
+  if (userId !== undefined) {
+    const k = claimKey(host, userId);
+    return (_claims.get(k) || 0) > 0 || _grace.has(k);
+  }
+  const prefix = `${host}|`;
+  for (const k of _claims.keys()) if (k.startsWith(prefix)) return true;
+  for (const k of _grace.keys()) if (k.startsWith(prefix)) return true;
+  return false;
+}
+
+function claimCount(host) {
+  let n = 0;
+  for (const [k, c] of _claims) if (k.startsWith(`${host}|`)) n += c;
+  return n;
 }
 
 /** Sessions on `host` right now, by kind. Synchronous: media is the last refresh. */
@@ -130,12 +156,15 @@ function usage(host) {
   for (const kind of (_leases.get(host) || new Map()).values()) byKind[kind] = (byKind[kind] || 0) + 1;
   const total = Object.values(byKind).reduce((a, b) => a + b, 0);
   const limit = limitFor(host);
-  return { host, limit, reserve: RESERVE, total, byKind, interactive: _claims.get(host) || 0, full: total >= limit };
+  return { host, limit, reserve: RESERVE, total, byKind, interactive: claimCount(host), full: total >= limit };
 }
 
-/** Sessions background work may still open on `host` (0 = none). */
-function backgroundRoom(host) {
-  if (!host || interactiveActive(host)) return 0;
+/**
+ * Sessions background work may still open on `host` (0 = none). With a
+ * userId, work for that user's cameras gets none while they replay from it.
+ */
+function backgroundRoom(host, userId) {
+  if (!host || (userId !== undefined && interactiveActive(host, userId))) return 0;
   const u = usage(host);
   return Math.max(0, u.limit - RESERVE - u.total);
 }

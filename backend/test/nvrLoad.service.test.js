@@ -48,26 +48,32 @@ test('background work only gets the room below limit minus reserve', () => {
   expect(nvrLoad.backgroundRoom(HOST)).toBe(0);       // never negative
 });
 
-test('a claim pauses background work on that NVR only, and announces itself', () => {
+test("a claim pauses only that user's background work on that NVR, and announces itself", () => {
   const seen = [];
-  nvrLoad.events.on('interactive', (h) => seen.push(h));
-  const release = nvrLoad.claim(HOST);
-  expect(seen).toEqual([HOST]);
-  expect(nvrLoad.interactiveActive(HOST)).toBe(true);
-  expect(nvrLoad.backgroundRoom(HOST)).toBe(0);
-  expect(nvrLoad.backgroundRoom('10.0.0.2')).toBe(4);
+  nvrLoad.events.on('interactive', (h, u) => seen.push([h, u]));
+  const release = nvrLoad.claim(HOST, 'u1');
+  expect(seen).toEqual([[HOST, 'u1']]);
+  expect(nvrLoad.interactiveActive(HOST, 'u1')).toBe(true);
+  expect(nvrLoad.interactiveActive(HOST, 'u2')).toBe(false);
+  expect(nvrLoad.interactiveActive(HOST)).toBe(true);           // anyone
+  expect(nvrLoad.backgroundRoom(HOST, 'u1')).toBe(0);
+  expect(nvrLoad.backgroundRoom(HOST, 'u2')).toBe(4);           // other users carry on
+  expect(nvrLoad.backgroundRoom('10.0.0.2', 'u1')).toBe(4);
   release();
   release();   // a double release must not free someone else's claim
-  expect(nvrLoad.interactiveActive(HOST)).toBe(false);
+  expect(nvrLoad.interactiveActive(HOST, 'u1')).toBe(false);
 });
 
 test('claims are counted: the NVR stays claimed until the last one ends', () => {
-  const a = nvrLoad.claim(HOST);
-  const b = nvrLoad.claim(HOST);
+  const a = nvrLoad.claim(HOST, 'u1');
+  const b = nvrLoad.claim(HOST, 'u1');
+  const other = nvrLoad.claim(HOST, 'u2');
   a();
-  expect(nvrLoad.interactiveActive(HOST)).toBe(true);
+  expect(nvrLoad.interactiveActive(HOST, 'u1')).toBe(true);
   b();
-  expect(nvrLoad.interactiveActive(HOST)).toBe(false);
+  expect(nvrLoad.interactiveActive(HOST, 'u1')).toBe(false);
+  expect(nvrLoad.interactiveActive(HOST, 'u2')).toBe(true);
+  other();
 });
 
 test('no host means nothing to count or claim', () => {
@@ -83,15 +89,15 @@ test('after the last claim ends the NVR stays claimed for the grace period', () 
     const load = require('../src/services/nvrLoad.service');
     const seen = [];
     load.events.on('released', (h) => seen.push(h));
-    load.claim(HOST)();
-    expect(load.interactiveActive(HOST)).toBe(true);    // a seek lands in here
-    const again = load.claim(HOST);                     // new replay: grace cancelled
+    load.claim(HOST, 'u1')();
+    expect(load.interactiveActive(HOST, 'u1')).toBe(true);   // a seek lands in here
+    const again = load.claim(HOST, 'u1');                    // new replay: grace cancelled
     again();
     jest.advanceTimersByTime(19_999);
     expect(seen).toEqual([]);
     jest.advanceTimersByTime(1);
     expect(seen).toEqual([HOST]);
-    expect(load.interactiveActive(HOST)).toBe(false);
+    expect(load.interactiveActive(HOST, 'u1')).toBe(false);
     process.env.NVR_CLAIM_GRACE_MS = '0';
     jest.useRealTimers();
   });

@@ -53,7 +53,7 @@ async function postAiForm(path, monitorId) {
 /** True while playback holds the NVR this camera streams from. */
 function yieldsToPlayback(camera) {
   if (!YIELD_TO_PLAYBACK) return false;
-  return [camera.host, camera.group?.host].some((h) => h && nvrLoad.interactiveActive(h));
+  return [camera.host, camera.group?.host].some((h) => h && nvrLoad.interactiveActive(h, camera.userId ?? null));
 }
 
 async function reconcile({ stopUnselected = true } = {}) {
