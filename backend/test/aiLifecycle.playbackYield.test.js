@@ -23,6 +23,7 @@ jest.mock('axios', () => ({
 }));
 
 process.env.NVR_LOAD_REFRESH_MS = '0';
+process.env.NVR_CLAIM_GRACE_MS = '0';
 const nvrLoad = require('../src/services/nvrLoad.service');
 const ai = require('../src/services/aiLifecycle.service');
 

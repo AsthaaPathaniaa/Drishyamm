@@ -31,6 +31,11 @@ const EVENTS_PAGE = 100;
 const LAST_CAMERA_KEY = 'playback.lastCamera';
 const END_GRACE_MS = 3000;          // slack between the NVR's end of footage and our clock
 const STALL_MS = 20_000;            // no new video for this long while playing = the replay died
+// Over the relay an open socket means the replay is alive: a busy NVR can go
+// quiet for half a minute and then carry on. Restarting would throw the
+// buffer away and queue a new session behind the stalled one, so the player
+// waits (buffering spinner) until the socket has been silent this long.
+const RELAY_SILENT_MS = 90_000;
 const RESUME_RESTART_MS = 20_000;   // the NVR keeps replaying while paused; past this, resume re-asks from the paused moment
 // When the buffer runs dry the player holds (paused, spinner) until it has a
 // lead again, instead of playing a fraction of a second and stopping again.
@@ -394,7 +399,7 @@ export default function NvrPlayback() {
       : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}${API_BASE}`;
     const ws = new WebSocket(`${wsBase}/api/stream/live?ticket=${encodeURIComponent(ticket)}`);
     ws.binaryType = 'arraybuffer';
-    const r = { ws, ms: null, sb: null, url: null, queue: [], mime: null, expectInit: false, started: false, dead: false, lastTrim: 0 };
+    const r = { ws, ms: null, sb: null, url: null, queue: [], mime: null, expectInit: false, started: false, dead: false, lastTrim: 0, lastDataAt: Date.now() };
     relayRef.current = r;
 
     const trim = (force) => {
@@ -428,6 +433,7 @@ export default function NvrPlayback() {
     };
     ws.onmessage = (e) => {
       if (r.dead || gen !== genRef.current) return;
+      r.lastDataAt = Date.now();
       if (typeof e.data === 'string') {
         let msg = null;
         try { msg = JSON.parse(e.data); } catch { return; }
@@ -581,6 +587,8 @@ export default function NvrPlayback() {
       let end = 0;
       try { end = v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0; } catch { /* ignore */ }
       if (end > lastEnd + 0.1) { lastEnd = end; lastChange = Date.now(); return; }
+      const r = relayRef.current;
+      if (r && !r.closed && Date.now() - r.lastDataAt < RELAY_SILENT_MS) { lastChange = Date.now(); return; }
       if (Date.now() - lastChange > STALL_MS && v.currentTime >= end - 0.5) lostRef.current?.(s.gen);
     }, 2000);
     return () => clearInterval(id);
@@ -1130,7 +1138,7 @@ export default function NvrPlayback() {
                         {buffering.rate != null ? ` · link ${buffering.rate.toFixed(2)}× real time` : ''}
                       </p>
                       {buffering.rate != null && buffering.rate < rate * 0.95 ? (
-                        <p className="text-caption text-white/60">Playback resumes once enough is buffered. Live views and AI on this recorder share its link.</p>
+                        <p className="text-caption text-white/60">Playback resumes once enough is buffered. Background streams on this recorder are paused while you watch.</p>
                       ) : null}
                     </div>
                   </div>

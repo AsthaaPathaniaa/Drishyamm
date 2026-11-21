@@ -535,6 +535,25 @@ function releaseIfIdle(path) {
   return stopRelay(path);
 }
 
+/**
+ * Stop every live relay nobody is watching that `belongs(path, relay)` says
+ * is on a given NVR. Playback relays (once) are never touched. Returns the
+ * paths stopped.
+ */
+function releaseIdleWhere(belongs) {
+  const out = [];
+  for (const [path, r] of [..._relays]) {
+    if (r.once || r.viewers.size || !belongs(path, r)) continue;
+    if (stopRelay(path)) out.push(path);
+  }
+  return out;
+}
+
+/** The NVR a direct relay reads from, or null when it reads Stream Service. */
+function hostOf(relay) {
+  return relay?.nvrUrl ? nvrHost(relay.nvrUrl) : null;
+}
+
 function isRunning(path) {
   const r = _relays.get(path);
   return !!(r && !r.stopped);
@@ -635,4 +654,4 @@ function stats() {
   }));
 }
 
-module.exports = { attach, issueTicket, issueAudioTicket, pin, isRunning, stopRelay, stats, viewerCount, releaseIfIdle, codecOf, sessionsOnHost, hasSource, _internals: { codecFromInit, isKeyframe, findBox, sweepStalled, sourceReady, sourceUrl, relays: _relays } };
+module.exports = { attach, issueTicket, issueAudioTicket, pin, isRunning, stopRelay, stats, viewerCount, releaseIfIdle, releaseIdleWhere, hostOf, codecOf, sessionsOnHost, hasSource, _internals: { codecFromInit, isKeyframe, findBox, sweepStalled, sourceReady, sourceUrl, relays: _relays } };

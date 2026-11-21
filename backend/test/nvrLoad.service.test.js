@@ -10,7 +10,8 @@ jest.mock('../src/services/liveRelay.service', () => ({ sessionsOnHost: (h) => m
 process.env.NVR_MAX_SESSIONS = '6';
 process.env.NVR_INTERACTIVE_RESERVE = '2';
 process.env.NVR_SESSION_LIMITS = '10.0.0.9=3, bad, 10.0.0.8 = 12';
-process.env.NVR_LOAD_REFRESH_MS = '0';   // no Stream Service polling in tests
+process.env.NVR_LOAD_REFRESH_MS = '0';
+process.env.NVR_CLAIM_GRACE_MS = '0';   // no Stream Service polling in tests
 
 const nvrLoad = require('../src/services/nvrLoad.service');
 
@@ -73,4 +74,25 @@ test('no host means nothing to count or claim', () => {
   expect(nvrLoad.backgroundRoom(null)).toBe(0);
   expect(() => nvrLoad.track(null, 'x')()).not.toThrow();
   expect(() => nvrLoad.claim(undefined)()).not.toThrow();
+});
+
+test('after the last claim ends the NVR stays claimed for the grace period', () => {
+  jest.isolateModules(() => {
+    jest.useFakeTimers();
+    process.env.NVR_CLAIM_GRACE_MS = '20000';
+    const load = require('../src/services/nvrLoad.service');
+    const seen = [];
+    load.events.on('released', (h) => seen.push(h));
+    load.claim(HOST)();
+    expect(load.interactiveActive(HOST)).toBe(true);    // a seek lands in here
+    const again = load.claim(HOST);                     // new replay: grace cancelled
+    again();
+    jest.advanceTimersByTime(19_999);
+    expect(seen).toEqual([]);
+    jest.advanceTimersByTime(1);
+    expect(seen).toEqual([HOST]);
+    expect(load.interactiveActive(HOST)).toBe(false);
+    process.env.NVR_CLAIM_GRACE_MS = '0';
+    jest.useRealTimers();
+  });
 });

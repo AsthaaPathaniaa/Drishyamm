@@ -20,6 +20,7 @@ const mockYield = jest.fn(async () => ({ released: 0 }));
 jest.mock('../src/services/streamWarm.service', () => ({ yieldForMain: (c) => mockYield(c) }));
 
 process.env.NVR_LOAD_REFRESH_MS = '0';
+process.env.NVR_CLAIM_GRACE_MS = '0';
 const nvrLoad = require('../src/services/nvrLoad.service');
 const { _internals: { sessions, stopSession, sweepEndedRelaySessions, claimNvr } } = require('../src/controllers/playback.controller');
 

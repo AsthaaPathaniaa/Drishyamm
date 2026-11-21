@@ -34,6 +34,10 @@
 //                            figure the warm-keeper and the wall already use)
 //   NVR_SESSION_LIMITS       per-NVR overrides, "host=limit,host=limit"
 //   NVR_INTERACTIVE_RESERVE  sessions background work leaves free (default 2)
+//   NVR_CLAIM_GRACE_MS       how long an NVR stays claimed after its last
+//                            playback ends (default 20000), so a seek, which
+//                            ends one replay and starts the next, doesn't
+//                            bring every background pull back for a moment
 const { EventEmitter } = require('node:events');
 const logger = require('../config/logger');
 
@@ -52,6 +56,7 @@ const DEFAULT_LIMIT = int(process.env.NVR_MAX_SESSIONS, 9);
 const LIMITS = parseLimits(process.env.NVR_SESSION_LIMITS);
 const RESERVE = int(process.env.NVR_INTERACTIVE_RESERVE, 2);
 const MEDIA_REFRESH_MS = int(process.env.NVR_LOAD_REFRESH_MS, 5000);
+const CLAIM_GRACE_MS = int(process.env.NVR_CLAIM_GRACE_MS, 20000);
 const CAMERA_MAP_MS = 60_000;
 const IDLE_STOP_MS = 120_000;    // stop polling Stream Service when nobody asks
 
@@ -59,6 +64,7 @@ const events = new EventEmitter();
 const _leases = new Map();       // host → Map<id, kind>
 const _claims = new Map();       // host → number of interactive holds
 const _media = new Map();        // host → ready Stream Service paths (last refresh)
+const _grace = new Map();        // host → timer: last claim ended, still held for CLAIM_GRACE_MS
 let _leaseSeq = 0;
 let _hostOfPath = new Map();     // Stream Service path name → NVR host
 let _hostMapAt = 0;
@@ -92,6 +98,7 @@ function track(host, kind) {
 function claim(host) {
   if (!host) return () => {};
   touch();
+  if (_grace.has(host)) { clearTimeout(_grace.get(host)); _grace.delete(host); }
   _claims.set(host, (_claims.get(host) || 0) + 1);
   events.emit('interactive', host);
   let released = false;
@@ -101,12 +108,18 @@ function claim(host) {
     const n = (_claims.get(host) || 1) - 1;
     if (n > 0) { _claims.set(host, n); return; }
     _claims.delete(host);
-    events.emit('released', host);
+    if (!CLAIM_GRACE_MS) { events.emit('released', host); return; }
+    const t = setTimeout(() => {
+      _grace.delete(host);
+      if (!_claims.get(host)) events.emit('released', host);
+    }, CLAIM_GRACE_MS);
+    t.unref?.();
+    _grace.set(host, t);
   };
 }
 
 function interactiveActive(host) {
-  return (_claims.get(host) || 0) > 0;
+  return (_claims.get(host) || 0) > 0 || _grace.has(host);
 }
 
 /** Sessions on `host` right now, by kind. Synchronous: media is the last refresh. */
@@ -182,5 +195,7 @@ module.exports = {
   limitFor, track, claim, interactiveActive, usage, backgroundRoom, refreshMedia, events,
   _internals: { parseLimits, leases: _leases, claims: _claims, media: _media, reset() {
     _leases.clear(); _claims.clear(); _media.clear(); events.removeAllListeners();
+    for (const t of _grace.values()) clearTimeout(t);
+    _grace.clear();
   } },
 };
