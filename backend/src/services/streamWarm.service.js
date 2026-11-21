@@ -20,6 +20,7 @@
 const logger = require('../config/logger');
 const transcoder = require('./transcoder.service');
 const reachability = require('./cameraReachability.service');
+const nvrLoad = require('./nvrLoad.service');
 
 const LEASE_MS     = parseInt(process.env.STREAM_WARM_LEASE_MS || '180000', 10);
 // Per-NVR cap: recorders serve only so many concurrent remote streams (the lab
@@ -94,6 +95,10 @@ async function yieldForMain(camera) {
 }
 
 function mainActive(host) {
+  // Someone replaying or exporting footage from this NVR (nvrLoad.claim):
+  // recorded playback is the heaviest pull an NVR serves, so it gets the
+  // uplink for as long as the session runs, not just MAIN_PRIORITY_MS.
+  if (nvrLoad.interactiveActive(host)) return true;
   if (transcoder.runningOnHost(host).some((r) => r.variant === 'main')) {
     _mainUntil.set(host, Math.max(_mainUntil.get(host) || 0, Date.now() + 30_000));
   }
@@ -156,6 +161,13 @@ async function touch(userId, { monitorIds, hevc = false } = {}) {
         perHost.set(cam.host, n);   // nothing warmed for this camera
         continue;
       }
+      // The NVR's session budget (nvrLoad) counts every pull on it: AI,
+      // recording, other accounts' tiles. Warming is the first thing to give
+      // way, and never takes the sessions kept free for playback.
+      if (transcode && !transcoder.isRunning(cam.monitorId, 'sub') && nvrLoad.backgroundRoom(cam.host) <= 0) {
+        perHost.set(cam.host, n);
+        continue;
+      }
       if (transcode) {
         const path = await streamService.ensureLivePath(cam, { variant: 'sub', transcode: true });
         transcoder.pinTranscoder(cam.monitorId, 'sub', until);
@@ -163,7 +175,8 @@ async function touch(userId, { monitorIds, hevc = false } = {}) {
       } else {
         const nvrUrl = streamService.liveNvrUrl(cam, 'sub');
         // The per-NVR cap holds across accounts: they all share the recorder.
-        if (!relay.hasSource(nvrUrl) && relay.sessionsOnHost(cam.host) >= MAX_PER_HOST) {
+        if (!relay.hasSource(nvrUrl)
+          && (relay.sessionsOnHost(cam.host) >= MAX_PER_HOST || nvrLoad.backgroundRoom(cam.host) <= 0)) {
           perHost.set(cam.host, n);
           continue;
         }

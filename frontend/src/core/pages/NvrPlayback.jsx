@@ -255,10 +255,10 @@ export default function NvrPlayback() {
   }, [events, wallMs]);
 
   // ── Session ───────────────────────────────────────────────────────────────
-  const flash = useCallback((text) => {
+  const flash = useCallback((text, ms = 1800) => {
     setToast(text);
     clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 1800);
+    toastTimer.current = setTimeout(() => setToast(null), ms);
   }, []);
 
   const pokeUi = useCallback(() => {
@@ -495,6 +495,11 @@ export default function NvrPlayback() {
       const data = await playbackService.start({ monitorId: mon, start: iso(startMs), end: iso(endMs), relay, hevc: canDecodeHevc() });
       if (gen !== genRef.current) { playbackService.stop(data.pathName).catch(() => {}); return; }
       sessionRef.current.pathName = data.pathName;
+      // The recorder is already serving all the streams it serves well
+      // (backend nvrLoad): say so, rather than leave the player to stall.
+      if (data.nvrLoad?.full) {
+        flash(`Recorder busy: ${data.nvrLoad.inUse} of ${data.nvrLoad.limit} streams in use. Playback may pause; closing other live views frees it.`, 8000);
+      }
       if (data.mode === 'relay' && data.ticket) attachRelay(data.ticket, gen);
       else attach(data.hlsUrl, gen);
     } catch (e) {
@@ -502,7 +507,7 @@ export default function NvrPlayback() {
       setPhase('error');
       setError(e?.response?.data?.message || 'Could not start NVR playback.');
     }
-  }, [attach, attachRelay, setPhase, teardown]);
+  }, [attach, attachRelay, flash, setPhase, teardown]);
 
   const onStreamLost = useCallback((gen) => {
     const s = sessionRef.current;
@@ -984,7 +989,7 @@ export default function NvrPlayback() {
                 </div>
 
                 {toast ? (
-                  <div className="pointer-events-none absolute left-1/2 top-16 z-30 -translate-x-1/2 rounded-full bg-black/75 px-3 py-1.5 text-caption font-semibold text-white">
+                  <div className="pointer-events-none absolute left-1/2 top-16 z-30 w-max max-w-[90%] -translate-x-1/2 rounded-2xl bg-black/75 px-3 py-1.5 text-center text-caption font-semibold text-white">
                     {toast}
                   </div>
                 ) : null}

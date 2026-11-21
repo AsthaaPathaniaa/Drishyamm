@@ -386,6 +386,7 @@ async function spawnRelay(relay) {
       : ran > 30_000 ? 1000
         : refused ? Math.min(60_000, 1000 * 2 ** Math.min(relay.restarts, 6))
           : Math.min(15_000, 1000 * 2 ** Math.min(relay.restarts, 4));
+    const stalled = !!relay.killReason;
     const msg = relay.killReason
       || err.trim().split('\n').slice(-2).join(' | ').replace(/rtsp:\/\/[^@\s/]*@/g, 'rtsp://***@');
     relay.killReason = null;
@@ -393,6 +394,17 @@ async function spawnRelay(relay) {
     // is done, or the NVR had nothing. Never restart it from the beginning.
     if (relay.once) {
       logger.info('liveRelay: replay ended', { path: relay.path, ranMs: ran, error: code ? msg : undefined });
+      stopRelay(relay.path);
+      return;
+    }
+    // Nobody is watching (a warm-keeper pin only) and the source stalled or
+    // failed fast: release the NVR session instead of knocking again. On a
+    // saturated recorder every restart is one more session competing for the
+    // same uplink, which is what kept the lab NVR at 15% of real time
+    // (2026-11-21). The warm-keeper re-pins on its next heartbeat if the NVR
+    // has room (nvrLoad); a viewer arriving starts the relay on demand.
+    if (relay.direct && !relay.viewers.size && (stalled || ran < 30_000)) {
+      logger.info('liveRelay: unwatched relay lost its source, releasing it', { path: relay.path, ranMs: ran, error: msg });
       stopRelay(relay.path);
       return;
     }
