@@ -3,7 +3,6 @@ import { AlertTriangle, Check, ChevronDown, Loader2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { aiService } from '@/core/services/ai';
 import {
-  AI_FEATURES,
   PURPOSES,
   PURPOSE_PRESETS,
   buildDisablePayload,
@@ -11,6 +10,7 @@ import {
   cameraFeatures,
   inferPurpose,
   lifecycleCopy,
+  visibleFeatures,
 } from '@/core/services/aiCamera';
 import { Button } from '@/core/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/core/ui/sheet';
@@ -54,16 +54,28 @@ function SetupDrawer({ camera, onClose, onSaved }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // What the server changed BEYOND what was asked for -- today only body
+  // detection being forced on to stop a zone being armed with no producer.
+  // Shown rather than discarded: a security control that was switched on for
+  // the operator has to be something they are told about.
+  const [notices, setNotices] = useState([]);
 
   const submit = async (payload) => {
     setSaving(true);
     setError('');
+    setNotices([]);
     try {
       const res = await aiService.updateCameraAiLifecycle(camera.id, payload);
       onSaved?.(res.data);
       if (res.reconcile && res.reconcile.ok === false) {
         // Saved, but the AI service did not start it: keep the drawer open and say so.
         setError(res.reconcile.error || 'Saved, but the AI service did not start this camera. Try again shortly.');
+        return;
+      }
+      if (Array.isArray(res.notices) && res.notices.length) {
+        // Saved correctly, but not exactly as asked. The drawer stays open so
+        // the sentence is read, not flashed past on the way out.
+        setNotices(res.notices);
         return;
       }
       onClose?.();
@@ -78,9 +90,25 @@ function SetupDrawer({ camera, onClose, onSaved }) {
   const applyPurpose = (purpose) => setDraft((prev) => ({ ...prev, purpose, ...(PURPOSE_PRESETS[purpose] || {}) }));
   const on = camera.ai?.enabled === true;
   const status = lifecycleCopy(camera.lifecycle);
-  const drawn = Object.fromEntries(
-    cameraFeatures({ ...camera, ai: { ...camera.ai, enabled: true } }).map((f) => [f.key, f.on]),
-  );
+  // Both derived with AI forced on, so the list shows what this camera WOULD
+  // do rather than a page of "off" while it is being set up for the first time.
+  const asIfOn = { ...camera, ai: { ...camera.ai, enabled: true } };
+  const drawn = Object.fromEntries(cameraFeatures(asIfOn).map((f) => [f.key, f.on]));
+  // Rows whose feature has an effect on THIS camera. The zone-body child is
+  // absent here until a zone is drawn.
+  //
+  // The face flag comes from the DRAFT, not the stored row: an operator who
+  // has just switched face recognition off in this drawer should see the child
+  // lock immediately, not after a save and a refetch.
+  const rows = visibleFeatures({
+    ...asIfOn,
+    ai: { ...asIfOn.ai, faceRecognition: draft.faceRecognition !== false },
+  });
+  // Sent as true when the drawer is showing it as Required, so the server has
+  // nothing left to force. Without this the server would force it on every
+  // save of this camera and return the same notice each time, which trains an
+  // operator to dismiss the one notice that mattered.
+  const bodyForced = rows.some((f) => f.flag === 'zoneBodyDetection' && f.forced);
 
   return (
     <>
@@ -96,7 +124,7 @@ function SetupDrawer({ camera, onClose, onSaved }) {
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <p className="mb-2 text-small font-semibold text-fg">Turn on</p>
         <div className="divide-y divide-line rounded-lg border border-line">
-          {AI_FEATURES.map((f) => {
+          {rows.map((f) => {
             if (f.kind === 'core') {
               return (
                 <FeatureLine key={f.key} feature={f}>
@@ -105,9 +133,17 @@ function SetupDrawer({ camera, onClose, onSaved }) {
               );
             }
             if (f.kind === 'flag') {
+              // Forced on, with the reason shown. Not merely pre-ticked: an
+              // anonymous camera with a zone and no detector is a zone that
+              // watches nothing, so the server forces it too and a switch an
+              // operator could flip back would be a lie.
               return (
-                <FeatureLine key={f.key} feature={f}>
-                  <Switch label={f.label} value={draft[f.flag]} onChange={(v) => updateDraft(f.flag, v)} />
+                <FeatureLine child={Boolean(f.parent)} key={f.key} feature={f} note={f.forced ? f.forcedReason : null}>
+                  {f.forced ? (
+                    <span className="shrink-0 text-small font-medium text-fg-muted">Required</span>
+                  ) : (
+                    <Switch label={f.label} value={draft[f.flag] === true} onChange={(v) => updateDraft(f.flag, v)} />
+                  )}
                 </FeatureLine>
               );
             }
@@ -179,7 +215,21 @@ function SetupDrawer({ camera, onClose, onSaved }) {
             {error}
           </p>
         ) : null}
-        <Button className="w-full" disabled={saving} onClick={() => submit(buildEnablePayload(camera, draft))} type="button">
+        {notices.map((n) => (
+          <p className="mb-3 flex items-start gap-2 rounded-lg bg-info-soft px-3 py-2 text-small font-medium text-info-ink" key={n}>
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            {n}
+          </p>
+        ))}
+        <Button
+          className="w-full"
+          disabled={saving}
+          onClick={() => submit(buildEnablePayload(camera, {
+            ...draft,
+            ...(bodyForced ? { zoneBodyDetection: true } : null),
+          }))}
+          type="button"
+        >
           {saving ? <Loader2 className="animate-spin" /> : null}
           {on ? 'Save' : 'Start AI'}
         </Button>
@@ -198,11 +248,23 @@ function SetupDrawer({ camera, onClose, onSaved }) {
   );
 }
 
-/** A feature: its name (description on hover) and its control. */
-function FeatureLine({ feature, children }) {
+/**
+ * A feature: its name (description on hover) and its control.
+ *
+ * `child` indents the row and lightens the label, so a sub-feature reads as
+ * belonging to the row above rather than as a seventh independent thing.
+ * `note` is a sentence shown under the label when the row needs to explain
+ * itself -- a forced switch has to say why it cannot be turned off.
+ */
+function FeatureLine({ feature, children, child = false, note = null }) {
   return (
-    <div className="flex min-h-12 items-center justify-between gap-3 px-3 py-2.5">
-      <span className="text-body text-fg" title={feature.note}>{feature.label}</span>
+    <div className={`flex min-h-12 items-center justify-between gap-3 py-2.5 pr-3 ${child ? 'pl-7' : 'pl-3'}`}>
+      <span className="min-w-0">
+        <span className={`block ${child ? 'text-small text-fg-secondary' : 'text-body text-fg'}`} title={feature.note}>
+          {feature.label}
+        </span>
+        {note ? <span className="mt-0.5 block text-small text-fg-muted">{note}</span> : null}
+      </span>
       {children}
     </div>
   );

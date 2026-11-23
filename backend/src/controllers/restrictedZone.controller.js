@@ -4,8 +4,10 @@
  * cameras (each is a row). Scoped to req.user.id.
  */
 const asyncHandler = require('../middleware/asyncHandler');
-const { RestrictedZone } = require('../models');
+const AppError = require('../utils/AppError');
+const { Camera, RestrictedZone } = require('../models');
 const { assertAiLicence } = require('../services/entitlements.service');
+const { zoneHasProducer, NO_PRODUCER_REASON } = require('../services/zoneProducer.service');
 
 // A camera spends one restricted-zone licence while it has at least one armed
 // zone, so arming the FIRST zone on a camera is the licensed step.
@@ -14,6 +16,43 @@ async function assertZoneLicence(req, monitorId) {
     where: { userId: req.user.id, monitorId: String(monitorId), enabled: true },
   });
   if (armed === 0) await assertAiLicence(req.user.id, 'restricted_zone', 1);
+}
+
+/**
+ * A zone may not be ARMED on a camera that has nothing detecting people.
+ *
+ * A zone is not a detector: it subscribes to boxes a producer publishes and
+ * applies its own dwell / confirm rules to them. There are two producers (the
+ * face pipeline, and zone-guard via `settings.ai.zoneBodyDetection`), and a
+ * camera with face recognition off and body detection off has NEITHER. Such a
+ * zone shows as armed, spends a restricted-zone licence, and watches nothing
+ * -- the worst failure a security control has, because it is invisible.
+ *
+ * So this refuses, rather than arming something hollow. The reason names the
+ * switch to turn on, because "no" without a next step is how an operator ends
+ * up disabling the zone instead of fixing the camera.
+ *
+ * The OTHER direction -- an operator switching face recognition off on a
+ * camera that already carries an armed zone -- cannot be refused here, because
+ * it is not this route. It forces body detection on instead; see
+ * resolveZoneBodyFlag in ai.controller.js. Both read zoneProducer.service.js,
+ * so the two ends of the invariant cannot drift apart.
+ *
+ * A camera this account does not own, or one the AI registry has never seen,
+ * is NOT refused: ownership is already enforced by the queries around this,
+ * and inventing a second not-found path here would turn a missing-camera bug
+ * into "your zone cannot be saved" with no way forward.
+ */
+async function assertZoneHasProducer(req, monitorId) {
+  const camera = await Camera.findOne({
+    where: { monitorId: String(monitorId), userId: req.user.id },
+    attributes: ['id', 'settings'],
+  });
+  if (!camera) return;
+  if (zoneHasProducer(camera.settings?.ai)) return;
+  // 409, not 400: the request is well formed and the operator is allowed to
+  // make it -- the CAMERA is in a state that cannot carry an armed zone.
+  throw new AppError(NO_PRODUCER_REASON, 409);
 }
 
 // GET /api/restricted-zones?monitorId=...
@@ -30,7 +69,10 @@ const create = asyncHandler(async (req, res) => {
   if (!b.monitorId || !b.name) {
     return res.status(400).json({ success: false, message: 'Camera and zone name are required.' });
   }
-  if (b.enabled !== false) await assertZoneLicence(req, b.monitorId);
+  if (b.enabled !== false) {
+    await assertZoneHasProducer(req, b.monitorId);
+    await assertZoneLicence(req, b.monitorId);
+  }
   const zone = await RestrictedZone.create({
     userId: req.user.id,
     monitorId: String(b.monitorId),
@@ -61,7 +103,10 @@ const update = asyncHandler(async (req, res) => {
   const zone = await RestrictedZone.findOne({ where: { id: req.params.id, userId: req.user.id } });
   if (!zone) return res.status(404).json({ success: false, message: 'Zone not found.' });
   const b = req.body || {};
-  if (b.enabled === true && zone.enabled !== true) await assertZoneLicence(req, zone.monitorId);
+  if (b.enabled === true && zone.enabled !== true) {
+    await assertZoneHasProducer(req, zone.monitorId);
+    await assertZoneLicence(req, zone.monitorId);
+  }
   const patch = {};
   ['name', 'priority', 'schedule', 'shape', 'cameraName'].forEach((k) => { if (b[k] != null) patch[k] = b[k]; });
   if (b.points != null) patch.points = b.points;

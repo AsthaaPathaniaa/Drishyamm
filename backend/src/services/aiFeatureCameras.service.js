@@ -32,6 +32,8 @@ const { Camera, RestrictedZone } = require('../models');
 const { isAiEnabled } = require('./aiLifecycle.service');
 const { getAiEntitledUserIds } = require('./entitlements.service');
 const streamingService = require('./drishyamStreaming.service');
+const { bodyProducerOn } = require('./zoneProducer.service');
+const { withinArmWindow } = require('./zoneArming');
 
 /** The two stream URLs a service may subscribe to, main and sub. */
 function streamsFor(camera) {
@@ -60,19 +62,56 @@ async function eligible(monitorIds) {
 }
 
 /**
- * zone-guard: the camera needs a REASON to be watched, which is an enabled
- * restricted zone. Zones are queried first because far fewer cameras carry one
- * than exist, which bounds the camera query.
+ * zone-guard: the camera needs a REASON to be watched and PERMISSION to be,
+ * which are two different things.
+ *
+ *   the reason      an enabled restricted zone that is ARMED RIGHT NOW. Zones
+ *                   are queried first because far fewer cameras carry one than
+ *                   exist, which bounds the camera query.
+ *   the permission  `settings.ai.zoneBodyDetection`, the FOURTH condition.
+ *
+ * ARMED, not merely enabled. The engine already refuses to alert outside a
+ * zone's window (zoneIntrusion.service.js), so listing a camera whose only
+ * zone is armed 09:00-17:00 bought a decoded, inferred, posted stream for
+ * sixteen hours a day whose every box the engine dropped on the floor. The
+ * window test is shared with the engine rather than restated -- see
+ * zoneArming.js -- because two readings of "is this zone on duty" is how the
+ * feeder and the engine end up disagreeing. `enabled` is not re-tested here:
+ * it is the SQL WHERE clause below.
+ *
+ * This is a LIVE condition, so the list changes with the clock and not only
+ * with the database. The service re-reads it every ZONE_SIM_REGISTRY_REFRESH
+ * seconds and starts and stops workers to match, so a window opening at 09:00
+ * acquires the camera within one refresh and 17:00 releases it -- no restart,
+ * and no operator action.
+ *
+ * The fourth condition exists because the right answer differs per ZONE, not
+ * per deployment. A strict lockout wants this detector; an allow-list zone is
+ * broken by its nameless boxes; a camera with face recognition off needs it or
+ * the zone never fires at all. Without a per-camera switch, one of those three
+ * was always being served badly.
+ *
+ * ABSENT MEANS FALSE -- the opposite of `faceRecognition`, deliberately. A
+ * second detector per camera costs GPU on every frame, so it is opted into
+ * rather than inherited: every camera that exists today keeps zone-guard OFF
+ * until an operator asks for it on that camera. See zoneProducer.service.js
+ * for the whole producer model, and for the invariant that stops a zone being
+ * armed on a camera with NO producer at all.
  */
 async function zoneGuardCameras() {
   const zones = await RestrictedZone.findAll({
     where: { enabled: true },
-    attributes: ['monitorId'],
+    // The window fields come back so the arm test can be applied here. A zone
+    // carrying no schedule is armed always, which is the column default.
+    attributes: ['monitorId', 'schedule', 'armWindow'],
   });
-  const withZones = [...new Set(zones.map((z) => z.monitorId).filter(Boolean))];
+  const withZones = [...new Set(
+    zones.filter((z) => withinArmWindow(z)).map((z) => z.monitorId).filter(Boolean),
+  )];
   if (!withZones.length) return [];
 
-  return (await eligible(withZones)).map((c) => ({
+  const permitted = (await eligible(withZones)).filter((c) => bodyProducerOn(c.settings?.ai));
+  return permitted.map((c) => ({
     id: c.id,
     userId: c.userId,
     monitorId: c.monitorId,

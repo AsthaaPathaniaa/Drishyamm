@@ -32,7 +32,10 @@ const s3Service      = require('../services/s3.service');
 const { aiAuthHeader } = require('../utils/aiTenant');
 const { assertAiLicence, getAiEntitledUserIds } = require('../services/entitlements.service');
 const { isAiEnabled } = require('../services/aiLifecycle.service');
-const { AIEvent, Camera, CameraGroup } = require('../models');
+const { AIEvent, Camera, CameraGroup, RestrictedZone } = require('../models');
+const {
+  bodyDetectionRequired, nextZoneBodyFlag, NO_PRODUCER_REASON,
+} = require('../services/zoneProducer.service');
 const { getClient } = require('../config/redis');
 const {
   IST_OFFSET_MS, SHIFT_LABELS, ZONE_BREACH_EVENT_TYPE, buildZoneBreachWhere, withZoneBreachCursor,
@@ -639,6 +642,67 @@ function nextFaceFlag(patch, previousAi) {
     : (previousAi || {}).faceRecognition !== false;
 }
 
+/**
+ * monitorId -> how many ARMED restricted zones this account has on it.
+ *
+ * Needed because a restricted zone is a row in `/restricted-zones`, NOT a
+ * shape on `settings.ai.detectionZones`. The two are drawn on near-identical
+ * canvases on different pages and are easy to confuse: `detectionZones` is
+ * where the AI pipeline looks for faces, and saves without arming anything.
+ * Anything deciding what a camera's ZONES are has to ask this.
+ */
+async function getArmedZonesByMonitor(userId) {
+  const zones = await RestrictedZone.findAll({
+    where: { userId, enabled: true },
+    attributes: ['monitorId'],
+  });
+  const out = {};
+  for (const z of zones) {
+    if (z.monitorId) out[z.monitorId] = (out[z.monitorId] || 0) + 1;
+  }
+  return out;
+}
+
+/**
+ * The `zoneBodyDetection` to STORE, with the no-producer invariant applied.
+ *
+ * Normally it is simply what the patch asks for, defaulting to what is stored
+ * and to false when neither says (see zoneProducer.service.js: this switch is
+ * opt-in because a second detector per camera costs GPU on every frame).
+ *
+ * The exception is not optional. A camera with face recognition OFF has no
+ * face pipeline, so a restricted zone on it has NO producer at all: it would
+ * sit armed in the UI, hold a licence, and watch nothing. Rather than refuse
+ * the save -- an operator switching face off has asked for anonymity, which is
+ * a legitimate thing to want -- body detection is FORCED ON and the reason is
+ * returned so the UI can say what happened. Refusing is the right answer at
+ * the other end, where a zone is armed on a camera that is already anonymous;
+ * that lives in restrictedZone.controller.js.
+ *
+ * Only cameras that actually carry an armed zone are touched. An anonymous
+ * camera with no zone has nothing to feed and must not be made to run a
+ * detector it has no use for.
+ *
+ * @returns {{ value: boolean, forced: boolean }}
+ */
+async function resolveZoneBodyFlag({ userId, camera, patch, previousAi, enabled }) {
+  if (nextZoneBodyFlag(patch, previousAi)) return { value: true, forced: false };
+
+  // The AI settings this save is about to produce, as the producer rules read
+  // them. `mode` is 'off' exactly when `enabled` is false in both writers.
+  const resulting = {
+    enabled,
+    mode: enabled ? 'continuous' : 'off',
+    faceRecognition: nextFaceFlag(patch, previousAi),
+  };
+  if (!bodyDetectionRequired(resulting)) return { value: false, forced: false };
+
+  const armed = await RestrictedZone.count({
+    where: { userId, monitorId: camera.monitorId, enabled: true },
+  });
+  return armed > 0 ? { value: true, forced: true } : { value: false, forced: false };
+}
+
 function aiLifecycleStatus(ai, runtime) {
   if (!aiEnabled(ai)) return 'off';
   if (runtime?.running) return runtime.detecting ? 'detecting' : 'starting';
@@ -731,7 +795,7 @@ async function reconcileAiRuntime(camera, ai, user) {
   }
 }
 
-function serializeAiCamera(camera, runtimeByMonitor = {}) {
+function serializeAiCamera(camera, runtimeByMonitor = {}, armedZonesByMonitor = {}) {
   const ai = readAiSettings(camera);
   const runtime = runtimeByMonitor[camera.monitorId] || {};
   return {
@@ -751,12 +815,32 @@ function serializeAiCamera(camera, runtimeByMonitor = {}) {
       unknownAlerts: ai.unknownAlerts !== false,
       watchlistAlerts: ai.watchlistAlerts !== false,
       journeyMapping: ai.journeyMapping !== false,
+      // Both feature flags the ZONE producers hang off, sent explicitly.
+      //
+      // `faceRecognition` was missing from this payload, which made the flag
+      // invisible to the client: every reader (aiCamera.js faceRecognitionOn,
+      // the feature list, AI Feed's overlay gate) tests `!== false`, so a
+      // camera with face switched OFF read back as ON and the UI said faces
+      // were being matched on a camera matching none. Nothing downstream can
+      // decide anything about an anonymous camera until it is sent.
+      //
+      // `zoneBodyDetection` is the new per-camera zone-guard switch. ABSENT
+      // MEANS FALSE here, unlike the flags above it, because it is opted into
+      // rather than inherited -- see zoneProducer.service.js.
+      faceRecognition: ai.faceRecognition !== false,
+      zoneBodyDetection: ai.zoneBodyDetection === true,
       detectionZones: normalizeDetectionZones(ai.detectionZones),
       createdAt: ai.createdAt || null,
       updatedAt: ai.updatedAt || null,
       disabledAt: ai.disabledAt || null,
       lastError: ai.lastError || null,
     },
+    // ARMED restricted zones on this camera, counted from /restricted-zones.
+    // The client cannot derive this: `ai.detectionZones` above is where the
+    // pipeline looks for faces, not what an operator drew as a zone, and the
+    // UI needs the real answer to decide whether a zone-only control (body
+    // detection) has any effect on this camera at all.
+    restrictedZones: { armed: Number(armedZonesByMonitor[camera.monitorId] || 0) },
     headcount: {
       enabled: camera.settings?.headcount?.enabled === true,
       threshold: Number(camera.settings?.headcount?.threshold) || 0,
@@ -1187,8 +1271,11 @@ const listCameraAiSettings = asyncHandler(async (req, res) => {
     order: [[{ model: CameraGroup, as: 'group' }, 'name', 'ASC'], ['channel', 'ASC'], ['name', 'ASC']],
   });
 
-  const runtimeByMonitor = await getAiRuntimeByMonitor();
-  const data = cameras.map((camera) => serializeAiCamera(camera, runtimeByMonitor));
+  const [runtimeByMonitor, armedZones] = await Promise.all([
+    getAiRuntimeByMonitor(),
+    getArmedZonesByMonitor(req.user.id),
+  ]);
+  const data = cameras.map((camera) => serializeAiCamera(camera, runtimeByMonitor, armedZones));
   res.json({
     success: true,
     data,
@@ -1222,6 +1309,12 @@ const updateCameraSettings = asyncHandler(async (req, res) => {
     await assertAiLicence(req.user.id, 'face', 1);
   }
   const now = new Date().toISOString();
+  // Resolved before nextAi is built: it may FORCE the flag on, and the reason
+  // has to reach the operator rather than being applied silently to a
+  // security control. See resolveZoneBodyFlag.
+  const zoneBody = await resolveZoneBodyFlag({
+    userId: req.user.id, camera, patch: aiPatch, previousAi, enabled,
+  });
   const nextAi = {
     ...previousAi,
     ...aiPatch,
@@ -1237,6 +1330,10 @@ const updateCameraSettings = asyncHandler(async (req, res) => {
     // the stored value says what it means; absent still reads as ON, so
     // cameras saved before this split need no migration.
     faceRecognition: nextFaceFlag(aiPatch, previousAi),
+    // Zone-guard, per camera. Written explicitly (`...aiPatch` above would
+    // otherwise pass a non-boolean straight through) and never left absent, so
+    // the stored value says what it means.
+    zoneBodyDetection: zoneBody.value,
     updatedAt: now,
     createdAt: previousAi.createdAt || now,
     disabledAt: enabled ? null : now,
@@ -1263,9 +1360,12 @@ const updateCameraSettings = asyncHandler(async (req, res) => {
     data: {
       id: camera.id,
       settings: camera.settings,
-      camera: serializeAiCamera(camera, runtimeByMonitor),
+      camera: serializeAiCamera(camera, runtimeByMonitor, await getArmedZonesByMonitor(req.user.id)),
     },
     reconcile,
+    // What was changed BEYOND what was asked for. Empty when the save did
+    // exactly what the patch said, which is the usual case.
+    notices: zoneBody.forced ? [NO_PRODUCER_REASON] : [],
   });
 
   // Best-effort: tell smart-cam-ai to reconcile so the change is picked up
@@ -1426,6 +1526,9 @@ const updateCameraAiLifecycle = asyncHandler(async (req, res) => {
     await assertAiLicence(req.user.id, 'face', 1);
   }
   const now = new Date().toISOString();
+  const zoneBody = await resolveZoneBodyFlag({
+    userId: req.user.id, camera, patch, previousAi, enabled,
+  });
 
   const nextAi = {
     ...previousAi,
@@ -1440,6 +1543,7 @@ const updateCameraAiLifecycle = asyncHandler(async (req, res) => {
     watchlistAlerts: patch.watchlistAlerts !== undefined ? patch.watchlistAlerts === true : previousAi.watchlistAlerts !== false,
     journeyMapping: patch.journeyMapping !== undefined ? patch.journeyMapping === true : previousAi.journeyMapping !== false,
     faceRecognition: nextFaceFlag(patch, previousAi),
+    zoneBodyDetection: zoneBody.value,
     updatedAt: now,
     createdAt: previousAi.createdAt || now,
     disabledAt: enabled ? null : now,
@@ -1463,8 +1567,9 @@ const updateCameraAiLifecycle = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    data: serializeAiCamera(camera, runtimeByMonitor),
+    data: serializeAiCamera(camera, runtimeByMonitor, await getArmedZonesByMonitor(req.user.id)),
     reconcile,
+    notices: zoneBody.forced ? [NO_PRODUCER_REASON] : [],
   });
 });
 

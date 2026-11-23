@@ -21,10 +21,14 @@ import {
   ACCESS_MODES, DEFAULT_ROLES, SCHEDULE_MODES,
   SELECTABLE_ACCESS_MODES, accessModeUnavailable,
 } from './access-data';
+import { zoneCoverage } from './zone-detector';
 
 const INPUT = 'mt-1 w-full rounded-lg border border-line bg-surface px-2.5 py-1.5 text-body text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/25';
 
-export default function StepAccess({ access, onChange, suggestions = [], severity, alertAfterSec, onRule }) {
+export default function StepAccess({
+  access, onChange, suggestions = [], severity, alertAfterSec, onRule,
+  camera = null, onEnableBodyDetection, enablingBody = false, bodyNote = '',
+}) {
   const [query, setQuery] = useState('');
   const [newRole, setNewRole] = useState('');
 
@@ -61,6 +65,11 @@ export default function StepAccess({ access, onChange, suggestions = [], severit
   // keep the mode and gain an explanation; new zones cannot pick it.
   const unavailableReason = accessModeUnavailable(access.mode);
 
+  // What this zone will and will not catch on THIS camera, given which
+  // detectors are running on it. Null when there is nothing worth saying --
+  // a public zone, or a lockout already covered by body detection.
+  const coverage = camera ? zoneCoverage(camera, access.mode) : null;
+
   return (
     <div className="flex flex-col gap-3">
       <Group icon={ShieldCheck} title="Who may enter">
@@ -90,6 +99,19 @@ export default function StepAccess({ access, onChange, suggestions = [], severit
             <CircleAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
             Capacity held at 0 — any presence is a breach.
           </p>
+        ) : null}
+
+        {/* What the zone actually catches, and the switch that changes it.
+            Off is a legitimate choice; a SILENT off on a security control is
+            not -- a lockout zone with face-only detection misses the intruder
+            who knows where the camera is, which is the one it was drawn for. */}
+        {coverage ? (
+          <Coverage
+            busy={enablingBody}
+            coverage={coverage}
+            note={bodyNote}
+            onEnable={onEnableBodyDetection}
+          />
         ) : null}
       </Group>
 
@@ -291,6 +313,68 @@ export default function StepAccess({ access, onChange, suggestions = [], severit
           </Group>
         </>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * What this zone catches, what it misses, and the one switch that changes it.
+ *
+ * Written as two lists rather than a paragraph because the operator's question
+ * is not "is this configured correctly" but "will this catch the person I am
+ * worried about" -- and that is answered by reading the misses.
+ *
+ * `blocked` is a zone that cannot work at all (no detector on the camera);
+ * `warning` is a face-only lockout, which works but has a hole in it. Both
+ * offer the switch inline: making the operator leave the editor, find Camera
+ * Setup and come back is how a security control ends up left as it was.
+ */
+function Coverage({
+  coverage, onEnable, busy = false, note = '',
+}) {
+  const blocked = coverage.level === 'blocked';
+  const tone = blocked
+    ? 'border-danger-line bg-danger-soft text-danger-ink'
+    : 'border-warning-line bg-warning-soft text-warning-ink';
+
+  return (
+    <div className={`mt-1.5 rounded-lg border px-2.5 py-2 text-small leading-relaxed ${tone}`}>
+      <p className="flex items-start gap-1.5 font-semibold">
+        <CircleAlert className="mt-px h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
+        <span>{coverage.headline}</span>
+      </p>
+
+      {coverage.catches.length ? (
+        <>
+          <p className="mt-1.5 font-semibold">Catches</p>
+          <ul className="list-disc pl-4">
+            {coverage.catches.map((line) => <li key={line}>{line}</li>)}
+          </ul>
+        </>
+      ) : null}
+
+      <p className="mt-1.5 font-semibold">Does not catch</p>
+      <ul className="list-disc pl-4">
+        {coverage.misses.map((line) => <li key={line}>{line}</li>)}
+      </ul>
+
+      <p className="mt-1.5">{coverage.reason}</p>
+
+      {/* The switch, where the problem is one a switch fixes. A camera whose
+          AI is off entirely does not get it: it would save and change nothing. */}
+      {coverage.offer && onEnable ? (
+        <button
+          className="mt-2 inline-flex h-8 items-center gap-1.5 rounded-lg border border-current bg-surface px-2.5 font-semibold transition hover:bg-surface-sunken disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+          disabled={busy}
+          onClick={onEnable}
+          type="button"
+        >
+          <ShieldCheck className="h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
+          {busy ? 'Turning on…' : 'Catch people with no visible face'}
+        </button>
+      ) : null}
+
+      {note ? <p className="mt-1.5 font-semibold">{note}</p> : null}
     </div>
   );
 }

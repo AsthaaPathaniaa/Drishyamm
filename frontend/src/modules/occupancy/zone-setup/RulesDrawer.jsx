@@ -55,6 +55,9 @@ export default function RulesDrawer({
   draft, set, access, lockedOut, suggestions, locked = false,
   count = 0, live = false, dirty = false,
   zonesHere, cameraName, isNew, onPickZone,
+  // Straight through to the access step, which is where a zone's coverage --
+  // what it will and will not catch on this camera -- is decided and stated.
+  camera = null, onEnableBodyDetection, enablingBody = false, bodyNote = '',
 }) {
   const [open, setOpen] = useState(false);
   const badge = <CapacityBadge count={count} draft={draft} live={live} lockedOut={lockedOut} />;
@@ -130,9 +133,13 @@ export default function RulesDrawer({
           />
           <RuleSections
             access={access}
+            bodyNote={bodyNote}
+            camera={camera}
             draft={draft}
+            enablingBody={enablingBody}
             locked={locked}
             lockedOut={lockedOut}
+            onEnableBodyDetection={onEnableBodyDetection}
             set={set}
             suggestions={suggestions}
           />

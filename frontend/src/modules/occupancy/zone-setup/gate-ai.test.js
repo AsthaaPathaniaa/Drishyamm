@@ -104,11 +104,18 @@ test('detection areas are never sent, so turning AI on cannot wipe one', async (
   // catching a NEW field being added to the payload, which is how
   // `detectionZones` would creep back in. `faceRecognition` is a legitimate
   // addition -- the face feature split out of the `enabled` master switch --
-  // so it is listed rather than the assertion being loosened.
+  // so it is listed rather than the assertion being loosened. So is
+  // `zoneBodyDetection`, the per-camera zone-guard switch: carrying it means
+  // that saving a GATE cannot silently turn a camera's zone detector off,
+  // which omitting it from the payload would do.
   assert.deepEqual(
     Object.keys(enableAiPayload(row())).sort(),
-    ['detectionInputSize', 'enabled', 'faceRecognition', 'fps', 'journeyMapping', 'mode', 'priority', 'purpose', 'unknownAlerts', 'watchlistAlerts'],
+    ['detectionInputSize', 'enabled', 'faceRecognition', 'fps', 'journeyMapping', 'mode', 'priority', 'purpose', 'unknownAlerts', 'watchlistAlerts', 'zoneBodyDetection'],
   );
+  // And it is carried THROUGH, not defaulted away: a camera already running
+  // body detection keeps it when a gate is saved on the same camera.
+  assert.equal(enableAiPayload(row({ ai: { zoneBodyDetection: true } })).zoneBodyDetection, true);
+  assert.equal(enableAiPayload(row()).zoneBodyDetection, false);
 });
 
 test('a camera already running AI is left alone, and nothing is said', async () => {

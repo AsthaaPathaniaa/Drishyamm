@@ -79,11 +79,13 @@ import Panel from '@/core/ui/panel';
 import ConfirmDialog from '@/core/ui/confirm-dialog';
 import ZoneCanvas from '@/modules/headcount/ZoneCanvas';
 import { aiService } from '@/core/services/ai';
+import { buildEnablePayload } from '@/core/services/aiCamera';
 import { useOccupancy } from '../useOccupancy';
 import { defaultRoom, removeRoom, saveRoom } from '../room-settings';
 import {
   boundaryOn, colorsOnCamera, hasShape, newZoneId, zoneProblems, zonesOnCamera,
 } from '../zone-model';
+import { enableBodyDetection, zoneDetectorProblem } from './zone-detector';
 import ZoneRail from './ZoneRail';
 import CanvasBar from './CanvasBar';
 import { ZoneIdentityFields } from './StepBehaviour';
@@ -123,8 +125,8 @@ export default function ZoneSetup() {
   // Live polling off: this page writes rules. The zone list still loads once,
   // so the camera registry and the current counts are real.
   const {
-    regionZones, cameras, camByMonitor, rooms: saved, setRooms, gates, refreshGates, ready,
-    gatesReady, errors,
+    regionZones, cameras, camByMonitor, rooms: saved, setRooms, gates, refreshGates,
+    refreshRegistry, ready, gatesReady, errors,
   } = useOccupancy({ live: false });
   // The footfall camera list could not be read. Every camera then looks
   // unknown to the service, so the gate editors must say the service is down
@@ -388,6 +390,7 @@ export default function ZoneSetup() {
         isNew={pending?.id === zone.id}
         key={zone.id}
         onAddZone={addZone}
+        onRefreshRegistry={refreshRegistry}
         onAskDelete={askDelete}
         onCam={(cam) => go({ cam })}
         onStopGate={askStopGate}
@@ -519,13 +522,18 @@ function seedFrom(zone, saved, camByMonitor) {
 function ZoneEditorPage({
   zone, saved, regionZones, cameras, camByMonitor, camParam, group, onGroup, gates, onRefreshGates, isNew,
   pendingId, onPickZone, onPickGate, onStopGate, onAddZone, onAskDelete, onCam, onSaved, onCancel,
-  ready, dirtyRef, flash, footfallDown, gatesReady,
+  ready, dirtyRef, flash, footfallDown, gatesReady, onRefreshRegistry,
 }) {
   const [draft, setDraft] = useState(() => seedFrom(zone, saved, camByMonitor));
   const [baseline, setBaseline] = useState(() => JSON.stringify(draft));
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState(null);
   const [canvasMode, setCanvasMode] = useState('draw');
+  // The inline "catch people with no visible face" action in the access step.
+  // Its own state rather than the save's, because it is a change to the
+  // CAMERA, not to this zone, and it can succeed or fail on its own.
+  const [enablingBody, setEnablingBody] = useState(false);
+  const [bodyNote, setBodyNote] = useState('');
   // Whether the operator touched a shape. An empty boundary only clears a
   // camera's area when they did: the same empty array also means "the camera's
   // shape had not loaded when this opened", and that must not wipe it.
@@ -638,8 +646,41 @@ function ZoneEditorPage({
   // only changes which view the intrusion rules run on.
   const makePrimary = (m) => setDraft((d) => ({ ...d, cameras: [m, ...d.cameras.filter((c) => c !== m)] }));
 
+  // The AI camera row for the view whose rules are being edited. `camByMonitor`
+  // is the GET /ai/cameras registry the page already polls, so this is the same
+  // answer the rest of the page is working from.
+  const activeAiCamera = camByMonitor[activeCam] || null;
+
+  /**
+   * Turn body detection on for this camera, from the access step.
+   *
+   * Refreshes the registry afterwards so the panel re-reads the camera and
+   * the warning disappears, rather than leaving the operator looking at a
+   * sentence that is no longer true.
+   */
+  const enableBody = async () => {
+    setEnablingBody(true);
+    setBodyNote('');
+    const res = await enableBodyDetection({
+      row: activeAiCamera,
+      buildPayload: buildEnablePayload,
+      enableCamera: (id, payload) => aiService.updateCameraAiLifecycle(id, payload),
+    });
+    setBodyNote(res.note);
+    setEnablingBody(false);
+    if (res.status === 'turned-on') await onRefreshRegistry?.();
+  };
+
   const save = async () => {
     const problems = zoneProblems(draft, saved, nameOf);
+    // A zone cannot be ARMED on a camera with nothing detecting people: the
+    // backend refuses it with a 409, and an operator should never have to send
+    // a save to find that out. Checked per view, because a zone can span
+    // cameras and only one of them may be anonymous.
+    for (const m of draft.cameras || []) {
+      const problem = zoneDetectorProblem(camByMonitor[m], nameOf(m));
+      if (problem) problems.push(problem);
+    }
     if (problems.length) {
       setResult({ blocked: problems });
       return;
@@ -688,11 +729,15 @@ function ZoneEditorPage({
                 drawer does not have to be opened to know what it holds. */}
             <RulesDrawer
               access={access}
+              bodyNote={bodyNote}
+              camera={activeAiCamera}
               cameraName={nameOf(activeCam)}
               count={liveCount ?? zone.count ?? 0}
               dirty={dirty}
               draft={draft}
+              enablingBody={enablingBody}
               isNew={isNew}
+              onEnableBodyDetection={enableBody}
               live={liveCount != null}
               locked={awaitingShape}
               lockedOut={lockedOut}
