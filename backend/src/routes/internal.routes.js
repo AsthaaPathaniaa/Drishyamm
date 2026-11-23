@@ -372,7 +372,9 @@ router.get('/cameras', asyncHandler(async (_req, res) => {
 //
 // Condition 1 is the point: a camera whose AI a human switched off must not be
 // watched by anything downstream. The rule itself lives in
-// services/zoneGuardCameras.service.js so it can be tested on its own.
+// services/aiFeatureCameras.service.js so it can be tested on its own -- one
+// place that answers "which cameras may this feature watch?" for zone-guard,
+// head count and activity alike, rather than a selector per service.
 router.get('/zone-guard/cameras', asyncHandler(async (_req, res) => {
   res.json({ ok: true, cameras: await zoneGuardCameras() });
 }));
