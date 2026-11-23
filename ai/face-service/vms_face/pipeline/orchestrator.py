@@ -48,6 +48,7 @@ from vms_face.pipeline.ingest import Frame, RTSPIngest, make_ingest
 from vms_face.infra.person_detector import get_person_detector
 from vms_face.services.detection_zones import bbox_zone, normalize_zones
 from vms_face.services.footfall import FootfallConfig, get_registry as get_footfall_registry
+from vms_face.services.footfall_source import FootfallSourceGate
 from vms_face.services.snapshot_cache import get_snapshot_cache
 from vms_face.infra.verdict_bus import get_verdict_router
 from vms_face.services.face_quality import FaceQualityGate
@@ -189,6 +190,11 @@ class StreamOrchestrator:
         # the badge in the UI doesn't blink.
         self._last_person_count = 0
         self._person_last_run_frame = -1
+        # Decides, once for this camera, whether the body (YOLO) boxes may
+        # feed footfall at all; see services/footfall_source.py. They may
+        # not today -- they carry no track id -- so it refuses them out
+        # loud and footfall keeps counting from the face tracker.
+        self._footfall_source = FootfallSourceGate(ctx.camera_code)
         # I-1 phase 0: count finished tracks per camera (counting only).
         self._meter: TrackMeter | None = (
             TrackMeter(str(ctx.camera_id)) if settings.investigate_measure_enabled else None
@@ -619,8 +625,10 @@ class StreamOrchestrator:
             #      where YOLO is skipped (every_n) nothing is fed: mixing
             #      face boxes in would hand the centroid tracker two very
             #      different points for the same person on alternate frames.
-            #   2. SCRFD face tracker bboxes — when YOLO is off or its ONNX
-            #      model isn't installed. Tested at the box centre.
+            #      NOT USABLE TODAY — see the gate below.
+            #   2. SCRFD face tracker bboxes — when YOLO is off, its ONNX
+            #      model isn't installed, or its boxes are refused. Tested
+            #      at the box centre.
             # Counting only kicks in when the operator has enabled footfall
             # for THIS camera. The registry is read every frame, not the
             # config this orchestrator started with, so a gate switched on
@@ -628,9 +636,33 @@ class StreamOrchestrator:
             ff_cfg = get_footfall_registry().get_config(self._ctx.camera_id)
             if ff_cfg is not None and ff_cfg.enabled:
                 # 5-tuples from YOLO, 6-tuples (with the face track id) from
-                # the face tracker. The registry takes either.
+                # the face tracker. The registry takes either shape, but only
+                # the second one can actually count: footfall needs the same
+                # person matched across updates, and with no id the registry
+                # guesses from one centroid per update — which under the
+                # every_n cadence opens a new track every time, never reaches
+                # its 3-frame minimum, and counts ZERO while looking healthy.
+                #
+                # So the body source is gated, not merely preferred. The gate
+                # refuses it once per camera, at warning level, naming
+                # PIPELINE_PERSON_DETECTION_ENABLED, and we fall through to
+                # the face tracker — which is the source every counting
+                # camera already uses, so no count anywhere changes.
+                #
+                # PREREQUISITE to ever taking the body branch (deliberately
+                # not implemented here): run the person boxes through a
+                # tracker of their own — the same pattern as
+                # services/face_tracker.py, SORT with ids that survive a
+                # missed detection — so they arrive as
+                # (x1, y1, x2, y2, score, track_id). Then set
+                # YOLOPersonDetector.emits_track_ids = True and this branch
+                # starts being taken with no change here.
                 src_boxes: list[tuple] | None = None
-                body_source = settings.pipeline_person_detection_enabled and get_person_detector() is not None
+                body_source = self._footfall_source.allows_body(
+                    enabled=settings.pipeline_person_detection_enabled,
+                    detector=get_person_detector(),
+                    boxes=person_boxes_this_frame,
+                )
                 if body_source:
                     src_boxes = person_boxes_this_frame
                 elif tracked:
