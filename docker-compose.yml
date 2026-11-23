@@ -526,6 +526,16 @@ services:
       ZONE_SIM_MODEL: /models/yolov8n.pt
       ZONE_SIM_FPS: '4'
       ZONE_SIM_CONF: '0.35'
+      # Tracking off: it is the only reason this service ever needed a model
+      # instance per camera, the zone engine ignores trackId, and the
+      # measurement report (ai/zone-guard/MODEL.md) found it dropped 56% of
+      # detected people. On, every camera allocates its own model again.
+      ZONE_SIM_TRACK: ${ZONE_GUARD_TRACK:-false}
+      # The sub-stream carries as much detail as the main one once frames are
+      # letterboxed to 640 px, at a fraction of the decode. `main` is the
+      # fallback per camera, and this is the escape hatch if a site's
+      # sub-streams are too small to detect in.
+      ZONE_SIM_STREAM: ${ZONE_GUARD_STREAM:-sub}
     entrypoint:
     - python
     - -u
