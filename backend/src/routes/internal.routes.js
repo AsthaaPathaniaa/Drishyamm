@@ -14,6 +14,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const logger = require('../config/logger');
 const { emit, EVENTS } = require('../events/bus');
 const { AIEvent, Camera } = require('../models');
+const { zoneGuardCameras } = require('../services/zoneGuardCameras.service');
 const s3Service = require('../services/s3.service');
 const streamingService = require('../services/drishyamStreaming.service');
 const alertEngine = require('../services/alertEngine');
@@ -350,6 +351,30 @@ router.get('/cameras', asyncHandler(async (_req, res) => {
   }));
 
   res.json({ ok: true, cameras: data });
+}));
+
+// ── Zone-guard's camera list (read-only for the zone-guard service) ──────────
+// zone-guard produces the PERSON boxes the restricted-zone engine needs, and it
+// used to choose its cameras from ZONE_SIM_MONITORS -- an environment variable,
+// read once at import. Set to `all` it opened every camera in the deployment on
+// the MAIN stream and held each session permanently, whether or not the camera
+// had a zone drawn on it, whether or not the operator had switched that
+// camera's AI off, and whether or not the owner's plan included AI.
+//
+// This endpoint answers the question the service actually has, so the product
+// decides and the service obeys. A camera qualifies when ALL THREE hold:
+//
+//   1. its own AI switch is on          -- isAiEnabled, the SAME function the
+//                                         face-AI reconcile loop uses, so the
+//                                         two can never disagree;
+//   2. it has a reason to be watched    -- at least one enabled restricted zone;
+//   3. the owner's plan includes AI     -- getAiEntitledUserIds().
+//
+// Condition 1 is the point: a camera whose AI a human switched off must not be
+// watched by anything downstream. The rule itself lives in
+// services/zoneGuardCameras.service.js so it can be tested on its own.
+router.get('/zone-guard/cameras', asyncHandler(async (_req, res) => {
+  res.json({ ok: true, cameras: await zoneGuardCameras() });
 }));
 
 module.exports = router;

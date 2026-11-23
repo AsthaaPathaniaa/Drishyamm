@@ -27,18 +27,33 @@ real pixels, and the alert travels the product's real path. Nothing in this file
 fabricates an alert or writes one directly — it only reports what it sees, and
 the engine decides whether that is worth alerting on.
 
-Not a single-camera demo
-------------------------
-No camera identity is baked in here. Cameras are read from the backend's own
-registry (`/api/internal/cameras`) and selected by `ZONE_SIM_MONITORS`, so
-pointing this at real cameras is a config change, not a code change. Set it to
-`all` and every camera in the deployment gets person-box coverage.
+Which cameras, and who decides
+------------------------------
+The PRODUCT decides, not this file and not the environment. Cameras come from
+`/api/internal/zone-guard/cameras`, which lists a camera only when all three
+hold: its own AI switch is on, it has at least one enabled restricted zone, and
+the owner's plan includes AI. The list is re-read every
+`ZONE_SIM_REGISTRY_REFRESH` seconds and workers are started AND STOPPED to
+match, so drawing a zone starts coverage and deleting it — or switching that
+camera's AI off — releases the stream, with no restart either way.
+
+This replaces selection by `ZONE_SIM_MONITORS` alone, which was read once at
+import and checked nothing else. Set to `all` it opened every camera in the
+deployment on the MAIN stream and held each session permanently, including
+cameras with no zone drawn and cameras whose AI an operator had deliberately
+switched off — a large, invisible load nobody had asked for, and a service that
+disobeyed the one switch the operator is given.
+
+`ZONE_SIM_MONITORS` survives as a development NARROWING filter: it can take a
+subset of what the product lists, never widen it.
 
 Environment
 -----------
   BACKEND_URL          backend base URL          (default http://smart-cam-backend:5000)
   SERVICE_TOKEN        internal-API shared secret (required)
-  ZONE_SIM_MONITORS    comma list of monitorIds, or `all`  (default: all)
+  ZONE_SIM_MONITORS    dev filter: comma list of monitorIds to NARROW the
+                       product's list to, or `all`/empty for all of it. It can
+                       never add a camera the product did not list.
   ZONE_SIM_SOURCES     optional `monitorId=rtsp://...` overrides, comma separated
   ZONE_SIM_MODEL       YOLO weights path         (default /models/yolov8n.pt)
   ZONE_SIM_FPS         frames analysed per second per camera (default 4)
@@ -108,15 +123,32 @@ def _http_json(url: str, method: str = "GET", payload: dict | None = None, timeo
 
 
 def fetch_cameras() -> list[dict]:
-    """Cameras this service should analyse, straight from the backend registry.
+    """Cameras this service should analyse, as decided by the PRODUCT.
 
-    The registry is the only source of the monitorId → (userId, rtsp) mapping, so
-    a camera renamed or re-homed in the UI is picked up here without a redeploy.
+    `/api/internal/zone-guard/cameras` answers the question this service
+    actually has, rather than handing over every camera for us to filter. The
+    backend qualifies a camera on three conditions we cannot see from here:
+
+      * the camera's own AI switch is on (the operator's switch -- the one that
+        matters, and the one this service used to ignore entirely);
+      * it has at least one ENABLED restricted zone, so there is something to
+        watch for;
+      * the owner's plan includes AI.
+
+    Before this, selection came from ZONE_SIM_MONITORS alone -- an environment
+    variable read once at import. Set to `all` it opened every camera in the
+    deployment on the MAIN stream and held the session permanently, including
+    cameras with no zone and cameras whose AI a human had switched off. The
+    env var survives as a DEVELOPMENT NARROWING filter below: it can only ever
+    take a subset of what the product says, never widen it.
     """
     try:
-        _, data = _http_json(f"{BACKEND_URL}/api/internal/cameras")
+        _, data = _http_json(f"{BACKEND_URL}/api/internal/zone-guard/cameras")
     except Exception as err:  # noqa: BLE001 — any failure is "try again next tick"
-        log.warning("camera registry unreachable: %s", err)
+        # Deliberately NOT falling back to the full registry. A backend blip
+        # must not turn into "watch everything": the previous behaviour is the
+        # defect, and an empty list for one 60 s tick is the safe answer.
+        log.warning("zone-guard camera list unreachable: %s", err)
         return []
 
     cams = (data or {}).get("cameras") or []
@@ -144,7 +176,10 @@ def fetch_cameras() -> list[dict]:
     if wanted is not None:
         missing = wanted - {c["monitorId"] for c in picked}
         for mon in sorted(missing):
-            log.warning("ZONE_SIM_MONITORS names %s, which is not in the camera registry", mon)
+            log.warning(
+                "ZONE_SIM_MONITORS names %s, which the product does not list for zone-guard "
+                "(no enabled zone, AI switched off, or the plan does not include AI)", mon,
+            )
     return picked
 
 
@@ -332,26 +367,64 @@ def main() -> None:
     )
 
     stop = threading.Event()
-    workers: dict[str, threading.Thread] = {}
+    # monitorId → (thread, its own stop event). Each worker gets its OWN event
+    # so a single camera can be stopped without taking the service down: the
+    # list is now the product's answer and it SHRINKS as well as grows, which
+    # the previous add-only loop had no way to honour. Deleting the last zone
+    # on a camera, or switching that camera's AI off, has to actually release
+    # the stream -- otherwise the main-channel session leaks for the life of
+    # the container and nothing in the product can reclaim it.
+    workers: dict[str, tuple[threading.Thread, threading.Event]] = {}
 
-    # Poll the registry rather than reading it once: a camera added, renamed or
-    # re-pathed in the UI should start being covered without restarting this
-    # service. Threads are only ever ADDED here — a worker exits on its own when
-    # `stop` is set, and a camera that disappears simply stops reconnecting.
+    def release(mon: str, why: str) -> None:
+        entry = workers.pop(mon, None)
+        if entry is None:
+            return
+        thread, own_stop = entry
+        own_stop.set()
+        log.info("releasing camera %s — %s", mon, why)
+        thread.join(timeout=5.0)
+        if thread.is_alive():
+            # The decode call can sit in ffmpeg for a while. The thread is a
+            # daemon and its own stop is set, so it will exit; say so rather
+            # than block the refresh loop behind it.
+            log.warning("camera %s worker still winding down; it will exit on its own", mon)
+
+    # Poll rather than reading once: a camera that gains a zone, or has its AI
+    # switched on, should start being covered without restarting this service —
+    # and one that loses either should stop.
     while not stop.is_set():
-        for cam in fetch_cameras():
-            mon = cam["monitorId"]
-            alive = workers.get(mon)
-            if alive is not None and alive.is_alive():
+        cams = fetch_cameras()
+        want = {c["monitorId"]: c for c in cams}
+
+        for mon in [m for m in workers if m not in want]:
+            release(mon, "no longer listed by the product")
+
+        for mon, cam in want.items():
+            entry = workers.get(mon)
+            if entry is not None and entry[0].is_alive():
                 continue
-            t = threading.Thread(target=camera_worker, args=(cam, stop), name=f"cam-{mon}", daemon=True)
-            workers[mon] = t
+            if entry is not None:
+                workers.pop(mon, None)      # died on its own; replace it
+            own_stop = threading.Event()
+            t = threading.Thread(
+                target=camera_worker, args=(cam, own_stop), name=f"cam-{mon}", daemon=True,
+            )
+            workers[mon] = (t, own_stop)
             t.start()
 
         if not workers:
-            log.warning("no cameras matched ZONE_SIM_MONITORS=%s — nothing to analyse", MONITORS)
+            log.info(
+                "no cameras to analyse — the product lists none with an enabled zone, AI on "
+                "and an AI plan (ZONE_SIM_MONITORS=%s)", MONITORS,
+            )
 
         stop.wait(REGISTRY_REFRESH_S)
+
+    # Shutting down: the workers hold their own events now, so the global stop
+    # does not reach them by itself.
+    for mon in list(workers):
+        release(mon, "service shutting down")
 
 
 if __name__ == "__main__":

@@ -110,4 +110,10 @@ module.exports = {
   reconcile,
   start,
   stop,
+  // Exported so every service that has to ask "is this camera's AI on?" asks
+  // it the same way. The zone-guard selector (internal.routes.js) is the first
+  // other caller; restating the test there would let the two drift, and a
+  // camera the operator switched off being watched anyway is the whole defect
+  // that selector exists to fix.
+  isAiEnabled,
 };
