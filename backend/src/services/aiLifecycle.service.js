@@ -11,9 +11,32 @@ const RECONCILE_INTERVAL_MS = Number(process.env.AI_LIFECYCLE_RECONCILE_MS || 15
 let _timer = null;
 let _running = false;
 
+/**
+ * The MASTER switch: is this camera used by AI at all?
+ *
+ * Every AI feature is gated on this -- face recognition, head count, activity
+ * monitoring and zone-guard. It is deliberately NOT the face-recognition test;
+ * see faceRecognitionOn below.
+ */
 function isAiEnabled(camera) {
   const ai = camera.settings?.ai || {};
   return ai.enabled === true && ai.mode !== 'off';
+}
+
+/**
+ * Is FACE RECOGNITION wanted on this camera?
+ *
+ * One feature under the master, alongside head count and the rest. ABSENT MEANS
+ * ON: every camera created before this flag existed carries no key and must go
+ * on recognising faces exactly as it did, with no migration.
+ *
+ * Switching it off while the master stays on is the anonymous-counting case --
+ * heads are counted, no face is matched. Before the split that was impossible,
+ * because the only way to stop the face pipeline was to switch the master off,
+ * which stopped the counting with it.
+ */
+function faceRecognitionOn(camera) {
+  return (camera.settings?.ai || {}).faceRecognition !== false;
 }
 
 async function getRuntime() {
@@ -59,11 +82,22 @@ async function reconcile({ stopUnselected = true } = {}) {
     let stopped = 0;
 
     for (const camera of cameras) {
-      // Detection runs only when the per-camera AI flag is on AND the owner's
-      // plan includes AI. A downgrade to Basic drops the owner from aiUserIds,
-      // so this loop /stop-camera's their orchestrators within one reconcile
-      // even if settings.ai.enabled is still stale-true.
-      const enabled = isAiEnabled(camera) && aiUserIds.has(camera.userId);
+      // THREE conditions, not two, and the third is new.
+      //
+      // `ai.enabled` is the MASTER switch -- "use this camera for AI at all" --
+      // and every AI feature is now gated on it. But this loop starts one
+      // specific thing: the FACE pipeline. While face AI was the only consumer
+      // of the master, the two meant the same and one flag served both. It no
+      // longer can: with the master governing head count, zones and activity
+      // too, reading it here as "run face recognition" would make it impossible
+      // to count people without recognising them -- which is exactly what
+      // "Anonymous counting only" promises the operator.
+      //
+      // So face recognition has its own flag. Absent means ON, so every camera
+      // that existed before this split behaves exactly as it did.
+      const enabled = isAiEnabled(camera)
+        && faceRecognitionOn(camera)
+        && aiUserIds.has(camera.userId);
       const isRunning = runtime[camera.monitorId]?.running === true;
       try {
         if (enabled && !isRunning) {
@@ -116,4 +150,6 @@ module.exports = {
   // camera the operator switched off being watched anyway is the whole defect
   // that selector exists to fix.
   isAiEnabled,
+  // The face-recognition half of what `ai.enabled` used to mean on its own.
+  faceRecognitionOn,
 };

@@ -100,9 +100,14 @@ test('detection areas are never sent, so turning AI on cannot wipe one', async (
     monitorId: 'MON7', planAllowsAi: true, listCameras: m.listCameras, enableCamera: m.enableCamera,
   });
   assert.equal('detectionZones' in m.calls.enable[0].payload, false);
+  // The exact key set, deliberately: an allow-list is the only form that keeps
+  // catching a NEW field being added to the payload, which is how
+  // `detectionZones` would creep back in. `faceRecognition` is a legitimate
+  // addition -- the face feature split out of the `enabled` master switch --
+  // so it is listed rather than the assertion being loosened.
   assert.deepEqual(
     Object.keys(enableAiPayload(row())).sort(),
-    ['detectionInputSize', 'enabled', 'fps', 'journeyMapping', 'mode', 'priority', 'purpose', 'unknownAlerts', 'watchlistAlerts'],
+    ['detectionInputSize', 'enabled', 'faceRecognition', 'fps', 'journeyMapping', 'mode', 'priority', 'purpose', 'unknownAlerts', 'watchlistAlerts'],
   );
 });
 

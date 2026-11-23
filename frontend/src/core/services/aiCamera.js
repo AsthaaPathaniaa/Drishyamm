@@ -39,12 +39,25 @@ export const PURPOSES = [
  *                  picker links to the screen where it is drawn
  */
 export const AI_FEATURES = [
-  { key: 'face', kind: 'core', label: 'Face & person detection', short: 'Face', note: 'Finds people and recognises enrolled faces. Every other feature builds on this.' },
+  // Face recognition is a FEATURE now, not the master switch. `ai.enabled`
+  // means "use this camera for AI at all" and gates every row below; this flag
+  // decides whether faces are matched. Switching it off while the camera stays
+  // AI-on is the anonymous case: heads are still counted, no face is matched.
+  //
+  // The label used to read "Face & person detection", which over-promised:
+  // body/person detection is a DEPLOYMENT-wide switch
+  // (PIPELINE_PERSON_DETECTION_ENABLED), off by default and off here, not
+  // something this toggle turns on.
+  { key: 'face', kind: 'flag', flag: 'faceRecognition', label: 'Face recognition', short: 'Face', note: 'Detects faces and matches them against enrolled people. Counting and zones do not need this — switch it off to count people without identifying them.' },
   { key: 'unknown_alerts', kind: 'flag', flag: 'unknownAlerts', label: 'Unknown person alerts', short: 'Unknown', note: 'Alert when someone who is not enrolled is seen.' },
   { key: 'watchlist_alerts', kind: 'flag', flag: 'watchlistAlerts', label: 'Watchlist alerts', short: 'Watchlist', note: 'High-priority alert when a watchlisted person is seen.' },
-  { key: 'journey', kind: 'flag', flag: 'journeyMapping', label: 'Journey mapping', short: 'Journey', note: "Joins sightings into a person's path across cameras." },
-  { key: 'head_count', kind: 'setup', label: 'Head count / footfall', short: 'Count', note: 'Counts people crossing a gate line.', setupLabel: 'Draw a gate line', setupPath: '/occupancy/zone-setup' },
-  { key: 'restricted_zone', kind: 'setup', label: 'Restricted zone', short: 'Zone', note: 'Alerts when someone enters an area you draw.', setupLabel: 'Draw a zone', setupPath: '/ai-feed' },
+  { key: 'journey', kind: 'flag', flag: 'journeyMapping', label: 'Journey mapping', short: 'Journey', note: "Joins sightings into a person's path across cameras. Needs face recognition." },
+  { key: 'head_count', kind: 'setup', label: 'Head count / footfall', short: 'Count', note: 'Counts people crossing a gate line. Footfall counting is part of the face pipeline, so it needs face recognition on; the live head count in a room does not.', setupLabel: 'Draw a gate line', setupPath: '/occupancy/zone-setup' },
+  // Restricted zones are created on the counting-areas page, which is the only
+  // writer of /restricted-zones. /ai-feed draws AI DETECTION areas — a
+  // different thing on a near-identical canvas, which saves successfully and
+  // arms nothing.
+  { key: 'restricted_zone', kind: 'setup', label: 'Restricted zone', short: 'Zone', note: 'Alerts when someone enters an area you draw.', setupLabel: 'Draw a zone', setupPath: '/occupancy/zone-setup' },
 ];
 
 /**
@@ -52,13 +65,13 @@ export const AI_FEATURES = [
  * be preset; drawn features always need the operator to draw them.
  */
 export const PURPOSE_PRESETS = {
-  'Main gate':       { unknownAlerts: true,  watchlistAlerts: true,  journeyMapping: true },
-  Reception:         { unknownAlerts: true,  watchlistAlerts: false, journeyMapping: true },
-  'Restricted area': { unknownAlerts: true,  watchlistAlerts: true,  journeyMapping: false },
-  'Server room':     { unknownAlerts: true,  watchlistAlerts: true,  journeyMapping: false },
-  'Cash counter':    { unknownAlerts: true,  watchlistAlerts: true,  journeyMapping: false },
-  'Exam hall':       { unknownAlerts: true,  watchlistAlerts: false, journeyMapping: false },
-  'Store room':      { unknownAlerts: true,  watchlistAlerts: false, journeyMapping: false },
+  'Main gate':       { faceRecognition: true, unknownAlerts: true,  watchlistAlerts: true,  journeyMapping: true },
+  Reception:         { faceRecognition: true, unknownAlerts: true,  watchlistAlerts: false, journeyMapping: true },
+  'Restricted area': { faceRecognition: true, unknownAlerts: true,  watchlistAlerts: true,  journeyMapping: false },
+  'Server room':     { faceRecognition: true, unknownAlerts: true,  watchlistAlerts: true,  journeyMapping: false },
+  'Cash counter':    { faceRecognition: true, unknownAlerts: true,  watchlistAlerts: true,  journeyMapping: false },
+  'Exam hall':       { faceRecognition: true, unknownAlerts: true,  watchlistAlerts: false, journeyMapping: false },
+  'Store room':      { faceRecognition: true, unknownAlerts: true,  watchlistAlerts: false, journeyMapping: false },
 };
 
 /** A sensible purpose for a camera that has never had one, from its name. */
@@ -89,11 +102,25 @@ export function buildEnablePayload(row, overrides = {}) {
     detectionInputSize: Number(ai.detectionInputSize) || DEFAULT_INPUT_SIZE,
     purpose: ai.purpose || inferPurpose(row),
     priority: ai.priority || 'normal',
+    // Absent means on, so a camera saved before this flag existed keeps
+    // recognising faces. `enabled` above is the MASTER -- "use this camera for
+    // AI" -- and this is the face feature under it.
+    faceRecognition: ai.faceRecognition !== false,
     unknownAlerts: ai.unknownAlerts !== false,
     watchlistAlerts: ai.watchlistAlerts !== false,
     journeyMapping: ai.journeyMapping !== false,
     ...overrides,
   };
+}
+
+/**
+ * Is face recognition actually running on this camera? The master AND the face
+ * flag. Anything asking "are faces being matched here" wants this; anything
+ * asking "is this camera used by AI at all" wants `ai.enabled` on its own.
+ */
+export function faceRecognitionOn(row) {
+  const ai = row?.ai || {};
+  return ai.enabled === true && ai.mode !== 'off' && ai.faceRecognition !== false;
 }
 
 /** The lifecycle body that switches AI OFF, keeping the stored choices. */

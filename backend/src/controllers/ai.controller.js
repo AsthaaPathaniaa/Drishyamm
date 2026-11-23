@@ -618,6 +618,27 @@ function aiEnabled(ai) {
   return isAiEnabled({ settings: { ai: ai || {} } });
 }
 
+/**
+ * Is FACE RECOGNITION on? The master switch AND the face flag, where absent
+ * means on.
+ *
+ * This is what the face LICENCE is spent on. It used to be spent on
+ * `ai.enabled` alone, which was the same question while face AI was the only
+ * consumer of that flag. Now that the master governs every feature, a camera
+ * can be AI-on with face off -- counting heads, matching nobody -- and such a
+ * camera must not hold a face-recognition licence it is not using.
+ */
+function faceOn(ai) {
+  return aiEnabled(ai) && (ai || {}).faceRecognition !== false;
+}
+
+/** The face flag a patch is asking for, falling back to what is stored. */
+function nextFaceFlag(patch, previousAi) {
+  return patch?.faceRecognition !== undefined
+    ? patch.faceRecognition !== false
+    : (previousAi || {}).faceRecognition !== false;
+}
+
 function aiLifecycleStatus(ai, runtime) {
   if (!aiEnabled(ai)) return 'off';
   if (runtime?.running) return runtime.detecting ? 'detecting' : 'starting';
@@ -1190,11 +1211,16 @@ const updateCameraSettings = asyncHandler(async (req, res) => {
   const current = camera.settings || {};
   const aiPatch = req.body?.ai || req.body || {};
   const previousAi = current.ai || {};
+  const aiPatchOrBody = aiPatch;
   const enabled = aiPatch.enabled !== undefined ? aiPatch.enabled === true : previousAi.enabled === true;
   // Switching AI ON spends one face-recognition camera licence. Only the
   // off→on edge is checked: editing an already-on camera, or switching it
   // off, must keep working even on an over-licence account.
-  if (enabled && !aiEnabled(previousAi)) await assertAiLicence(req.user.id, 'face', 1);
+  // The face licence is spent on FACE RECOGNITION, not on the master switch:
+  // a camera that is AI-on with face off is counting, not recognising.
+  if (enabled && nextFaceFlag(aiPatchOrBody, previousAi) && !faceOn(previousAi)) {
+    await assertAiLicence(req.user.id, 'face', 1);
+  }
   const now = new Date().toISOString();
   const nextAi = {
     ...previousAi,
@@ -1207,6 +1233,10 @@ const updateCameraSettings = asyncHandler(async (req, res) => {
     unknownAlerts: aiPatch.unknownAlerts !== undefined ? aiPatch.unknownAlerts === true : previousAi.unknownAlerts !== false,
     watchlistAlerts: aiPatch.watchlistAlerts !== undefined ? aiPatch.watchlistAlerts === true : previousAi.watchlistAlerts !== false,
     journeyMapping: aiPatch.journeyMapping !== undefined ? aiPatch.journeyMapping === true : previousAi.journeyMapping !== false,
+    // Face recognition as a feature under the master. Written explicitly so
+    // the stored value says what it means; absent still reads as ON, so
+    // cameras saved before this split need no migration.
+    faceRecognition: nextFaceFlag(aiPatch, previousAi),
     updatedAt: now,
     createdAt: previousAi.createdAt || now,
     disabledAt: enabled ? null : now,
@@ -1337,7 +1367,13 @@ const setPersonTrackerCameras = asyncHandler(async (req, res) => {
   // batch is refused whole rather than half-applied.
   if (enabled) {
     const owned = await Camera.findAll({ where: { id: ids, userId: req.user.id }, attributes: ['id', 'settings'] });
-    const turningOn = owned.filter((c) => !aiEnabled(c.settings?.ai || {})).length;
+    // Counts only cameras where face recognition will actually START: it
+    // sets the master and leaves the face flag alone, so a camera with face
+    // explicitly off spends no face licence.
+    const turningOn = owned.filter((c) => {
+      const ai = c.settings?.ai || {};
+      return ai.faceRecognition !== false && !faceOn(ai);
+    }).length;
     await assertAiLicence(req.user.id, 'face', turningOn);
   }
 
@@ -1382,8 +1418,13 @@ const updateCameraAiLifecycle = asyncHandler(async (req, res) => {
   const current = camera.settings || {};
   const previousAi = current.ai || {};
   const patch = req.body || {};
+  const aiPatchOrBody = patch;
   const enabled = patch.enabled === true;
-  if (enabled && !aiEnabled(previousAi)) await assertAiLicence(req.user.id, 'face', 1);
+  // The face licence is spent on FACE RECOGNITION, not on the master switch:
+  // a camera that is AI-on with face off is counting, not recognising.
+  if (enabled && nextFaceFlag(aiPatchOrBody, previousAi) && !faceOn(previousAi)) {
+    await assertAiLicence(req.user.id, 'face', 1);
+  }
   const now = new Date().toISOString();
 
   const nextAi = {
@@ -1398,6 +1439,7 @@ const updateCameraAiLifecycle = asyncHandler(async (req, res) => {
     unknownAlerts: patch.unknownAlerts !== undefined ? patch.unknownAlerts === true : previousAi.unknownAlerts !== false,
     watchlistAlerts: patch.watchlistAlerts !== undefined ? patch.watchlistAlerts === true : previousAi.watchlistAlerts !== false,
     journeyMapping: patch.journeyMapping !== undefined ? patch.journeyMapping === true : previousAi.journeyMapping !== false,
+    faceRecognition: nextFaceFlag(patch, previousAi),
     updatedAt: now,
     createdAt: previousAi.createdAt || now,
     disabledAt: enabled ? null : now,
