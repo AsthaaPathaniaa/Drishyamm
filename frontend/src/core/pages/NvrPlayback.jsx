@@ -789,7 +789,7 @@ export default function NvrPlayback() {
     playbackService.download(url, end - start, (message) => setExportNotice({ tone: 'danger', text: message }));
     setExportNotice({
       tone: 'info',
-      text: `Exporting ${fmtDuration(end - start)} as ${format === 'original' ? 'the original stream' : 'MP4'}. Your browser saves it as it arrives; that takes about as long as the clip, because the NVR replays it in real time.`,
+      text: `Exporting ${fmtDuration(end - start)} as ${format === 'original' ? 'the original stream' : 'MP4'}. The NVR replays it in real time, so the download starts after about ${fmtDuration(end - start)}, once the clip is complete and can be scrubbed.`,
     });
   };
 
