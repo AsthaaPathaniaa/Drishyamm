@@ -9,9 +9,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  cameraPayload, colorsOnCamera, countOn, normalizeZone, normalizeZones, zoneProblems, zonesOnCamera,
+  BROKEN_NO_CAMERA, cameraPayload, colorsOnCamera, countOn, normalizeZone, normalizeZones,
+  notCountingText, zoneProblems, zonesNotCounting, zonesOnCamera,
 } from './zone-model.js';
-import { buildRegionZones } from './occupancy-data.js';
+import { buildMacro, buildRegionZones } from './occupancy-data.js';
 
 const BOX = [[0.1, 0.1], [0.4, 0.1], [0.4, 0.4], [0.1, 0.4]];
 const BOX2 = [[0.5, 0.5], [0.9, 0.5], [0.9, 0.9], [0.5, 0.9]];
@@ -101,4 +102,105 @@ test('save is refused for the cases that would count wrong', () => {
   const fine = zoneProblems({ id: 'new', name: 'Queue', cameras: ['m'], boundaries: { m: BOX } },
     normalizeZones({ z: { id: 'z', name: 'Lobby', cameras: ['m'], boundaries: { m: BOX2 } } }));
   assert.deepEqual(fine, []);
+});
+
+// ── A zone with no camera left on it ────────────────────────────────────────
+// It used to be deleted from every surface at once by `return null` here, with
+// nothing anywhere to say so -- the shape of "I created zones and I see none".
+
+test('a record with no camera is kept and marked, not dropped', () => {
+  const z = normalizeZone('zone-x', { id: 'zone-x', name: 'Server room', cameras: [], boundaries: {} });
+  // A record with NO `boundaries` field is the pre-model shape, and its key is
+  // its camera -- that one is not broken, and must not start reading as such.
+  assert.equal(normalizeZone('cam-a', { name: 'Lobby', cameras: [] }).broken, null);
+  assert.deepEqual(normalizeZone('cam-a', { name: 'Lobby', cameras: [] }).cameras, ['cam-a']);
+  assert.equal(z.broken, BROKEN_NO_CAMERA);
+  assert.equal(z.name, 'Server room');
+  assert.deepEqual(z.cameras, []);
+  // '' rather than undefined, which JSON.stringify would drop from the cache.
+  assert.equal(z.monitorId, '');
+  assert.deepEqual(z.boundary, []);
+
+  // And it survives the map every reader loads.
+  const zones = normalizeZones({ 'zone-x': { id: 'zone-x', name: 'Server room', cameras: [], boundaries: {} } });
+  assert.deepEqual(Object.keys(zones), ['zone-x']);
+  assert.equal(zones['zone-x'].broken, BROKEN_NO_CAMERA);
+
+  // Input that is not a record at all is still nothing.
+  assert.equal(normalizeZone('k', null), null);
+  assert.equal(normalizeZone('k', 'nope'), null);
+});
+
+test('a working zone carries no broken mark', () => {
+  const z = normalizeZone('zone-1', { id: 'zone-1', cameras: ['a'], boundaries: { a: BOX } });
+  assert.equal(z.broken, null);
+  assert.equal(z.monitorId, 'a');
+});
+
+test('a broken zone reaches no camera, is drawn nowhere, and counts nothing', () => {
+  const rooms = {
+    // `boundaries` present, `cameras` empty: a new-model record that lost its
+    // camera. (Without a `boundaries` field at all it would be read as a
+    // pre-model record keyed BY its camera, which is a different thing.)
+    'zone-x': { id: 'zone-x', name: 'Server room', maxCapacity: 4, cameras: [], boundaries: {} },
+    lobby: { id: 'lobby', name: 'Lobby', maxCapacity: 50, cameras: ['m1'], boundaries: { m1: BOX } },
+  };
+  const zones = normalizeZones(rooms);
+
+  // Not on any camera: so not in the payload pushed to one, and never drawn.
+  assert.deepEqual(zonesOnCamera(zones, 'm1').map((z) => z.id), ['lobby']);
+  assert.deepEqual(cameraPayload(zones, 'm1').zones.map((z) => z.id), ['lobby']);
+  assert.equal(cameraPayload(zones, 'm1').zoneCount, 1);
+  assert.equal(colorsOnCamera(zones, 'm1')['zone-x'], undefined);
+  // Nor on a camera of its own, whatever id is asked for.
+  assert.deepEqual(zonesOnCamera(zones, 'zone-x'), []);
+  assert.deepEqual(cameraPayload(zones, 'zone-x').zones, []);
+
+  // And no count, no capacity, nowhere in the site totals.
+  const streams = [{ id: 'm1', status: 'online', counts: { heads: 3 } }];
+  const regionZones = buildRegionZones(streams, {}, rooms);
+  assert.deepEqual(regionZones.map((z) => z.id), ['lobby']);
+  const macro = buildMacro({ lineZones: [], regionZones, congestion: [], footfall: null });
+  assert.equal(macro.live, 3);
+  assert.equal(macro.capacity, 50);
+});
+
+test('saving a zone with no camera is refused, and says why', () => {
+  const problems = zoneProblems({ id: 'zone-x', name: 'Server room', cameras: [], boundaries: {} }, {});
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /Add a camera to this zone/);
+  // A normal draft is unaffected.
+  assert.deepEqual(zoneProblems({ id: 'z', name: 'Queue', cameras: ['m'], boundaries: { m: BOX } }, {}), []);
+});
+
+// ── Zones that exist but nothing is counting ────────────────────────────────
+
+test('the zones nothing is counting are the saved ones the live list lost', () => {
+  const rooms = {
+    lobby: { id: 'lobby', name: 'Lobby', cameras: ['m1'], boundaries: { m1: BOX } },
+    server: { id: 'server', name: 'Server room', cameras: ['m9'], boundaries: { m9: BOX } },
+    store: { id: 'store', name: 'Store', cameras: ['m8'], boundaries: { m8: BOX } },
+    'zone-x': { id: 'zone-x', name: 'Orphan', cameras: [], boundaries: {} },
+  };
+  const live = buildRegionZones([{ id: 'm1', status: 'online', counts: { heads: 2 } }], {}, rooms);
+  const out = zonesNotCounting(rooms, live);
+  // The lobby is counting, so it is not one of these. The orphan has no camera
+  // to switch on, so it is not one either -- it is broken, and the rail says so.
+  assert.deepEqual(out.map((z) => z.id).sort(), ['server', 'store']);
+
+  // Nothing counting at all: every camera-bearing zone is one.
+  assert.deepEqual(zonesNotCounting(rooms, []).map((z) => z.id).sort(), ['lobby', 'server', 'store']);
+  // Everything counting: none.
+  assert.deepEqual(zonesNotCounting(rooms, [{ id: 'lobby' }, { id: 'server' }, { id: 'store' }]), []);
+  assert.deepEqual(zonesNotCounting({}, []), []);
+});
+
+test('the empty state names how many, and says nothing at all when there are none', () => {
+  // Word for word: this line is what the panel adds beneath "No space is
+  // counting yet", and null is what keeps that empty state untouched.
+  assert.equal(notCountingText(3), '3 zones are set up on cameras that are not counting.');
+  assert.equal(notCountingText(1), '1 zone is set up on a camera that is not counting.');
+  assert.equal(notCountingText(0), null);
+  assert.equal(notCountingText(), null);
+  assert.equal(notCountingText(-1), null);
 });

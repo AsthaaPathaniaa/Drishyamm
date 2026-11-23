@@ -653,6 +653,10 @@ function ZoneEditorPage({
     }, {
       registry: camByMonitor,
       clearBoundary: boundaryEdited,
+      // So a camera the save could not reach is named in the result, not
+      // counted. `nameOf` is the same resolution the rail and the canvas bar
+      // use, and falls back to the monitor id only when nothing knows it.
+      cameraName: nameOf,
     });
     setSaving(false);
     setResult(res);
