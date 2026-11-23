@@ -56,7 +56,7 @@ x-ai-env: &id001
   FACE_LEARNING_MIN_BLUR_VAR: '20.0'
   JOURNEY_BODY_LOGGING: 'true'
   PIPELINE_PERSON_DETECTION_ENABLED: ${PIPELINE_PERSON_DETECTION_ENABLED:-false}
-  PIPELINE_PERSON_MODEL_PATH: /srv/data/models/yolov8n.onnx
+  PIPELINE_PERSON_MODEL_PATH: /srv/data/person-models/yolov8n.onnx
   PIPELINE_PERSON_THRESHOLD: '0.35'
   PIPELINE_PERSON_DET_SIZE: '640'
   PIPELINE_PERSON_DETECT_EVERY_N_FRAMES: ${PIPELINE_PERSON_DETECT_EVERY_N_FRAMES:-2}
@@ -83,6 +83,13 @@ x-ai-volumes: &id002
 - ./ai/face-service/vms_face:/srv/app/face_detection/vms_face
 - ./models/insightface:/root/.insightface
 - ./data/ai-models:/srv/data/models:ro
+# The person-detection weights, where PIPELINE_PERSON_MODEL_PATH can reach
+# them. They used to be addressed under /srv/data/models, which is mounted
+# from ./data/ai-models -- a runtime directory holding only .gitkeep. So
+# enabling PIPELINE_PERSON_DETECTION_ENABLED found no model, logged a warning
+# and silently fell back to face-only counting, which looks identical to the
+# feature being off. Same source zone-guard already mounts (see its service).
+- ./models/person:/srv/data/person-models:ro
 - ./data/known-faces:/srv/data/known_faces:ro
 - vms-locks:/vms-locks
 - ${RECORDINGS_DIR:-./data/recordings}:/recordings:ro
@@ -444,7 +451,7 @@ services:
       FACE_LEARNING_MIN_BLUR_VAR: '20.0'
       JOURNEY_BODY_LOGGING: 'true'
       PIPELINE_PERSON_DETECTION_ENABLED: ${PIPELINE_PERSON_DETECTION_ENABLED:-false}
-      PIPELINE_PERSON_MODEL_PATH: /srv/data/models/yolov8n.onnx
+      PIPELINE_PERSON_MODEL_PATH: /srv/data/person-models/yolov8n.onnx
       PIPELINE_PERSON_THRESHOLD: '0.35'
       PIPELINE_PERSON_DET_SIZE: '640'
       PIPELINE_PERSON_DETECT_EVERY_N_FRAMES: ${PIPELINE_PERSON_DETECT_EVERY_N_FRAMES:-2}

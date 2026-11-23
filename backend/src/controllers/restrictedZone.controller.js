@@ -43,6 +43,12 @@ const create = asyncHandler(async (req, res) => {
     schedule: b.schedule || 'always',
     armWindow: b.armWindow || b.window || null,
     dwellSec: Number.isFinite(+b.dwellSec) ? +b.dwellSec : 5,
+    // The capacity rule. The column and the engine that reads it (`cap` in
+    // zoneIntrusion.service.js) have both existed from the start; this route
+    // simply never accepted the field, so a limit set in the zone editor could
+    // not reach the engine and a zone configured by capacity alarmed on entry
+    // instead. 0 and null both mean "no capacity rule" to the engine.
+    maxOccupancy: Number.isFinite(+b.maxOccupancy) && +b.maxOccupancy > 0 ? Math.round(+b.maxOccupancy) : null,
     alertOnEntry: b.alertOnEntry !== false,
     allowed: Array.isArray(b.allowed) ? b.allowed : [],
     enabled: b.enabled !== false,
@@ -62,6 +68,13 @@ const update = asyncHandler(async (req, res) => {
   if (b.rect != null) patch.rect = b.rect;
   if (b.armWindow != null || b.window != null) patch.armWindow = b.armWindow || b.window;
   if (b.dwellSec != null) patch.dwellSec = +b.dwellSec;
+  // Sent explicitly as null or 0 to clear the capacity rule, so `!= null` is
+  // the wrong test here: an operator removing a limit has to be able to.
+  if ('maxOccupancy' in b) {
+    patch.maxOccupancy = Number.isFinite(+b.maxOccupancy) && +b.maxOccupancy > 0
+      ? Math.round(+b.maxOccupancy)
+      : null;
+  }
   if (typeof b.alertOnEntry === 'boolean') patch.alertOnEntry = b.alertOnEntry;
   if (Array.isArray(b.allowed)) patch.allowed = b.allowed;
   if (typeof b.enabled === 'boolean') patch.enabled = b.enabled;

@@ -231,6 +231,17 @@ function handleFrame({ userId, frame }) {
         continue;
       }
 
+      // A PUBLIC zone does not alarm on entry. `alertOnEntry` is what the zone
+      // editor writes for that choice (`restricted-zones-api.js` toApi:
+      // `alertOnEntry: access.mode !== 'public'`), the controller stores it and
+      // the model has carried it from the start — and until now nothing read it
+      // back, so a zone an operator had explicitly marked public raised a
+      // `zone.intrusion` for every person who walked through it. Checked AFTER
+      // the capacity branch on purpose: a public zone WITH a capacity rule is
+      // still meant to alert when it is over its limit, which is the whole
+      // point of making it public rather than deleting it.
+      if (zone.alertOnEntry === false) continue;
+
       let st = zoneOcc.get(zone.id);
       if (!st) { st = { present: false, firstInside: 0, lastInside: 0, lastAlert: 0 }; zoneOcc.set(zone.id, st); }
 
