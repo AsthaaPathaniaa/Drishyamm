@@ -119,6 +119,25 @@ async function reconcile({ stopUnselected = true } = {}) {
     if (started || stopped) {
       logger.info('aiLifecycle: reconciled camera runtime', { started, stopped });
     }
+
+    // The activity monitor, re-stated on the same tick and for the same reason.
+    // It is the one AI service that had no loop: its camera set was pushed once
+    // per toggle, a failure was a log line, and nothing ever re-stated it -- so
+    // a toggle made while it was restarting was lost for good, a backend
+    // restart never re-sent the set, and changing a camera's AI switch or
+    // losing an AI plan never reached it at all.
+    //
+    // Loaded here rather than at module scope: activityPush depends on the
+    // feature selectors, which depend on this module for isAiEnabled, and a
+    // top-level require would close that circle.
+    try {
+      // eslint-disable-next-line global-require
+      await require('./activityPush.service').pushActivityCameras();
+    } catch (err) {
+      // pushActivityCameras does not throw; this is belt and braces so an
+      // unexpected failure can never stop the face reconcile that precedes it.
+      logger.warn('aiLifecycle: activity reconcile failed', { error: err.message });
+    }
   } finally {
     _running = false;
   }

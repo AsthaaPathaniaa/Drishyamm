@@ -2013,46 +2013,11 @@ const activityMetrics = asyncHandler(async (req, res) => {
 
 // Build the full activity-enabled camera set and push it to the activity-monitor.
 // Best-effort: returns a status object, never throws to the request handler.
+// Delegated to services/activityPush.service.js, which re-states this set on
+// the reconcile loop as well. `force` because an operator is waiting on the
+// answer to their own toggle: the loop's unchanged-set skip must not apply.
 async function pushActivityCameras() {
-  if (!ACTIVITY_BASE) return { ok: false, error: 'activity service not configured' };
-  // The activity-monitor is one global service, so the desired set spans every
-  // camera with the flag on (not just one user's). Filtered in JS — fine at this
-  // scale; swap to a JSON_EXTRACT where-clause if the fleet grows large.
-  const cams = await Camera.findAll({ attributes: ['id', 'userId', 'name', 'monitorId', 'settings'] });
-  const host = config.streamService.rtspHost;
-  const port = config.streamService.rtspPort || 8554;
-  // The camera's OWN AI switch, and the owner's plan, gate this as well as the
-  // feature flag. The flag says WHAT to do with a camera; the AI switch says
-  // whether to look at it at all, and it used to govern only face AI — so an
-  // operator who switched a camera's AI off kept paying for pose and
-  // phone-usage analysis on it, and a lapsed plan kept it running for ever
-  // (the licence is only checked on the off→on edge, in setActivityCameras).
-  //
-  // isAiEnabled is imported rather than restated: the face-AI reconcile loop
-  // uses the same function, and two copies of "is AI on?" would drift.
-  const aiUserIds = await getAiEntitledUserIds();
-  const desired = [];
-  for (const c of cams) {
-    if (c.settings?.ai?.activityMonitoring === true
-        && c.monitorId
-        && isAiEnabled(c)
-        && aiUserIds.has(c.userId)) {
-      desired.push({
-        id: c.monitorId,
-        name: c.name || c.monitorId,
-        source: `rtsp://${host}:${port}/cam_${c.monitorId}`,
-        vms_camera: c.monitorId,
-      });
-    }
-  }
-  try {
-    const { data } = await axios.post(`${ACTIVITY_BASE}/activity/cameras`, { cameras: desired }, { timeout: 8000 });
-    logger.info('activity cameras pushed', { count: desired.length });
-    return { ok: true, pushed: desired.length, data };
-  } catch (err) {
-    logger.warn('activity cameras push failed', { error: err.message });
-    return { ok: false, error: err.message, pushed: desired.length };
-  }
+  return require('../services/activityPush.service').pushActivityCameras({ force: true });
 }
 
 // POST /api/ai/activity-cameras  { cameraIds:[..], enabled?:bool }

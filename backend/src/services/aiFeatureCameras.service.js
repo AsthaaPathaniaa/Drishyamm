@@ -27,6 +27,7 @@
  * In a service, not inline in the route, so the rule can be tested without
  * standing up Express.
  */
+const config = require('../config/env');
 const { Camera, RestrictedZone } = require('../models');
 const { isAiEnabled } = require('./aiLifecycle.service');
 const { getAiEntitledUserIds } = require('./entitlements.service');
@@ -104,4 +105,31 @@ async function headcountCameras() {
     }));
 }
 
-module.exports = { zoneGuardCameras, headcountCameras };
+/**
+ * activity monitoring: the camera needs `settings.ai.activityMonitoring`.
+ *
+ * Shaped for the activity service's own `POST /activity/cameras`, which takes
+ * the FULL desired list and reconciles its workers to it. The source URL is
+ * built from config rather than through streamingService so that the string
+ * sent is byte-identical to what the controller sent before this moved -- a
+ * reliability fix is the wrong place to change what a service receives.
+ *
+ * The set spans every user, not one: the activity monitor is a single global
+ * service, so it has to be told the whole truth or it will stop cameras
+ * belonging to everyone else.
+ */
+async function activityCameras() {
+  const host = config.streamService.rtspHost;
+  const port = config.streamService.rtspPort || 8554;
+  const cams = await eligible(null);
+  return cams
+    .filter((c) => c.settings?.ai?.activityMonitoring === true)
+    .map((c) => ({
+      id: c.monitorId,
+      name: c.name || c.monitorId,
+      source: `rtsp://${host}:${port}/cam_${c.monitorId}`,
+      vms_camera: c.monitorId,
+    }));
+}
+
+module.exports = { zoneGuardCameras, headcountCameras, activityCameras };
