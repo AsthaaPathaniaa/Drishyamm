@@ -21,6 +21,23 @@ export const ACCESS_MODES = [
     id: 'restricted',
     label: 'Restricted / Authorized only',
     blurb: 'Only the roles and people on the whitelist below are permitted. Anyone else raises a breach the moment they are recognised.',
+    // NOT OFFERED, for now. The engine excuses a person when the box carrying
+    // them has a `name` on the zone's allow-list -- and the detector that gives
+    // a zone its coverage of people whose faces are not readable (zone-guard)
+    // emits boxes with NO name, ever, by design. So whenever that detector is
+    // feeding a camera, an allow-list excuses nobody and authorised staff raise
+    // a security breach exactly like an intruder.
+    //
+    // Disabling it changes NO behaviour: the mode already does not work. It
+    // stops the product offering a guarantee it cannot keep, which is the same
+    // call taken for the room-behaviour settings that enforce nothing.
+    //
+    // To re-enable: the overlay channel needs a producer field so the engine can
+    // tell a nameless person box from an unrecognised face, and apply an
+    // allow-list only to boxes that could carry a name. Chapter 20, change 1.
+    unavailable: 'Needs face recognition to identify who may pass, and cannot be '
+      + 'enforced on cameras where people are detected without their faces. '
+      + 'Use Strict lockout until this is built.',
   },
   {
     id: 'lockout',
@@ -30,6 +47,19 @@ export const ACCESS_MODES = [
 ];
 
 export const ACCESS_MODE_BY_ID = Object.fromEntries(ACCESS_MODES.map((m) => [m.id, m]));
+
+/**
+ * The modes an operator may actually choose.
+ *
+ * A mode carrying `unavailable` is still in ACCESS_MODES, deliberately: zones
+ * already saved in it must keep reading back as themselves rather than silently
+ * becoming something else, and the editor shows the reason instead of leaving a
+ * gap where a choice used to be.
+ */
+export const SELECTABLE_ACCESS_MODES = ACCESS_MODES.filter((m) => !m.unavailable);
+
+/** Why this mode cannot be chosen, or null when it can. */
+export const accessModeUnavailable = (id) => ACCESS_MODE_BY_ID[id]?.unavailable || null;
 
 /** Starting set of roles. Editable per zone — there is no directory to read. */
 export const DEFAULT_ROLES = [

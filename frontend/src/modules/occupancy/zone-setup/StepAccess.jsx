@@ -17,7 +17,10 @@ import {
   AlertTriangle, Check, CircleAlert, Clock, Plus, ShieldCheck, UserPlus, Users, X,
 } from 'lucide-react';
 import { Field, InfoTip, Segmented } from '../components/bits';
-import { ACCESS_MODES, DEFAULT_ROLES, SCHEDULE_MODES } from './access-data';
+import {
+  ACCESS_MODES, DEFAULT_ROLES, SCHEDULE_MODES,
+  SELECTABLE_ACCESS_MODES, accessModeUnavailable,
+} from './access-data';
 
 const INPUT = 'mt-1 w-full rounded-lg border border-line bg-surface px-2.5 py-1.5 text-body text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/25';
 
@@ -53,11 +56,34 @@ export default function StepAccess({ access, onChange, suggestions = [], severit
   };
 
   const restricted = access.mode === 'restricted';
+  // Set when this zone is in a mode that is no longer offered -- today only
+  // 'restricted', whose allow-list the engine cannot enforce. Existing zones
+  // keep the mode and gain an explanation; new zones cannot pick it.
+  const unavailableReason = accessModeUnavailable(access.mode);
 
   return (
     <div className="flex flex-col gap-3">
       <Group icon={ShieldCheck} title="Who may enter">
-        <Segmented compact name="Who may enter" onChange={(v) => set({ mode: v })} options={ACCESS_MODES} value={access.mode} />
+        {/* A zone already saved in an unavailable mode keeps showing that mode,
+            so the operator sees what the zone IS, not a silently different
+            thing. It just cannot be chosen, and the reason is stated below. */}
+        <Segmented
+          compact
+          name="Who may enter"
+          onChange={(v) => set({ mode: v })}
+          options={unavailableReason ? ACCESS_MODES : SELECTABLE_ACCESS_MODES}
+          value={access.mode}
+        />
+
+        {unavailableReason ? (
+          <p className="mt-1.5 flex items-start gap-1.5 rounded-lg border border-warning-line bg-warning-soft px-2.5 py-2 text-small leading-relaxed text-warning-ink">
+            <CircleAlert className="mt-px h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
+            <span>
+              <strong>This zone behaves as a strict lockout.</strong> {unavailableReason}
+              {' '}Everyone who enters raises a breach, including the roles listed below.
+            </span>
+          </p>
+        ) : null}
 
         {access.mode === 'lockout' ? (
           <p className="mt-1.5 flex items-center gap-1.5 text-small font-semibold text-danger-ink">
