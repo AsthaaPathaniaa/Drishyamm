@@ -91,6 +91,24 @@ jobs:
         # Run from ai/face-service so the tests can `import vms_face`.
         run: python -m unittest discover -s vms_face/tests -t .
 
+  zone-guard:
+    name: Zone-guard (unittest, stdlib only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: ai/zone-guard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # No install step and no requirements file: the tests stub `cv2` and
+      # touch only the pure camera-selection functions, which is what keeps
+      # "ZONE_SIM_MONITORS can only narrow" cheap enough to check on every PR.
+      - name: unittest
+        run: python -m unittest discover -p 'test_*.py' -v
+
   ai-edge-services:
     name: AI ${{ matrix.service }} (pytest, CPU)
     runs-on: ubuntu-latest
