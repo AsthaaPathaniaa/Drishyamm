@@ -27,7 +27,7 @@ jest.mock('../src/services/drishyamStreaming.service', () => ({
 
 const { Camera, RestrictedZone } = require('../src/models');
 const { getAiEntitledUserIds } = require('../src/services/entitlements.service');
-const { zoneGuardCameras } = require('../src/services/zoneGuardCameras.service');
+const { headcountCameras, zoneGuardCameras } = require('../src/services/aiFeatureCameras.service');
 
 /** A camera row as Sequelize hands it over, AI on unless told otherwise. */
 const camera = (monitorId, over = {}) => ({
@@ -36,7 +36,14 @@ const camera = (monitorId, over = {}) => ({
   monitorId,
   name: monitorId.toUpperCase(),
   path: 'no-sub',
+  status: 'online',
   settings: { ai: { enabled: true, mode: 'continuous' } },
+  ...over,
+});
+
+/** A camera with head count switched on, and AI on unless told otherwise. */
+const counting = (monitorId, over = {}) => camera(monitorId, {
+  settings: { ai: { enabled: true, mode: 'continuous' }, headcount: { enabled: true } },
   ...over,
 });
 
@@ -182,4 +189,69 @@ test('the three conditions are an AND: failing any one excludes the camera', asy
   });
 
   expect(monitorsOf(await zoneGuardCameras())).toEqual(['zone-ai-plan']);
+});
+
+/* ══════════════════ head count: the same rule, its own flag ═════════════ */
+
+describe('headcountCameras', () => {
+  test('a camera with head count on, AI on and a plan is listed', () => {
+    Camera.findAll.mockResolvedValue([counting('cam-a')]);
+    return expect(headcountCameras().then(monitorsOf)).resolves.toEqual(['cam-a']);
+  });
+
+  test('head count on but AI SWITCHED OFF is not listed', async () => {
+    // The defect this change exists to remove: the service filtered on its own
+    // flag alone, so a camera an operator had switched off kept counting.
+    Camera.findAll.mockResolvedValue([
+      counting('cam-a', { settings: { ai: { enabled: false, mode: 'off' }, headcount: { enabled: true } } }),
+      counting('cam-b'),
+    ]);
+    expect(monitorsOf(await headcountCameras())).toEqual(['cam-b']);
+  });
+
+  test("mode 'off' with enabled true is also off", async () => {
+    Camera.findAll.mockResolvedValue([
+      counting('cam-a', { settings: { ai: { enabled: true, mode: 'off' }, headcount: { enabled: true } } }),
+    ]);
+    expect(await headcountCameras()).toEqual([]);
+  });
+
+  test('AI on but head count off is not listed', async () => {
+    Camera.findAll.mockResolvedValue([camera('cam-a'), counting('cam-b')]);
+    expect(monitorsOf(await headcountCameras())).toEqual(['cam-b']);
+  });
+
+  test('an un-entitled owner is not listed even with both flags on', async () => {
+    getAiEntitledUserIds.mockResolvedValue(new Set(['owner-1']));
+    Camera.findAll.mockResolvedValue([
+      counting('cam-a'),
+      counting('cam-b', { userId: 'lapsed-owner' }),
+    ]);
+    expect(monitorsOf(await headcountCameras())).toEqual(['cam-a']);
+  });
+
+  test('rows keep the shape the service already reads', async () => {
+    Camera.findAll.mockResolvedValue([counting('cam-a', { path: 'has-sub', status: 'offline' })]);
+    const [row] = await headcountCameras();
+
+    // `settings` carries the counting zones; `status` is what the service's own
+    // offline check reads. Both stay its decision, so both must be present.
+    expect(row.settings.headcount.enabled).toBe(true);
+    expect(row.status).toBe('offline');
+    expect(row.rtsp).toBe('rtsp://relay/cam_cam-a');
+    expect(row.rtspSub).toBe('rtsp://relay/cam_cam-a_sub');
+  });
+
+  test('an offline camera is still listed — dialling it is the service\'s call, not ours', async () => {
+    Camera.findAll.mockResolvedValue([counting('cam-a', { status: 'offline' })]);
+    expect(monitorsOf(await headcountCameras())).toEqual(['cam-a']);
+  });
+
+  test('every camera is considered, not a pre-filtered subset', async () => {
+    Camera.findAll.mockResolvedValue([counting('cam-a')]);
+    await headcountCameras();
+    // No monitorId restriction: head count has no equivalent of zone-guard's
+    // "needs a zone", so the query must span the fleet.
+    expect(Camera.findAll.mock.calls[0][0].where).toBeUndefined();
+  });
 });

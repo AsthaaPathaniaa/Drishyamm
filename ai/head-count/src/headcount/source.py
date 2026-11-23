@@ -1,11 +1,20 @@
 """Dynamic camera source — headcount is user-controlled per camera.
 
-Polls the VMS backend's camera registry (``/api/internal/cameras``) and keeps the
-running stream workers matched to the set of cameras that have head-count enabled
-(``settings.headcount.enabled``). Users toggle the feature per camera in the VMS
+Polls ``/api/internal/headcount/cameras`` and keeps the running stream workers
+matched to what it returns. That endpoint lists a camera only when ALL THREE
+hold: ``settings.headcount.enabled`` is set, the camera's OWN AI switch is on,
+and the owner's plan includes AI. Users toggle the feature per camera in the VMS
 UI; this loop picks the change up on the next poll and adds/removes workers via
 ``manager.reconcile``. Stdlib-only (urllib); best-effort — a failed poll is logged
 and the current worker set is left untouched.
+
+It used to poll the whole camera registry (``/api/internal/cameras``) and filter
+on ``settings.headcount.enabled`` alone, which meant a camera whose AI an
+operator had switched off carried on counting, and a lapsed plan carried on
+counting indefinitely — the licence is only checked at the moment the feature is
+switched on. Eligibility belongs to the product; what remains this service's own
+decision is whether a camera can be DIALLED (the offline check) and how many
+fit (the stream caps).
 """
 from __future__ import annotations
 
@@ -109,8 +118,14 @@ def _to_streams(cams: list[dict], prefer_sub: bool,
     for c in cams:
         settings = c.get("settings") or {}
         hc = settings.get("headcount") or {}
-        if hc.get("enabled") is not True:
-            continue
+        # No `hc["enabled"]` test here any more: the backend endpoint we poll
+        # owns eligibility now and returns only cameras that qualify. It checks
+        # three things this service cannot see -- the feature flag, the camera's
+        # OWN AI switch, and whether the owner's plan includes AI. Filtering on
+        # the flag alone, as this loop used to, meant a camera whose AI an
+        # operator had deliberately switched off carried on counting.
+        #
+        # The `hc` block is still read below for the counting zones.
         rtsp = (c.get("rtspSub") if prefer_sub else None) or c.get("rtsp")
         monitor = c.get("monitorId")
         if not rtsp or not monitor:
@@ -143,7 +158,9 @@ def _to_streams(cams: list[dict], prefer_sub: bool,
 
 
 def _loop(manager, cfg, backend: str, token: str, stop_event: threading.Event) -> None:
-    url = f"{backend}/api/internal/cameras"
+    # The cameras the PRODUCT says should be counting, not the whole registry
+    # filtered here. See _to_streams for what that endpoint guarantees.
+    url = f"{backend}/api/internal/headcount/cameras"
     prefer_sub = bool(getattr(cfg, "prefer_sub", True))
     interval = float(cfg.poll_interval_sec)
     last_ids: set[str] = set()

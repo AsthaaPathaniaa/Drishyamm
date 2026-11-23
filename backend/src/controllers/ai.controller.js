@@ -30,7 +30,8 @@ const logger         = require('../config/logger');
 const config         = require('../config/env');
 const s3Service      = require('../services/s3.service');
 const { aiAuthHeader } = require('../utils/aiTenant');
-const { assertAiLicence } = require('../services/entitlements.service');
+const { assertAiLicence, getAiEntitledUserIds } = require('../services/entitlements.service');
+const { isAiEnabled } = require('../services/aiLifecycle.service');
 const { AIEvent, Camera, CameraGroup } = require('../models');
 const { getClient } = require('../config/redis');
 const {
@@ -608,8 +609,13 @@ function readAiSettings(camera) {
   return current.ai || {};
 }
 
+// The ai-object form of the same question `isAiEnabled` answers for a camera.
+// It delegates rather than restating `enabled === true && mode !== 'off'`,
+// because that pair had drifted into two copies -- here and in the reconcile
+// loop -- and two copies of "is this camera's AI on?" is exactly how a service
+// ends up disobeying the operator's switch.
 function aiEnabled(ai) {
-  return ai.enabled === true && ai.mode !== 'off';
+  return isAiEnabled({ settings: { ai: ai || {} } });
 }
 
 function aiLifecycleStatus(ai, runtime) {
@@ -1970,12 +1976,25 @@ async function pushActivityCameras() {
   // The activity-monitor is one global service, so the desired set spans every
   // camera with the flag on (not just one user's). Filtered in JS — fine at this
   // scale; swap to a JSON_EXTRACT where-clause if the fleet grows large.
-  const cams = await Camera.findAll({ attributes: ['id', 'name', 'monitorId', 'settings'] });
+  const cams = await Camera.findAll({ attributes: ['id', 'userId', 'name', 'monitorId', 'settings'] });
   const host = config.streamService.rtspHost;
   const port = config.streamService.rtspPort || 8554;
+  // The camera's OWN AI switch, and the owner's plan, gate this as well as the
+  // feature flag. The flag says WHAT to do with a camera; the AI switch says
+  // whether to look at it at all, and it used to govern only face AI — so an
+  // operator who switched a camera's AI off kept paying for pose and
+  // phone-usage analysis on it, and a lapsed plan kept it running for ever
+  // (the licence is only checked on the off→on edge, in setActivityCameras).
+  //
+  // isAiEnabled is imported rather than restated: the face-AI reconcile loop
+  // uses the same function, and two copies of "is AI on?" would drift.
+  const aiUserIds = await getAiEntitledUserIds();
   const desired = [];
   for (const c of cams) {
-    if (c.settings?.ai?.activityMonitoring === true && c.monitorId) {
+    if (c.settings?.ai?.activityMonitoring === true
+        && c.monitorId
+        && isAiEnabled(c)
+        && aiUserIds.has(c.userId)) {
       desired.push({
         id: c.monitorId,
         name: c.name || c.monitorId,

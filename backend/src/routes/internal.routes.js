@@ -14,7 +14,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const logger = require('../config/logger');
 const { emit, EVENTS } = require('../events/bus');
 const { AIEvent, Camera } = require('../models');
-const { zoneGuardCameras } = require('../services/zoneGuardCameras.service');
+const { zoneGuardCameras, headcountCameras } = require('../services/aiFeatureCameras.service');
 const s3Service = require('../services/s3.service');
 const streamingService = require('../services/drishyamStreaming.service');
 const alertEngine = require('../services/alertEngine');
@@ -375,6 +375,19 @@ router.get('/cameras', asyncHandler(async (_req, res) => {
 // services/zoneGuardCameras.service.js so it can be tested on its own.
 router.get('/zone-guard/cameras', asyncHandler(async (_req, res) => {
   res.json({ ok: true, cameras: await zoneGuardCameras() });
+}));
+
+// ── Head count's camera list (read-only for the head-count service) ─────────
+// Same story, same rule. The service used to poll /cameras above and filter on
+// settings.headcount.enabled alone, so a camera whose AI an operator had
+// switched off kept counting, and a lapsed plan kept counting for ever (the
+// licence is only checked on the off→on edge, when the feature is switched on).
+//
+// Rows come back in the shape the service already reads, so its own decisions
+// stay its own: it still drops cameras the VMS reports offline, and it still
+// applies its stream caps. Eligibility is ours; capacity is theirs.
+router.get('/headcount/cameras', asyncHandler(async (_req, res) => {
+  res.json({ ok: true, cameras: await headcountCameras() });
 }));
 
 module.exports = router;
