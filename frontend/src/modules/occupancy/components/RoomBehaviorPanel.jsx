@@ -33,6 +33,37 @@ import { applyProfile, defaultRoom, deleteRoom, saveRoom } from '../room-setting
 const INPUT = 'mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2 text-small text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/25';
 
 
+/**
+ * A control that is drawn, saves, and enforces NOTHING.
+ *
+ * Several settings on this panel were only ever stored in this browser: no
+ * service reads a minimum occupancy, nothing measures how long a person stays,
+ * no schedule here reaches the engine, and the privacy choice -- including
+ * "Anonymous counting only" -- appears nowhere in the backend or in any AI
+ * service. The panel said so in prose at the bottom, which nobody reads before
+ * setting a value and trusting it.
+ *
+ * So they are disabled rather than silently decorative. A disabled <fieldset>
+ * is deliberate: it disables every control inside it natively, including the
+ * Toggle and Segmented buttons, which take no `disabled` prop of their own and
+ * are shared with screens where they DO work.
+ *
+ * Kept visible rather than deleted: the values are already stored on real
+ * rooms, and hiding them would turn a known gap into a mystery. Each one is
+ * re-enabled by making it reach a service, not by removing this wrapper.
+ */
+function NotEnforced({ reason, children }) {
+  return (
+    <fieldset className="m-0 min-w-0 border-0 p-0" disabled title={reason}>
+      <p className="mb-1.5 inline-flex items-center gap-1 rounded border border-line bg-surface-sunken px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">
+        Not enforced
+      </p>
+      <div className="pointer-events-none opacity-55">{children}</div>
+      <p className="mt-1 text-[10.5px] leading-relaxed text-fg-subtle">{reason}</p>
+    </fieldset>
+  );
+}
+
 export default function RoomBehaviorPanel({ zone, room, onSaved, onClose, embedded = false }) {
   const [draft, setDraft] = useState(() => ({ ...defaultRoom(zone), ...(room || {}) }));
   const [saving, setSaving] = useState(false);
@@ -127,18 +158,22 @@ export default function RoomBehaviorPanel({ zone, room, onSaved, onClose, embedd
             <input id="room-max" type="number" min="0" className={INPUT} value={draft.maxCapacity}
               onChange={(e) => set({ maxCapacity: Math.max(0, Number(e.target.value) || 0) })} />
           </Field>
-          <Field htmlFor="room-min" label="Min required capacity" hint="Under this count during operating hours, the room is under-staffed. 0 turns it off.">
-            <input id="room-min" type="number" min="0" className={INPUT} value={draft.minCapacity}
-              onChange={(e) => set({ minCapacity: Math.max(0, Number(e.target.value) || 0) })} />
-          </Field>
+          <NotEnforced reason="No service reads a minimum occupancy, so this raises nothing.">
+            <Field htmlFor="room-min" label="Min required capacity" hint="Under this count during operating hours, the room is under-staffed. 0 turns it off.">
+              <input id="room-min" type="number" min="0" className={INPUT} value={draft.minCapacity}
+                onChange={(e) => set({ minCapacity: Math.max(0, Number(e.target.value) || 0) })} />
+            </Field>
+          </NotEnforced>
         </div>
 
-        <DwellLimit
-          enabled={draft.dwellEnabled !== false}
-          idPrefix="room-dwell"
-          minutes={Number(draft.maxDwellMin) || 0}
-          onChange={set}
-        />
+        <NotEnforced reason="The loitering ceiling is held on this browser only; nothing measures how long a person stays.">
+          <DwellLimit
+            enabled={draft.dwellEnabled !== false}
+            idPrefix="room-dwell"
+            minutes={Number(draft.maxDwellMin) || 0}
+            onChange={set}
+          />
+        </NotEnforced>
 
         <p className={`mt-3 flex items-start gap-1.5 rounded-lg border px-2.5 py-2 text-[10.5px] leading-relaxed ${
           preview.tone === 'crit' ? 'border-danger-line bg-danger-soft text-danger-ink'
@@ -152,6 +187,7 @@ export default function RoomBehaviorPanel({ zone, room, onSaved, onClose, embedd
 
       {/* ── 3. Schedule & security ───────────────────────────────────────── */}
       <Group icon={CalendarClock} title="Operating schedule & security">
+        <NotEnforced reason="These hours and the lock are held on this browser; no service reads them. A zone's real arming schedule is the one in its access rules, which is saved to the server.">
         <div className="grid gap-3 sm:grid-cols-2">
           <Field htmlFor="room-start" label="Opens at">
             <input id="room-start" type="time" className={INPUT} value={draft.hours?.[0] || '09:00'}
@@ -180,11 +216,14 @@ export default function RoomBehaviorPanel({ zone, room, onSaved, onClose, embedd
           </div>
           <Toggle checked={Boolean(draft.offHoursLock)} onChange={(v) => set({ offHoursLock: v })} label="Off-hours security lock" />
         </div>
+        </NotEnforced>
       </Group>
 
       {/* ── 4. Privacy ───────────────────────────────────────────────────── */}
       <Group icon={ShieldCheck} title="Identity & privacy mode">
-        <Segmented name="Identity and privacy mode" options={PRIVACY_MODES} value={draft.privacy} onChange={(v) => set({ privacy: v })} />
+        <NotEnforced reason="This choice never leaves the browser. Face recognition is governed by the camera's own AI settings, not by this control, so picking 'anonymous' here does not stop faces being matched.">
+          <Segmented name="Identity and privacy mode" options={PRIVACY_MODES} value={draft.privacy} onChange={(v) => set({ privacy: v })} />
+        </NotEnforced>
       </Group>
 
       {result?.error ? (
@@ -195,7 +234,7 @@ export default function RoomBehaviorPanel({ zone, room, onSaved, onClose, embedd
       ) : result ? (
         <p className="flex items-start gap-1.5 rounded-lg border border-success-line bg-success-soft px-2.5 py-2 text-[11px] leading-relaxed text-success-ink">
           <ShieldCheck className="mt-px h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
-          <span>Saved. The capacity limit is armed on the camera; schedule, dwell and privacy are held on this browser.</span>
+          <span>Saved. The capacity limit is armed &mdash; on the camera for counting, and on the server for this zone&#x27;s breach alerts. The settings marked &quot;not enforced&quot; are stored on this browser and change nothing.</span>
         </p>
       ) : null}
 
@@ -231,7 +270,7 @@ export default function RoomBehaviorPanel({ zone, room, onSaved, onClose, embedd
     <Panel
       icon={Timer}
       title={draft.name || zone?.label || 'Room behaviour'}
-      right={<HeaderInfo label="Room behaviour" text="Capacity limits are pushed to the camera and armed by the detector. Profile, dwell ceiling, operating hours and privacy mode are held on this browser until the head-count service exposes fields for them." />}
+      right={<HeaderInfo label="Room behaviour" text="The max capacity limit is enforced: it is pushed to the camera for counting and to the server, which raises the breach alert. Everything marked &quot;not enforced&quot; is stored on this browser only and is disabled until a service reads it." />}
       bodyClass="p-4"
     >
       {body}
