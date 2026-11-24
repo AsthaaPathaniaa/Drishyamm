@@ -49,9 +49,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Users, Cpu, Clock, Video, Settings, Search, AlertTriangle,
-  Crop, RefreshCw, Check, X, Download,
+  Crop, RefreshCw, Check, X, Download, TriangleAlert, Power,
 } from 'lucide-react';
 import { aiService } from '@/core/services/ai';
+import { buildEnablePayload } from '@/core/services/aiCamera';
 import {
   OperationsPage, PageAction, PageContent, PageHeader,
 } from '@/core/layout/OperationsPage';
@@ -59,6 +60,10 @@ import { Button } from '@/core/ui/button';
 import { CameraEmptyState } from '@/core/components/CameraEmptyState';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/core/ui/tooltip';
 import { pointsToSvg } from './zone-geometry';
+import {
+  notCounting, notCountingReason, notCountingSummary, fixable,
+  zonesPending, ZONE_PENDING_LABEL,
+} from './counting-status';
 
 const PAGE_DESCRIPTION =
   'Live people count per camera. Choose which cameras count here; zones and their capacity are set in Zone Setup. A camera with no zone counts its whole view. Counts come from the head-count detector; a camera turns amber as it approaches its limit and red once it reaches it.';
@@ -98,6 +103,7 @@ export default function HeadCount() {
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [fixingAi, setFixingAi] = useState(false);
 
   const poll = useCallback(async () => {
     try {
@@ -205,6 +211,39 @@ export default function HeadCount() {
   const enabledCount = camList.filter((c) => c.headcount?.enabled === true).length;
   const runningIds = useMemo(() => new Set(streams.map((x) => x.id)), [streams]);
 
+  // Every camera the operator ticked that the detector is NOT serving. The
+  // wall is built from the detector, so without this those cameras have no
+  // tile and no mention: the header reads "6/20" and four tiles are on screen.
+  // See counting-status.js for why the gap exists at all.
+  const stranded = useMemo(() => notCounting(camList, runningIds), [camList, runningIds]);
+  const strandedNote = useMemo(
+    () => notCountingSummary(stranded, (c) => c?.name || c?.monitorId),
+    [stranded],
+  );
+  const canFix = useMemo(() => fixable(stranded), [stranded]);
+
+  /**
+   * Turn the camera's master AI switch on, for the cameras whose only problem
+   * is that it is off.
+   *
+   * Goes through the SAME per-camera lifecycle route the AI Detection tab
+   * uses, with every setting the camera already has carried over, so a camera
+   * switched on from here is indistinguishable from one switched on there --
+   * in particular it does not quietly turn face recognition on or off.
+   *
+   * Never throws: a failure changes what the next poll says, not what the
+   * operator has set. The note is re-derived from the registry, so it corrects
+   * itself either way.
+   */
+  const turnAiOn = useCallback(async (cams) => {
+    setFixingAi(true);
+    await Promise.all((cams || []).map(async (c) => {
+      try { await aiService.updateCameraAiLifecycle(c.id, buildEnablePayload(c)); } catch { /* next poll */ }
+    }));
+    await loadCams();
+    setFixingAi(false);
+  }, [loadCams]);
+
   return (
     <>
       <OperationsPage>
@@ -280,6 +319,18 @@ export default function HeadCount() {
             tiles is on screen the moment the page opens. Smaller screens
             scroll as a whole. */}
         <PageContent className="gap-2 xl:overflow-hidden" scroll>
+          {/* Above the wall and outside the empty-state branch, because the
+              commonest version of this problem is EVERY selected camera
+              stranded -- and that renders as "No cameras are being counted
+              yet", which is true and tells the operator nothing. */}
+          {loaded && strandedNote && (
+            <StrandedNote
+              note={strandedNote}
+              fixable={canFix}
+              busy={fixingAi}
+              onFix={() => turnAiOn(canFix)}
+            />
+          )}
           {!loaded ? (
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
               {[0, 1, 2].map((i) => (
@@ -357,6 +408,45 @@ export default function HeadCount() {
 }
 
 /* ── pieces ────────────────────────────────────────────────── */
+
+/**
+ * One line accounting for every camera the operator selected that the detector
+ * is not counting — and, when the reason is the camera's own AI switch, the
+ * switch.
+ *
+ * A strip rather than a per-camera tile on purpose. The wall's subject is the
+ * live picture, and a grid of grey placeholders explaining themselves would
+ * push the real tiles down to make room for cameras showing nothing. One
+ * sentence costs a row and names them all.
+ *
+ * Amber, not red: a camera deliberately taken out of AI is a legitimate state,
+ * and the operator may simply have forgotten this page also depends on it.
+ */
+function StrandedNote({ note, fixable: fixableCams = [], busy, onFix }) {
+  return (
+    <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-warning-line
+                    bg-warning-soft px-3 py-2">
+      <TriangleAlert className="h-4 w-4 shrink-0 text-warning-ink" strokeWidth={2.25} />
+      <p className="min-w-0 flex-1 text-caption leading-relaxed text-warning-ink">
+        {note}
+      </p>
+      {fixableCams.length > 0 && (
+        <Button
+          disabled={busy}
+          onClick={onFix}
+          size="xs"
+          type="button"
+          variant="outline"
+        >
+          <Power strokeWidth={2.25} />
+          {busy
+            ? 'Turning on…'
+            : fixableCams.length === 1 ? 'Turn AI on' : `Turn AI on for ${fixableCams.length}`}
+        </Button>
+      )}
+    </div>
+  );
+}
 
 // Four summary components used to live here -- Metric (already dead: zero call
 // sites), Kpi (the six-card strip), OccupancyTile (a per-camera count + bar)
@@ -591,6 +681,10 @@ function CameraPicker({ camList, query, setQuery, savingId, onToggle,
           {filtered.map((cam) => {
             const on = cam.headcount?.enabled === true;
             const counting = runningIds.has(cam.monitorId);
+            // Ticked here and not counted there. The tick used to be the whole
+            // story, so this card showed a grey rectangle and a confident
+            // check mark for a camera that would never produce a number.
+            const stuck = notCountingReason(cam, counting);
             const hasZone = (cam.headcount?.zones || []).length > 0;
             const limit = cam.headcount?.threshold || 0;
             return (
@@ -612,8 +706,19 @@ function CameraPicker({ camList, query, setQuery, savingId, onToggle,
                       <img src={`${HC}/video/${encodeURIComponent(cam.monitorId)}`} alt=""
                            className="h-full w-full object-cover" />
                     ) : (
-                      <div className="grid h-full w-full place-items-center bg-surface-muted/30">
-                        <Video size={20} className="text-fg-muted/40" />
+                      <div className="grid h-full w-full place-items-center gap-1 bg-surface-muted/30 px-2 text-center">
+                        {stuck ? (
+                          <>
+                            <TriangleAlert className="h-4 w-4 text-warning-ink" strokeWidth={2.25} />
+                            {/* The reason reads as a clause after the camera's
+                                name, which is directly beneath it. */}
+                            <span className="text-micro font-medium leading-tight text-warning-ink">
+                              Not counting: {stuck.line}
+                            </span>
+                          </>
+                        ) : (
+                          <Video size={20} className="text-fg-muted/40" />
+                        )}
                       </div>
                     )}
 
@@ -692,6 +797,12 @@ function Tile({ s }) {
   const reliable = s?.count_reliable !== false;
   const zoneCounts = Object.entries(s?.zone_counts || {});
   const scoped = zones.length > 0;
+  // A shape the registry has and the detector does not. The detector seeds
+  // every area it holds at 0, so an empty breakdown under a drawn outline
+  // means the shape has not reached it -- and the big number is therefore the
+  // WHOLE VIEW, which is the one thing the outline says it is not. See
+  // counting-status.js.
+  const pending = zonesPending(s);
 
   // Label each shape at its highest corner, so an operator can tell which
   // outline is which zone. With one zone the camera's limit IS that zone's
@@ -781,12 +892,16 @@ function Tile({ s }) {
               </span>
             ))
           ) : (
-            <span className={`rounded px-1.5 py-0.5 text-micro font-medium ring-1
-                              ${scoped ? 'bg-[#4CC9F0]/15 text-[#7FD8F0] ring-[#4CC9F0]/35'
-                                       : 'bg-white/10 text-white/60 ring-white/15'}`}>
+            <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-micro font-medium ring-1
+                              ${pending ? 'bg-[#F59E0B]/20 text-[#FCD34D] ring-[#F59E0B]/45'
+                                : scoped ? 'bg-[#4CC9F0]/15 text-[#7FD8F0] ring-[#4CC9F0]/35'
+                                         : 'bg-white/10 text-white/60 ring-white/15'}`}>
               {/* A limit with no shape is a zone that covers the whole view
                   (saved in Zone Setup without drawing), not "no zone". */}
-              {scoped ? 'Counting zone' : limit > 0 ? `Whole camera view · limit ${limit}` : 'Whole camera view · no zones set up'}
+              {pending && <AlertTriangle size={10} />}
+              {pending ? ZONE_PENDING_LABEL
+                : scoped ? 'Counting zone'
+                  : limit > 0 ? `Whole camera view · limit ${limit}` : 'Whole camera view · no zones set up'}
             </span>
           )}
           <span className="text-micro tabular-nums text-white/45">
