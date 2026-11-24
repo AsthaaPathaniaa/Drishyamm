@@ -13,7 +13,7 @@ test('NVENC host: decode and encode on the GPU', async () => {
   const e = await h264Encode();
   expect(e.input).toEqual(['-hwaccel', 'cuda']);
   expect(e.video).toEqual(['-c:v', 'h264_nvenc', '-preset', 'fast', '-bf', '0', '-pix_fmt', 'yuv420p']);
-  const args = exportArgs('rtsp://nvr/x', 60, 'mp4', e);
+  const args = exportArgs('rtsp://nvr/x', 60, 'mp4', '/tmp/c.mp4', e);
   expect(args.indexOf('-hwaccel')).toBeLessThan(args.indexOf('-i'));
   expect(args).toContain('h264_nvenc');
   expect(args).not.toContain('libx264');
@@ -34,7 +34,7 @@ test('no GPU encoder, or the probe fails: libx264', async () => {
 });
 
 test('original stays a stream copy, never re-encoded', () => {
-  const args = exportArgs('rtsp://nvr/x', 60, 'original', { input: ['-hwaccel', 'cuda'], video: ['-c:v', 'h264_nvenc'] });
+  const args = exportArgs('rtsp://nvr/x', 60, 'original', '/tmp/c.mp4', { input: ['-hwaccel', 'cuda'], video: ['-c:v', 'h264_nvenc'] });
   expect(args).not.toContain('-hwaccel');
   expect(args.join(' ')).toContain('-c:v copy');
 });

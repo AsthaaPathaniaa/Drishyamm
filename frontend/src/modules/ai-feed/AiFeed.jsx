@@ -32,7 +32,7 @@ import {
 import { useGroups } from '@/core/hooks/useQueries';
 import { siteService } from '@/core/services/site';
 import { aiService } from '@/core/services/ai';
-import { buildDisablePayload, buildEnablePayload } from '@/core/services/aiCamera';
+import { buildDisablePayload, buildEnablePayload, faceRecognitionOn } from '@/core/services/aiCamera';
 import AiSetupDrawer from '@/core/components/AiSetupDrawer';
 import { on as onSocket, connectSocket } from '@/core/services/socket';
 import { AI_BASE, AI_WS } from '@/core/config/endpoints';
@@ -240,7 +240,10 @@ export default function AiFeed() {
   // Fast poll for the selected camera, slower sweep for every AI-enabled one.
   // Only when AI is on for it: a camera with AI off has no detections, and
   // polling it anyway floods the console when the AI service is down.
-  const selectedAiOn = aiByMonitor.get(selectedId)?.ai?.enabled === true;
+  // Gates the face-DETECTION poll below, so it follows face recognition, not
+  // the master switch: a camera that is AI-on for counting only has no face
+  // detections to fetch.
+  const selectedAiOn = faceRecognitionOn(aiByMonitor.get(selectedId));
   useEffect(() => {
     if (!selectedId || demo || !selectedAiOn) return undefined;
     const poll = async () => {
@@ -861,7 +864,9 @@ export default function AiFeed() {
                     {cameraGroups.length > 1 ? <GroupHeading label={g.label} count={g.cams.length} tone={g.tone} /> : null}
                     {g.cams.map((cam) => {
                       const row = aiByMonitor.get(cam.monitorId);
-                      const aiEnabled = demo ? cam.status === 'online' : row?.ai?.enabled === true;
+                      // The card's live count, boxes and ScanFace badge are all face
+                      // output, so this is the face test rather than the master.
+                      const aiEnabled = demo ? cam.status === 'online' : faceRecognitionOn(row);
                       return (
                         <AiCameraCard
                           key={cam.monitorId}
@@ -918,7 +923,7 @@ export default function AiFeed() {
       <CameraDetailDrawer
         cam={openCam}
         models={openCam ? modelsFor(openCam) : []}
-        aiEnabled={openCam ? (demo ? openCam.status === 'online' : aiByMonitor.get(openCam.monitorId)?.ai?.enabled === true) : false}
+        aiEnabled={openCam ? (demo ? openCam.status === 'online' : faceRecognitionOn(aiByMonitor.get(openCam.monitorId))) : false}
         aiRunning={openCam ? (demo ? openCam.status === 'online' : aiByMonitor.get(openCam.monitorId)?.runtime?.running === true) : false}
         detections={openCam ? (detectionsByMonitor[openCam.monitorId] || EMPTY_DETECTIONS) : EMPTY_DETECTIONS}
         zones={openCam ? (aiByMonitor.get(openCam.monitorId)?.ai?.detectionZones || []) : []}

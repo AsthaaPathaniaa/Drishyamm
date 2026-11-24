@@ -19,6 +19,7 @@ import { CameraEmptyState } from '@/core/components/CameraEmptyState';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/core/ui/tooltip';
 import { STATUS_CHIP, STATUS_LABEL, capacityBarClass, nfmt } from '../occupancy-data';
 import { describeLine, inSidePolygon, lineMarkers } from '../gate-model';
+import { notCountingText } from '../zone-model';
 
 export function StatusChip({ status, label }) {
   return (
@@ -271,6 +272,41 @@ export function SetupCard({ ready, title, hint, onSetup, cta = 'Configure Camera
       size="sm"
       title={title}
     />
+  );
+}
+
+/**
+ * The one line that answers "I created zones and I see none".
+ *
+ * "No space is counting yet" is true and useless when the zones DO exist: the
+ * operator drew them, named them and saved them, and the panel's own words
+ * read as though none of that happened. What is missing is the head-count
+ * switch on their cameras, which is a different page.
+ *
+ * It sits BENEATH the empty state, never as a row in the table and never in a
+ * site total: this panel counts, and a zone nothing is counting has no number
+ * to put in a column. Saying it here costs one sentence and leaves the
+ * panel's remit alone.
+ *
+ * Renders nothing when there are none, so the empty state is word for word
+ * what it was.
+ */
+export function NotCountingNote({ count = 0, onFix }) {
+  const text = notCountingText(count);
+  if (!text) return null;
+  return (
+    <div
+      className="mt-3 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-t border-line px-3 pt-3 text-center text-small leading-relaxed text-fg-secondary"
+      role="status"
+    >
+      <span className="inline-flex items-center gap-1.5">
+        <TriangleAlert className="h-3.5 w-3.5 shrink-0 text-warning-ink" strokeWidth={2.25} />
+        <span>{text}</span>
+      </span>
+      <Button onClick={onFix} size="xs" type="button" variant="link">
+        Go to Head Count
+      </Button>
+    </div>
   );
 }
 

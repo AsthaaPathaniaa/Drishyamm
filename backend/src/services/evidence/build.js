@@ -69,6 +69,30 @@ function ffmpegToFile(args, outPath, { timeoutMs }) {
   });
 }
 
+// ffmpeg writes `outPath` itself (Recordings' export args end in a finished,
+// +faststart MP4, which can't go to a pipe); hashed once it's closed.
+function ffmpegWritesFile(args, outPath, { timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let tail = '';
+    const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* gone */ } }, timeoutMs);
+    proc.stderr.on('data', (d) => { tail = (tail + d.toString()).slice(-600); });
+    proc.on('error', (e) => { clearTimeout(timer); reject(e); });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      let size = 0;
+      try { size = fs.statSync(outPath).size; } catch { /* not written */ }
+      if (!size) return reject(new Error(`no video came back${tail ? `: ${redact(tail).trim().slice(-160)}` : ''}`));
+      if (code !== 0) logger.warn('evidence: ffmpeg ended with an error after writing footage', { code, tail: redact(tail).slice(-200) });
+      const hash = crypto.createHash('sha256');
+      fs.createReadStream(outPath)
+        .on('data', (c) => hash.update(c))
+        .on('error', reject)
+        .on('end', () => resolve({ size, sha256: hash.digest('hex') }));
+    });
+  });
+}
+
 async function pullOriginal(cam, startMs, endMs, outPath) {
   const { nvrPull, exportArgs } = require('../../controllers/playback.controller');
   const edgeRelay = require('../edgeRelay.service');
@@ -79,7 +103,7 @@ async function pullOriginal(cam, startMs, endMs, outPath) {
     const durationSec = Math.ceil((endMs - startMs) / 1000);
     // Slow recorder uplinks replay below real time (seen at 0.1x): give them
     // room, but not forever.
-    const result = await ffmpegToFile(exportArgs(src.url, durationSec, 'original'), outPath,
+    const result = await ffmpegWritesFile(exportArgs(src.url, durationSec, 'original', outPath), outPath,
       { timeoutMs: (durationSec * 3 + 180) * 1000 });
     const got = videoSeconds(outPath);
     if (got < durationSec * MIN_COVERAGE) {

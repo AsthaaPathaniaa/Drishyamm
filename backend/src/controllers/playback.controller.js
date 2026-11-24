@@ -21,6 +21,12 @@
  * in for the NVR's playback URL; everything downstream is the same.
  */
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { randomUUID } = require('node:crypto');
+const { pipeline } = require('node:stream/promises');
 const asyncHandler = require('../middleware/asyncHandler');
 const AppError = require('../utils/AppError');
 const { AAC_AUDIO_ARGS } = require('../utils/nvrAudio');
@@ -39,6 +45,20 @@ const MAX_RANGE_MS = 6 * 3600 * 1000;      // cap one request at 6h of footage
 const MAX_SESSION_MS = 30 * 60 * 1000;     // hard-kill ffmpeg after 30 min
 const MAX_SEARCH_MS = 48 * 3600 * 1000;    // recording search: one day, with room for timezone edges
 const MAX_EXPORT_MS = 30 * 60 * 1000;      // one clip: the NVR replays in real time, so this is also its duration
+// A breach clip is the window clipWindow() pads and nothing more: 15 s before
+// the breach to 45 s after (frontend breach-model.js). Capped here as well, so
+// a timestamp that is wrong somewhere else can make a breach clip WRONG but
+// never make it LONG.
+const BREACH_PAD_BEFORE_MS = 15 * 1000;
+const BREACH_PAD_AFTER_MS  = 45 * 1000;
+const MAX_BREACH_EXPORT_MS = BREACH_PAD_BEFORE_MS + BREACH_PAD_AFTER_MS;
+// On SIGINT ffmpeg writes the MP4 trailer and runs the faststart rewrite (which
+// copies the whole file), so give it room before falling back to SIGKILL.
+const EXPORT_FINALISE_MS = 15 * 1000;
+// Clips are recorded here before they are sent. The prefix is what the sweep
+// recognises as ours.
+const EXPORT_TMP_PREFIX = 'nvr-export-';
+const EXPORT_TMP_STALE_MS = 2 * 3600 * 1000;
 // Where ffmpeg publishes the transcoded H.264 (Stream Service RTSP ingest).
 const MEDIAMTX_RTSP = process.env.MEDIAMTX_RTSP_BASE || 'rtsp://mediamtx:8554';
 
@@ -339,7 +359,7 @@ const searchNvrRecordings = asyncHandler(async (req, res) => {
   });
 });
 
-function exportArgs(nvrRtsp, durationSec, format, encode = null) {
+function exportArgs(nvrRtsp, durationSec, format, outPath, encode = null) {
   // 'original' keeps the NVR's own encode (often H.265: smaller and faster, but
   // many desktop players need a codec pack). 'mp4' re-encodes to H.264 so the
   // clip opens anywhere — the right default for evidence that gets forwarded.
@@ -355,13 +375,90 @@ function exportArgs(nvrRtsp, durationSec, format, encode = null) {
     ...(reencode && encode?.input ? encode.input : []),
     '-i', nvrRtsp,
     '-t', String(durationSec),
+    // Video mapped explicitly because AAC_AUDIO_ARGS maps audio: once any
+    // -map is given, ffmpeg selects only what is mapped.
     '-map', '0:v:0', ...video,
-    ...AAC_AUDIO_ARGS,                       // G.711 → AAC, so the clip has sound
-    // Fragmented MP4: bytes (and the browser's download progress) start within
-    // seconds instead of after the whole clip has been encoded.
-    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
-    '-f', 'mp4', 'pipe:1',
+    ...AAC_AUDIO_ARGS,                       // G.711 -> AAC, so the clip has sound
+    // Frame one at timeline 0. ffmpeg rebases the first input itself, so this
+    // is belt and braces against a source whose own timestamps start hours in
+    // (a recorder stamping wall-clock time): whatever it hands us, the clip's
+    // timeline starts where the clip does.
+    '-avoid_negative_ts', 'make_zero',
+    // A finalised file, not a fragmented stream. The moov box holds the real
+    // duration and the seek index, and +faststart writes it in front of the
+    // media, so a player has both before it has the whole clip. The fragmented
+    // header this replaces declared a duration of 0 (measured on its output),
+    // and its fragment index (mfra) is only written in the trailer -- which the
+    // ffmpeg we used to SIGKILL never reached. An evidence clip nobody can
+    // scrub is not evidence.
+    '-movflags', '+faststart',
+    '-y', '-f', 'mp4', outPath,
   ];
+}
+
+/**
+ * Ask ffmpeg to stop and let it finalise the MP4; SIGKILL only if it will not.
+ * A plain (non-fragmented) MP4 is unplayable without its trailer, so this is
+ * what makes a clip survive the time backstop in exportNvrClip.
+ */
+function endExportFfmpeg(proc, graceMs = EXPORT_FINALISE_MS) {
+  try { proc.kill('SIGINT'); } catch { return; }
+  const t = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* gone */ } }, graceMs);
+  t.unref?.();
+  proc.once('close', () => clearTimeout(t));
+}
+
+/**
+ * Whether the file has a top-level `moov` box — an MP4 without one carries no
+ * duration and no index, so it is rubble however many bytes it holds (an
+ * ffmpeg killed before its trailer leaves exactly that). Walks the box headers
+ * only: a handful of reads, never the media.
+ */
+async function hasMoovBox(file) {
+  let fh;
+  try { fh = await fsp.open(file, 'r'); } catch { return false; }
+  try {
+    const { size } = await fh.stat();
+    const head = Buffer.alloc(16);
+    for (let off = 0; off + 8 <= size;) {
+      const { bytesRead } = await fh.read(head, 0, 16, off);
+      if (bytesRead < 8) return false;
+      if (head.toString('latin1', 4, 8) === 'moov') return true;
+      let len = head.readUInt32BE(0);
+      let hdr = 8;
+      if (len === 1) {                        // 64-bit size: a big mdat
+        if (bytesRead < 16) return false;
+        len = Number(head.readBigUInt64BE(8));
+        hdr = 16;
+      } else if (len === 0) {
+        return false;                         // "runs to end of file": nothing follows
+      }
+      if (len < hdr) return false;            // malformed: stop rather than loop
+      off += len;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    await fh.close().catch(() => {});
+  }
+}
+
+/** Best effort: drop export temp files a crash left behind — hundreds of MB
+ *  each, and nothing else would ever delete them (cf. recordingSync's sweep). */
+async function sweepStaleExports() {
+  const dir = os.tmpdir();
+  let names;
+  try { names = await fsp.readdir(dir); } catch { return; }
+  const now = Date.now();
+  for (const name of names) {
+    if (!name.startsWith(EXPORT_TMP_PREFIX) || !name.endsWith('.mp4')) continue;
+    const p = path.join(dir, name);
+    try {
+      const st = await fsp.stat(p);
+      if (st.isFile() && now - st.mtimeMs > EXPORT_TMP_STALE_MS) await fsp.unlink(p);
+    } catch { /* gone already */ }
+  }
 }
 
 function exportFilename(name, camera, startMs) {
@@ -369,15 +466,24 @@ function exportFilename(name, camera, startMs) {
   return `${clean(name) || `${clean(camera.name) || 'camera'}_${startMs}`}.mp4`;
 }
 
-// GET /api/playback/nvr/export?monitorId=&start=&end=&format=mp4|original&name=
-// Streams the NVR's footage for the range straight to the browser as an MP4
-// download. The NVR replays in real time, so a 3-minute clip takes about three
-// minutes. Loaded by the browser directly, so the JWT rides as ?token=, the
-// same as recording downloads.
+// GET /api/playback/nvr/export?monitorId=&start=&end=&format=mp4|original&name=&kind=
+// The NVR's footage for the range, as an MP4 download. The clip is recorded to
+// a temp file and sent once it is complete and finalised: that is what gives it
+// a duration, a seek index and a Content-Length, none of which the old
+// fragmented pipe could carry. The NVR replays in real time, so a 3-minute clip
+// takes about three minutes BEFORE the download appears — an evidence clip that
+// cannot be scrubbed is not worth the earlier first byte. Loaded by the browser
+// directly, so the JWT rides as ?token=, the same as recording downloads.
 const exportNvrClip = asyncHandler(async (req, res) => {
   const { monitorId, start, end } = req.query;
   if (!monitorId || !start || !end) throw new AppError('monitorId, start and end are required.', 400);
-  const { startMs, endMs } = parseRange(start, end, MAX_EXPORT_MS, '30 minutes');
+  // `kind=breach`: the evidence clip for a no-entry breach, which is only ever
+  // clipWindow()'s padded window. Capped at that, so a breach clip cannot come
+  // back long even if a timestamp is wrong elsewhere.
+  const breach = req.query.kind === 'breach';
+  const { startMs, endMs } = breach
+    ? parseRange(start, end, MAX_BREACH_EXPORT_MS, '60 seconds')
+    : parseRange(start, end, MAX_EXPORT_MS, '30 minutes');
   const cam = await loadCamera(req.user.id, monitorId);
   assertPlayback(cam);
   if (exportsByUser.has(req.user.id)) throw new AppError('An export is already running. Wait for it to finish, then try again.', 429);
@@ -385,10 +491,15 @@ const exportNvrClip = asyncHandler(async (req, res) => {
   const format = req.query.format === 'original' ? 'original' : 'mp4';
   const durationSec = Math.ceil((endMs - startMs) / 1000);
   const filename = exportFilename(req.query.name, cam.camera, startMs);
+  const tmpPath = path.join(os.tmpdir(), `${EXPORT_TMP_PREFIX}${randomUUID()}.mp4`);
   // Claimed before the (possibly slow) relay handshake, so a double click
   // can't start two pulls on the NVR.
   const entry = { proc: null };
   exportsByUser.set(req.user.id, entry);
+  sweepStaleExports().catch(() => {});
+  // Recorded playback and export have right of way on the recorder: claim it so
+  // background work there (warm-keeper, backfill, detection) yields while this
+  // clip is pulled. Released in the finally below, on every exit path.
   const nvr = claimNvr(cam, 'export');
   let src;
   try {
@@ -407,67 +518,90 @@ const exportNvrClip = asyncHandler(async (req, res) => {
   // An H.264 replay is already what 'mp4' would re-encode to: copy it.
   const effective = src.h264 ? 'original' : format;
   const encode = effective === 'original' ? null : await require('../services/h264Encode').h264Encode();
-  const proc = spawn('ffmpeg', exportArgs(src.url, durationSec, effective, encode), {
-    stdio: ['ignore', 'pipe', 'pipe'],
+  const proc = spawn('ffmpeg', exportArgs(src.url, durationSec, effective, tmpPath, encode), {
+    stdio: ['ignore', 'ignore', 'pipe'],
   });
   entry.proc = proc;
-  // The NVR should end the stream at the range's end on its own; this is the
-  // backstop for one that keeps sending.
-  const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* gone */ } }, (durationSec + 90) * 1000);
-  const release = () => {
-    clearTimeout(timer);
-    nvr.release();
-    edgeRelay.closeReplay(src.edgeJob);
-    if (exportsByUser.get(req.user.id) === entry) exportsByUser.delete(req.user.id);
-  };
-  logger.info('nvr export started', { userId: req.user.id, monitorId, format, durationSec });
 
   let tail = '';
   proc.stderr.on('data', (d) => { tail = (tail + d.toString()).slice(-600); });
 
-  // Headers wait for the first bytes, so an NVR that refuses the range can
-  // still be answered with a real error status instead of an empty file.
-  let started = false;
-  proc.stdout.on('data', (chunk) => {
-    if (!started) {
-      started = true;
-      res.status(200);
-      res.setHeader('Content-Type', 'video/mp4');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('X-Accel-Buffering', 'no');   // nginx: pass it through, don't buffer the clip
-    }
-    if (!res.write(chunk)) {
-      proc.stdout.pause();
-      res.once('drain', () => proc.stdout.resume());
-    }
+  // The NVR should end the stream at the range's end on its own; this is the
+  // backstop for one that keeps sending. It asks ffmpeg to stop rather than
+  // killing it, so what was recorded up to here is still a playable clip.
+  let hardStopped = false;
+  const timer = setTimeout(() => { hardStopped = true; endExportFfmpeg(proc); }, (durationSec + 90) * 1000);
+
+  // Download cancelled in the browser → stop pulling the NVR at once. The
+  // part-recorded file is thrown away, so there is nothing to finalise.
+  let cancelled = false;
+  res.on('close', () => {
+    if (res.writableFinished) return;
+    cancelled = true;
+    try { proc.kill('SIGKILL'); } catch { /* gone */ }
   });
 
-  proc.on('close', (code) => {
-    release();
-    if (started) {
-      res.end();
-      logger.info('nvr export finished', { userId: req.user.id, monitorId, code });
+  logger.info('nvr export started', { userId: req.user.id, monitorId, format, durationSec, breach });
+
+  try {
+    const exit = await new Promise((resolve) => {
+      proc.once('error', (error) => resolve({ error }));
+      proc.once('close', (code, signal) => resolve({ code, signal }));
+    });
+
+    if (exit.error) {
+      logger.error('nvr export ffmpeg spawn error', { monitorId, error: exit.error.message });
+      if (!res.headersSent) res.status(500).json({ success: false, message: 'Could not start the export.' });
       return;
     }
-    logger.warn('nvr export produced no video', { monitorId, code, tail: redact(tail).trim().slice(-200) });
-    if (!res.headersSent) {
-      res.status(502).json({
-        success: false,
-        message: 'The NVR returned no footage for this range. Check the time, and that RTSP playback is enabled on the NVR.',
-      });
+    if (cancelled) {
+      logger.info('nvr export cancelled in the browser', { userId: req.user.id, monitorId });
+      return;
     }
-  });
-  proc.on('error', (e) => {
-    release();
-    logger.error('nvr export ffmpeg spawn error', { monitorId, error: e.message });
-    if (!res.headersSent) res.status(500).json({ success: false, message: 'Could not start the export.' });
-  });
+    // A clip, or rubble? Rubble means the NVR sent no footage, or ffmpeg was
+    // killed before it could write the moov. Either way it would not play, so
+    // say so rather than hand over a broken file labelled as evidence.
+    const size = await fsp.stat(tmpPath).then((st) => st.size).catch(() => 0);
+    if (!size || !(await hasMoovBox(tmpPath))) {
+      logger.warn('nvr export produced no playable clip', {
+        monitorId, code: exit.code, signal: exit.signal, size, hardStopped,
+        tail: redact(tail).trim().slice(-200),
+      });
+      if (!res.headersSent) {
+        res.status(502).json({
+          success: false,
+          message: 'The NVR returned no footage for this range. Check the time, and that RTSP playback is enabled on the NVR.',
+        });
+      }
+      return;
+    }
+    if (hardStopped) {
+      logger.warn('nvr export hit its time backstop; sending what was recorded', { monitorId, durationSec, bytes: size });
+    }
 
-  // Download cancelled in the browser → stop pulling the NVR.
-  res.on('close', () => {
-    if (!res.writableFinished) { try { proc.kill('SIGKILL'); } catch { /* gone */ } }
-  });
+    res.status(200);
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Length', String(size));
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Accel-Buffering', 'no');   // nginx: pass it through, don't buffer the clip again
+    try {
+      await pipeline(fs.createReadStream(tmpPath), res);
+      logger.info('nvr export finished', { userId: req.user.id, monitorId, code: exit.code, bytes: size });
+    } catch (err) {
+      // The browser went away mid-download; the clip is deleted either way.
+      logger.info('nvr export download did not complete', { monitorId, error: err.message });
+    }
+  } finally {
+    clearTimeout(timer);
+    // Every exit path lands here -- spawn error, cancelled download, no
+    // playable clip, finished send -- which is why the recorder's claim is
+    // released here rather than in a closure each path has to remember.
+    nvr.release();
+    edgeRelay.closeReplay(src.edgeJob);
+    if (exportsByUser.get(req.user.id) === entry) exportsByUser.delete(req.user.id);
+    await fsp.rm(tmpPath, { force: true }).catch(() => {});
+  }
 });
 
 module.exports = {
@@ -482,4 +616,6 @@ module.exports = {
   // claim, the same one-pull-per-user lock and the same range cap.
   nvrPull: { loadCamera, assertPlayback, playbackSource, claimNvr, parseRange, exportsByUser, MAX_EXPORT_MS },
   exportFilename,
+  hasMoovBox,
+  endExportFfmpeg,
 };

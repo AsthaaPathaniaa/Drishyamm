@@ -57,8 +57,9 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '@/core/ui/tooltip';
 import { useOccupancy } from './useOccupancy';
 import { STATUS_BAR, nfmt } from './occupancy-data';
 import {
-  GateActivityMatrix, MetricBar, SetupCard, ZoneHeadcountTable,
+  GateActivityMatrix, MetricBar, NotCountingNote, SetupCard, ZoneHeadcountTable,
 } from './components/bits';
+import { zonesNotCounting } from './zone-model';
 import QuickZoneDrawer from './components/QuickZoneDrawer';
 
 const PAGE_DESCRIPTION =
@@ -101,6 +102,11 @@ const MOVED_TO_USAGE_TRENDS = new Set(['usage-trends', 'analytics']);
 const MOVED_TO_ZONE_SETUP = new Set(['room-config', 'settings']);
 const ZONE_SETUP_PATH = '/occupancy/zone-setup';
 
+// Where the per-camera counting switch lives. Zone Setup draws the zone; this
+// page is the only place that turns counting on for the camera under it, so it
+// is where a "your zones are not being counted" note has to point.
+const HEAD_COUNT_PATH = '/ai-event/headcount';
+
 export default function Occupancy() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
@@ -141,6 +147,13 @@ export default function Occupancy() {
   // was; only a registry that answers "zero cameras" changes it.
   const presence = useCameraPresence();
   const noCameras = presence.status === 'empty';
+
+  // Saved zones no camera is counting. The Zone headcount panel cannot hold
+  // them -- it has no number for them -- so they are named in one line under
+  // its empty state instead of being silently absent from a page the operator
+  // just configured. `regionZones` is the live set, so this is the difference
+  // between what exists and what counts.
+  const notCounting = useMemo(() => zonesNotCounting(rooms, regionZones), [rooms, regionZones]);
 
   // The drawer reads the zone from the live list, so its count keeps moving
   // with the wall; the snapshot only stands in if the zone drops out mid-edit.
@@ -360,13 +373,20 @@ export default function Occupancy() {
                   zones={regionZones}
                 />
               ) : (
-                <SetupCard
-                  cta="Set Up Zones in Zone Setup"
-                  hint="Turn head counting on for a camera, then draw its boundary and set a capacity in Zone Setup."
-                  onSetup={() => openZoneSetup()}
-                  ready={ready}
-                  title="No space is counting yet"
-                />
+                <>
+                  <SetupCard
+                    cta="Set Up Zones in Zone Setup"
+                    hint="Turn head counting on for a camera, then draw its boundary and set a capacity in Zone Setup."
+                    onSetup={() => openZoneSetup()}
+                    ready={ready}
+                    title="No space is counting yet"
+                  />
+                  {/* Only once the head-count poll has answered: before that
+                      "nothing is counting" is not yet a fact about the site. */}
+                  {ready ? (
+                    <NotCountingNote count={notCounting.length} onFix={() => navigate(HEAD_COUNT_PATH)} />
+                  ) : null}
+                </>
               )}
             </Panel>
 

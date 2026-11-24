@@ -47,6 +47,11 @@ const writeOpen = (set) => {
 
 export default function RuleSections({
   draft, set, access, lockedOut, suggestions, locked = false,
+  // The camera this zone's rules run on, and the one action the access step
+  // can take on it. Passed through rather than fetched here: ZoneSetup already
+  // holds the AI camera registry, and a second reader of it could disagree
+  // with the first about whether a detector is running.
+  camera = null, onEnableBodyDetection, enablingBody = false, bodyNote = '',
 }) {
   const [open, setOpen] = useState(readOpen);
   const toggle = (id) => setOpen((prev) => {
@@ -77,7 +82,11 @@ export default function RuleSections({
           <StepAccess
             access={access}
             alertAfterSec={draft.alertAfterSec ?? 5}
+            bodyNote={bodyNote}
+            camera={camera}
+            enablingBody={enablingBody}
             onChange={(a) => set({ access: a })}
+            onEnableBodyDetection={onEnableBodyDetection}
             onRule={set}
             severity={draft.severity || 'critical'}
             suggestions={suggestions}

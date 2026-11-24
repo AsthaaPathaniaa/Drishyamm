@@ -17,6 +17,7 @@
  *     boundaries: { [monitorId]: [[x,y], ...] }
  *     monitorId:  cameras[0]              kept for the server and older readers
  *     boundary:   boundaries[cameras[0]]  ditto
+ *     broken:     null, or why this record cannot work (see normalizeZone)
  *     ...rules    capacity, dwell, schedule, access -- one set per zone
  *   }
  *
@@ -46,6 +47,18 @@ export function newZoneId() {
 }
 
 /**
+ * A stored record that cannot work, and why. Carried on the record as `broken`
+ * so every reader can decide for itself: the rail LISTS it, the cameras and the
+ * canvas never see it.
+ */
+export const BROKEN_NO_CAMERA = 'no-camera';
+
+/** `broken` in words, for a row that has to explain itself. */
+export const BROKEN_LABEL = {
+  [BROKEN_NO_CAMERA]: 'No camera — nothing can count this zone',
+};
+
+/**
  * Bring any stored record to the current shape.
  *
  * Records saved before this model are keyed by their camera and may list extra
@@ -53,6 +66,24 @@ export function newZoneId() {
  * stream was read -- so they are dropped rather than suddenly summed in, which
  * would change the numbers an operator has been watching without them touching
  * anything.
+ *
+ * A record with NO camera left used to return null here, which deleted the
+ * zone from every surface at once -- rail, dashboard, canvas, camera payload --
+ * with nothing anywhere to say it had happened. That is how "I created zones
+ * and I see none" becomes unanswerable from the page. So the record is kept and
+ * marked `broken` instead: a zone with no camera is a bug worth seeing.
+ *
+ * Being KEPT is not being used. `cameras: []` already excludes it from
+ * zonesOnCamera, and therefore from cameraPayload (nothing is pushed to a
+ * camera), from colorsOnCamera and the canvas (nothing is drawn), and from
+ * buildRegionZones (no count, no site total). The rail reads `saved` directly,
+ * so that is where it surfaces -- the one place it can be read and deleted.
+ *
+ * No console line: normalizeZones runs on every loadRooms, which a single save
+ * calls several times, so a warning here would be a stream rather than a
+ * signal. The row in the rail is the trace.
+ *
+ * Returns null only for input that is not a record at all.
  */
 export function normalizeZone(key, raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -60,21 +91,26 @@ export function normalizeZone(key, raw) {
   const cameras = legacy
     ? [raw.monitorId || key].filter(Boolean)
     : (Array.isArray(raw.cameras) ? raw.cameras : []).filter(Boolean);
-  if (!cameras.length) return null;
   const boundaries = legacy
-    ? { [cameras[0]]: Array.isArray(raw.boundary) ? raw.boundary : [] }
+    ? (cameras.length ? { [cameras[0]]: Array.isArray(raw.boundary) ? raw.boundary : [] } : {})
     : { ...raw.boundaries };
   return {
     ...raw,
     id: raw.id || key,
     cameras,
     boundaries,
-    monitorId: cameras[0],
+    // '' rather than undefined: a key that JSON.stringify would drop makes the
+    // next read of the cache a different shape than this one.
+    monitorId: cameras[0] || '',
     boundary: boundaries[cameras[0]] || [],
+    broken: cameras.length ? null : BROKEN_NO_CAMERA,
   };
 }
 
-/** Every stored record, normalised, keyed by zone id. Unreadable records drop out. */
+/**
+ * Every stored record, normalised, keyed by zone id. Only input that is not a
+ * record at all drops out -- a zone with no camera is kept, carrying `broken`.
+ */
 export function normalizeZones(rooms = {}) {
   const out = {};
   for (const [key, raw] of Object.entries(rooms || {})) {
@@ -82,6 +118,38 @@ export function normalizeZones(rooms = {}) {
     if (z) out[z.id] = z;
   }
   return out;
+}
+
+/**
+ * Saved zones that exist but cannot produce a number: drawn on cameras, none
+ * of which is counting.
+ *
+ * `live` is the dashboard's region zones -- any array of `{ id }` will do. That
+ * array has already been filtered to zones with a head-count stream
+ * (buildRegionZones), so a saved zone missing from it is a saved zone nothing
+ * is watching. This is what makes "No space is counting yet" answerable: the
+ * zones are there, the counting is not.
+ *
+ * A zone with no camera at all is NOT one of these -- there is no switch to
+ * turn on. It carries `broken` and the rail lists it on its own account.
+ */
+export function zonesNotCounting(rooms = {}, live = []) {
+  const counting = new Set((live || []).map((z) => z?.id));
+  return Object.values(normalizeZones(rooms))
+    .filter((z) => !z.broken && z.cameras.length && !counting.has(z.id));
+}
+
+/**
+ * Those zones in one sentence -- or null when there are none, so a panel that
+ * has nothing wrong with it keeps the empty state it already had, word for
+ * word. The caller renders nothing for null rather than an empty line.
+ */
+export function notCountingText(count = 0) {
+  const n = Number(count) || 0;
+  if (n < 1) return null;
+  return n === 1
+    ? '1 zone is set up on a camera that is not counting.'
+    : `${n} zones are set up on cameras that are not counting.`;
 }
 
 export const boundaryOn = (zone, monitorId) => zone?.boundaries?.[monitorId] || [];
@@ -160,6 +228,12 @@ export function zoneProblems(draft, zones = {}, cameraName = (m) => m) {
   const problems = [];
   const name = String(draft?.name || '').trim();
   if (!name) problems.push('Give the zone a name.');
+  // Reachable only for a record already marked `broken`: every zone created
+  // here starts on a camera, and the canvas bar refuses to detach the last
+  // one. Saving it again would reach no camera and still report success.
+  if (!(draft?.cameras || []).length) {
+    problems.push('Add a camera to this zone: with none, nothing can count it or draw it.');
+  }
   const others = Object.values(zones).filter((z) => z.id !== draft.id);
 
   for (const m of draft.cameras || []) {

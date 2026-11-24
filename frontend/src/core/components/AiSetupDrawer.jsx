@@ -3,14 +3,11 @@ import { AlertTriangle, Check, ChevronDown, Loader2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { aiService } from '@/core/services/ai';
 import {
-  AI_FEATURES,
-  PURPOSES,
-  PURPOSE_PRESETS,
   buildDisablePayload,
   buildEnablePayload,
   cameraFeatures,
-  inferPurpose,
   lifecycleCopy,
+  visibleFeatures,
 } from '@/core/services/aiCamera';
 import { Button } from '@/core/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/core/ui/sheet';
@@ -54,16 +51,45 @@ function SetupDrawer({ camera, onClose, onSaved }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // What the server changed BEYOND what was asked for -- today only body
+  // detection being forced on to stop a zone being armed with no producer.
+  // Shown rather than discarded: a security control that was switched on for
+  // the operator has to be something they are told about.
+  const [notices, setNotices] = useState([]);
 
-  const submit = async (payload) => {
+  const submit = async (payload, headcountEnabled) => {
     setSaving(true);
     setError('');
+    setNotices([]);
     try {
       const res = await aiService.updateCameraAiLifecycle(camera.id, payload);
+      // Counting is a separate route (settings.headcount, not settings.ai), so
+      // the toggle is a second call -- made only when it actually changed, and
+      // AFTER the AI save, so a failure here cannot lose the main edit. `zones`
+      // is deliberately not sent: the backend keeps the counting area already
+      // drawn, so switching counting off and on again never wipes it.
+      if (headcountEnabled !== undefined && headcountEnabled !== (camera.headcount?.enabled === true)) {
+        try {
+          await aiService.setHeadcount(camera.id, {
+            enabled: headcountEnabled,
+            threshold: Number(camera.headcount?.threshold) || 0,
+          });
+        } catch (err) {
+          setError(err?.response?.data?.message
+            || 'The AI settings were saved, but head counting could not be changed.');
+          return;
+        }
+      }
       onSaved?.(res.data);
       if (res.reconcile && res.reconcile.ok === false) {
         // Saved, but the AI service did not start it: keep the drawer open and say so.
         setError(res.reconcile.error || 'Saved, but the AI service did not start this camera. Try again shortly.');
+        return;
+      }
+      if (Array.isArray(res.notices) && res.notices.length) {
+        // Saved correctly, but not exactly as asked. The drawer stays open so
+        // the sentence is read, not flashed past on the way out.
+        setNotices(res.notices);
         return;
       }
       onClose?.();
@@ -74,13 +100,27 @@ function SetupDrawer({ camera, onClose, onSaved }) {
     }
   };
   const updateDraft = (key, value) => setDraft((prev) => ({ ...prev, [key]: value }));
-  // Picking a place pre-ticks the usual alerts for it; still editable.
-  const applyPurpose = (purpose) => setDraft((prev) => ({ ...prev, purpose, ...(PURPOSE_PRESETS[purpose] || {}) }));
   const on = camera.ai?.enabled === true;
   const status = lifecycleCopy(camera.lifecycle);
-  const drawn = Object.fromEntries(
-    cameraFeatures({ ...camera, ai: { ...camera.ai, enabled: true } }).map((f) => [f.key, f.on]),
-  );
+  // Both derived with AI forced on, so the list shows what this camera WOULD
+  // do rather than a page of "off" while it is being set up for the first time.
+  const asIfOn = { ...camera, ai: { ...camera.ai, enabled: true } };
+  const drawn = Object.fromEntries(cameraFeatures(asIfOn).map((f) => [f.key, f.on]));
+  // Rows whose feature has an effect on THIS camera. The zone-body child is
+  // absent here until a zone is drawn.
+  //
+  // The face flag comes from the DRAFT, not the stored row: an operator who
+  // has just switched face recognition off in this drawer should see the child
+  // lock immediately, not after a save and a refetch.
+  const rows = visibleFeatures({
+    ...asIfOn,
+    ai: { ...asIfOn.ai, faceRecognition: draft.faceRecognition !== false },
+  });
+  // Sent as true when the drawer is showing it as Required, so the server has
+  // nothing left to force. Without this the server would force it on every
+  // save of this camera and return the same notice each time, which trains an
+  // operator to dismiss the one notice that mattered.
+  const bodyForced = rows.some((f) => f.flag === 'zoneBodyDetection' && f.forced);
 
   return (
     <>
@@ -96,7 +136,7 @@ function SetupDrawer({ camera, onClose, onSaved }) {
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <p className="mb-2 text-small font-semibold text-fg">Turn on</p>
         <div className="divide-y divide-line rounded-lg border border-line">
-          {AI_FEATURES.map((f) => {
+          {rows.map((f) => {
             if (f.kind === 'core') {
               return (
                 <FeatureLine key={f.key} feature={f}>
@@ -104,19 +144,58 @@ function SetupDrawer({ camera, onClose, onSaved }) {
                 </FeatureLine>
               );
             }
-            if (f.kind === 'flag') {
+            // Stored, saved, and read by nothing. Shown disabled with the
+            // reason rather than deleted: the value on the camera is real, and
+            // the fix is to make a service read it -- see alertEngine.js.
+            if (f.notEnforced) {
               return (
-                <FeatureLine key={f.key} feature={f}>
-                  <Switch label={f.label} value={draft[f.flag]} onChange={(v) => updateDraft(f.flag, v)} />
+                <FeatureLine child={Boolean(f.parent)} key={f.key} feature={f} note={f.notEnforced}>
+                  <fieldset className="m-0 flex shrink-0 items-center gap-2 border-0 p-0" disabled title={f.notEnforced}>
+                    <span className="rounded border border-line bg-surface-sunken px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">
+                      Not enforced
+                    </span>
+                    <span className="pointer-events-none opacity-55">
+                      <Switch label={f.label} value={draft[f.flag] === true} onChange={() => {}} />
+                    </span>
+                  </fieldset>
                 </FeatureLine>
               );
             }
+            if (f.kind === 'flag') {
+              // Forced on, with the reason shown. Not merely pre-ticked: an
+              // anonymous camera with a zone and no detector is a zone that
+              // watches nothing, so the server forces it too and a switch an
+              // operator could flip back would be a lie.
+              return (
+                <FeatureLine child={Boolean(f.parent)} key={f.key} feature={f} note={f.forced ? f.forcedReason : null}>
+                  {f.forced ? (
+                    <span className="shrink-0 text-small font-medium text-fg-muted">Required</span>
+                  ) : (
+                    <Switch label={f.label} value={draft[f.flag] === true} onChange={(v) => updateDraft(f.flag, v)} />
+                  )}
+                </FeatureLine>
+              );
+            }
+            // A setup row is READY only when something has been drawn. Head
+            // count then gets a real on/off beside it: "a gate line exists" and
+            // "count across it" are two questions, and reading the flag as the
+            // answer to both is what made this row claim to be ready on a
+            // camera with nothing drawn at all.
             return (
               <FeatureLine key={f.key} feature={f}>
                 {drawn[f.key] ? (
-                  <Link to={f.setupPath} className="inline-flex items-center gap-1 text-small font-medium text-success-ink hover:underline">
-                    <Check className="h-3.5 w-3.5" /> Ready
-                  </Link>
+                  <span className="flex shrink-0 items-center gap-3">
+                    <Link to={f.setupPath} className="inline-flex items-center gap-1 text-small font-medium text-success-ink hover:underline">
+                      <Check className="h-3.5 w-3.5" /> Ready
+                    </Link>
+                    {f.key === 'head_count' ? (
+                      <Switch
+                        label="Count people crossing this gate line"
+                        onChange={(v) => updateDraft('headcountEnabled', v)}
+                        value={draft.headcountEnabled === true}
+                      />
+                    ) : null}
+                  </span>
                 ) : (
                   <Link to={f.setupPath} className="text-small font-medium text-brand-ink hover:underline">
                     {f.setupLabel.replace(/^Draw a /, 'Draw ')}
@@ -126,18 +205,6 @@ function SetupDrawer({ camera, onClose, onSaved }) {
             );
           })}
         </div>
-
-        <label className="mt-5 block">
-          <span className="mb-2 block text-small font-semibold text-fg">Place</span>
-          <select
-            className="h-10 w-full rounded-lg border border-line bg-surface px-3 text-body text-fg outline-none focus:border-brand-line"
-            onChange={(event) => applyPurpose(event.target.value)}
-            value={draft.purpose}
-          >
-            <option value="">Select a place</option>
-            {PURPOSES.map((purpose) => <option key={purpose} value={purpose}>{purpose}</option>)}
-          </select>
-        </label>
 
         <button
           aria-expanded={advancedOpen}
@@ -179,7 +246,24 @@ function SetupDrawer({ camera, onClose, onSaved }) {
             {error}
           </p>
         ) : null}
-        <Button className="w-full" disabled={saving} onClick={() => submit(buildEnablePayload(camera, draft))} type="button">
+        {notices.map((n) => (
+          <p className="mb-3 flex items-start gap-2 rounded-lg bg-info-soft px-3 py-2 text-small font-medium text-info-ink" key={n}>
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            {n}
+          </p>
+        ))}
+        <Button
+          className="w-full"
+          disabled={saving}
+          onClick={() => {
+            const { headcountEnabled, ...ai } = draft;
+            submit(buildEnablePayload(camera, {
+              ...ai,
+              ...(bodyForced ? { zoneBodyDetection: true } : null),
+            }), headcountEnabled);
+          }}
+          type="button"
+        >
           {saving ? <Loader2 className="animate-spin" /> : null}
           {on ? 'Save' : 'Start AI'}
         </Button>
@@ -198,11 +282,23 @@ function SetupDrawer({ camera, onClose, onSaved }) {
   );
 }
 
-/** A feature: its name (description on hover) and its control. */
-function FeatureLine({ feature, children }) {
+/**
+ * A feature: its name (description on hover) and its control.
+ *
+ * `child` indents the row and lightens the label, so a sub-feature reads as
+ * belonging to the row above rather than as a seventh independent thing.
+ * `note` is a sentence shown under the label when the row needs to explain
+ * itself -- a forced switch has to say why it cannot be turned off.
+ */
+function FeatureLine({ feature, children, child = false, note = null }) {
   return (
-    <div className="flex min-h-12 items-center justify-between gap-3 px-3 py-2.5">
-      <span className="text-body text-fg" title={feature.note}>{feature.label}</span>
+    <div className={`flex min-h-12 items-center justify-between gap-3 py-2.5 pr-3 ${child ? 'pl-7' : 'pl-3'}`}>
+      <span className="min-w-0">
+        <span className={`block ${child ? 'text-small text-fg-secondary' : 'text-body text-fg'}`} title={feature.note}>
+          {feature.label}
+        </span>
+        {note ? <span className="mt-0.5 block text-small text-fg-muted">{note}</span> : null}
+      </span>
       {children}
     </div>
   );
@@ -252,11 +348,16 @@ function Segmented({ options, value, onChange }) {
 }
 
 function draftFromCamera(camera) {
-  const draft = buildEnablePayload(camera);
-  // A camera never set up starts from its inferred place's preset.
-  if (!camera.ai?.purpose) {
-    const purpose = inferPurpose(camera);
-    Object.assign(draft, PURPOSE_PRESETS[purpose] || {}, { purpose });
-  }
-  return draft;
+  // `purpose` is still set -- buildEnablePayload infers it from the camera's
+  // name -- because the backend uses it as a fallback zone label. What is gone
+  // is the PRESET: picking a place used to tick four flags at once, two of
+  // which (unknownAlerts, watchlistAlerts) no service reads and one of which
+  // (journeyMapping) is owned by Person Tracker. A shortcut for setting three
+  // controls that do nothing is worse than no shortcut.
+  //
+  // `headcountEnabled` is NOT part of the AI payload -- counting lives in
+  // settings.headcount and has its own route -- so it is stripped before save
+  // and sent separately. It rides in the draft so the row has somewhere to put
+  // the toggle's state.
+  return { ...buildEnablePayload(camera), headcountEnabled: camera?.headcount?.enabled === true };
 }

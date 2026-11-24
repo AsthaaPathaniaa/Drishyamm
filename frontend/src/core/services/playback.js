@@ -41,10 +41,15 @@ export const playbackService = {
     return api.get('/playback/nvr/recordings', { params: { monitorId, start, end } }).then((r) => r.data);
   },
 
-  /** URL the browser loads directly to download a range as MP4. */
-  exportUrl({ monitorId, start, end, format = 'mp4', name }) {
+  /**
+   * URL the browser loads directly to download a range as MP4.
+   * `kind: 'breach'` marks a no-entry breach's evidence clip, which the backend
+   * caps at the 60 s window clipWindow() pads (15 s before, 45 s after).
+   */
+  exportUrl({ monitorId, start, end, format = 'mp4', name, kind }) {
     const qs = new URLSearchParams({ monitorId, start, end, format, token: token() });
     if (name) qs.set('name', name);
+    if (kind) qs.set('kind', kind);
     return `${API_URL}/playback/nvr/export?${qs}`;
   },
 
@@ -53,8 +58,10 @@ export const playbackService = {
    * error answer (another export running, no footage) can't navigate the app
    * away. A download never fires `load` on the frame; a load means the server
    * answered with an error document instead, whose message is passed to
-   * `onError` when it's readable. The NVR replays in real time, so the frame
-   * lives for the clip's length plus a margin.
+   * `onError` when it's readable. The backend records the whole clip before it
+   * answers (that is what gives the file a duration and a seek index) and the
+   * NVR replays in real time, so nothing reaches the browser for about the
+   * clip's length: the frame lives for that plus a margin.
    */
   download(url, durationMs, onError) {
     const frame = document.createElement('iframe');

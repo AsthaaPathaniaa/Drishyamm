@@ -19,6 +19,10 @@
 const { on, emit, EVENTS } = require('../events/bus');
 const logger = require('../config/logger');
 const { createOccupancyTracker } = require('./occupancyHysteresis');
+// The arm window moved out so the camera SELECTOR can ask the same question:
+// zone-guard was watching a 09:00-17:00 zone around the clock and this engine
+// was discarding the boxes. See zoneArming.js.
+const { isArmed } = require('./zoneArming');
 
 // Local MinIO (the AI's snapshot store) — zone crops go HERE, in the same
 // `vms-snapshots` bucket the AI uses, so the existing retrieval paths (the
@@ -83,19 +87,6 @@ function inZone(zone, xPct, yPct) {
   return false;
 }
 
-function isArmed(zone) {
-  if (!zone.enabled) return false;
-  if (!zone.armWindow || zone.schedule === 'always') return true;
-  try {
-    const now = new Date().toLocaleTimeString('en-GB', {
-      hour12: false, hour: '2-digit', minute: '2-digit',
-      timeZone: process.env.ALERT_TIMEZONE || 'Asia/Kolkata',
-    });
-    const { from, to } = zone.armWindow;
-    if (!from || !to) return true;
-    return from <= to ? (now >= from && now <= to) : (now >= from || now <= to);
-  } catch { return true; }
-}
 
 async function zonesFor(userId, monitorId) {
   let entry = zoneCache.get(userId);
@@ -230,6 +221,17 @@ function handleFrame({ userId, frame }) {
         }
         continue;
       }
+
+      // A PUBLIC zone does not alarm on entry. `alertOnEntry` is what the zone
+      // editor writes for that choice (`restricted-zones-api.js` toApi:
+      // `alertOnEntry: access.mode !== 'public'`), the controller stores it and
+      // the model has carried it from the start — and until now nothing read it
+      // back, so a zone an operator had explicitly marked public raised a
+      // `zone.intrusion` for every person who walked through it. Checked AFTER
+      // the capacity branch on purpose: a public zone WITH a capacity rule is
+      // still meant to alert when it is over its limit, which is the whole
+      // point of making it public rather than deleting it.
+      if (zone.alertOnEntry === false) continue;
 
       let st = zoneOcc.get(zone.id);
       if (!st) { st = { present: false, firstInside: 0, lastInside: 0, lastAlert: 0 }; zoneOcc.set(zone.id, st); }

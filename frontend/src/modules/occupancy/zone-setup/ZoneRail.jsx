@@ -10,7 +10,9 @@
  *               so a site with twenty cameras is twenty rows, not a page of
  *               scrolling.
  *   By zone     a flat list of zones, then a list of gates. What each is
- *               called and whether it is done, regardless of camera.
+ *               called and whether it is done, regardless of camera -- and
+ *               regardless of whether anything is counting it: the list is
+ *               every zone that exists, built in zone-rows.js.
  *
  * A camera can carry zones and a gate at once: a zone counts who is standing
  * in a space, a gate counts who walked through a line. They are different
@@ -79,8 +81,8 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  Camera, CameraOff, CheckCircle2, ChevronRight, Circle, DoorOpen, Ellipsis, Layers, Lock, MapPin, Plus, Search,
-  Trash2, Video, Wrench,
+  Camera, CameraOff, CheckCircle2, ChevronRight, Circle, DoorOpen, Ellipsis, Layers, Lock, MapPin,
+  Plus, Search, TriangleAlert, Trash2, Video, Wrench,
 } from 'lucide-react';
 import { Button } from '@/core/ui/button';
 import { EmptyState, LoadingState } from '@/core/ui/states';
@@ -88,9 +90,9 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/core/ui/dropdown-menu';
 import Panel from '@/core/ui/panel';
-import { PROFILE_BY_ID, nfmt } from '../occupancy-data';
+import { nfmt } from '../occupancy-data';
 import { colorsOnCamera, zonesOnCamera } from '../zone-model';
-import { ACCESS_MODE_BY_ID } from './access-data';
+import { zoneRows } from './zone-rows';
 
 const MODES = [
   { id: 'camera', label: 'By camera', Icon: Video },
@@ -535,30 +537,12 @@ function CreateAction({ icon: Icon, onClick, children }) {
 function ZoneList({
   regionZones, zones, saved, activeZoneId, pendingId, onPick, onDeleteZone, onMode, query,
 }) {
-  // The live list, plus the zone being drafted if it has not been saved yet:
-  // a zone that vanished from the rail the moment it was created would read
-  // as a failed click.
-  const rows = regionZones.map((z) => ({ id: z.id, label: z.label, locked: z.locked, capacity: z.capacity, cameras: z.cameraIds }));
-  const draft = zones[activeZoneId];
-  if (draft && !rows.some((r) => r.id === draft.id)) {
-    rows.push({ id: draft.id, label: draft.name || 'New zone', capacity: Number(draft.maxCapacity) || 0, cameras: draft.cameras });
-  }
-
-  const ordered = rows.map((z) => {
-    const room = saved[z.id];
-    // A zone synced from the server carries no profile -- that field has no
-    // column there -- so the subtitle degrades to the next most useful fact
-    // rather than printing "Not configured" beside a green tick.
-    const profile = PROFILE_BY_ID[room?.profile];
-    const mode = ACCESS_MODE_BY_ID[room?.access?.mode];
-    return {
-      ...z,
-      configured: Boolean(room),
-      subtitle: profile?.label || (room ? (mode?.label || 'Configured') : 'Not configured'),
-      capacity: Number(room?.maxCapacity) || z.capacity || 0,
-    };
-  }).filter((z) => !query || z.label.toLowerCase().includes(query))
-    .sort((a, b) => Number(a.configured) - Number(b.configured) || a.label.localeCompare(b.label));
+  // Every zone that EXISTS -- stored, live, or drafted and not yet saved --
+  // searched and ordered. Built in zone-rows.js, which is also where the
+  // reason this cannot be `regionZones` is written down: that array is the
+  // dashboard's live-only one, and a saved zone on a camera nobody counts is
+  // absent from it by design.
+  const ordered = zoneRows({ saved, regionZones, draft: zones[activeZoneId], query });
 
   if (!ordered.length) {
     // A zone is always drawn on a camera, so there is nothing to offer here
@@ -601,15 +585,27 @@ function ZoneList({
                 onClick={() => onPick(z.id, z.cameras?.[0])}
                 type="button"
               >
-                {z.configured
-                  ? <CheckCircle2 className="mt-px h-3.5 w-3.5 shrink-0 text-success" strokeWidth={2.25} />
-                  : <Circle className="mt-px h-3.5 w-3.5 shrink-0 text-fg-disabled" strokeWidth={2} />}
+                {/* Three states, not two: a stored zone that cannot work is
+                    neither done nor merely unstarted, and a green tick on it
+                    would be the same lie as hiding it was. */}
+                {z.broken
+                  ? <TriangleAlert className="mt-px h-3.5 w-3.5 shrink-0 text-warning-ink" strokeWidth={2.25} />
+                  : z.configured
+                    ? <CheckCircle2 className="mt-px h-3.5 w-3.5 shrink-0 text-success" strokeWidth={2.25} />
+                    : <Circle className="mt-px h-3.5 w-3.5 shrink-0 text-fg-disabled" strokeWidth={2} />}
                 <span className="min-w-0 flex-1">
                   <span className={`block break-words text-heading font-semibold leading-snug ${on ? 'text-brand-ink' : 'text-fg'}`}>
                     {z.label}
                   </span>
                   <span className="mt-0.5 block text-small text-fg-subtle">
                     {z.subtitle}
+                    {/* "Not counting" rather than 0: a zone on a camera with
+                        no head-count stream is not an empty zone, and 0 reads
+                        as "nobody is in there". The long form elsewhere is
+                        "N present now"; the rail is 220-330px wide. */}
+                    {/* A broken zone's subtitle already says nothing can
+                        count it; "Not counting" after it adds no fact. */}
+                    {z.broken ? '' : z.count == null ? ' · Not counting' : ` · ${nfmt(z.count)} now`}
                     {z.capacity > 0 ? ` · cap ${nfmt(z.capacity)}` : ''}
                     {z.cameras?.length > 1 ? ` · ${z.cameras.length} cams` : ''}
                   </span>
