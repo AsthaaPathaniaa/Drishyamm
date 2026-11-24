@@ -2709,6 +2709,12 @@ const exportZoneBreaches = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  // Not a route. Exported so the contract between the zone editor and the
+  // head-count detector can be tested across the boundary: the editor builds
+  // the polygons, this validates them, the detector parses what survives.
+  // Every bug in this feature has lived in a boundary like that one, invisible
+  // to a green suite on either side -- see contracts/headcount-camera-row.json.
+  sanitiseZones,
   listEvents,
   listZoneBreaches,
   exportZoneBreaches,

@@ -204,3 +204,79 @@ test('the empty state names how many, and says nothing at all when there are non
   assert.equal(notCountingText(), null);
   assert.equal(notCountingText(-1), null);
 });
+
+/* ── the contract with the detector ──────────────────────────────────────────
+ *
+ * Every bug found in this feature has been a BOUNDARY bug -- two correct
+ * components disagreeing -- and a unit test on either side of a boundary
+ * cannot see the boundary. A zone saved here reached the camera registry and
+ * was never applied by the detector, while this file's tests and the
+ * detector's tests were both green.
+ *
+ * So contracts/headcount-camera-row.json holds one camera row as the whole
+ * chain produces it, and three tests read it:
+ *
+ *   this one                                  the editor BUILDS these zones
+ *   backend/test/headcountChain.test.js       the backend EMITS this row
+ *   ai/head-count/tests/test_vms_contract.py  the detector PARSES it
+ *
+ * None of them can pass alone. Editing the file to make one pass defeats it.
+ */
+import { readFileSync } from 'node:fs';
+
+const CONTRACT = JSON.parse(readFileSync(
+  new URL('../../../../contracts/headcount-camera-row.json', import.meta.url), 'utf8',
+));
+
+/** The two zones of the contract camera, as they are SAVED in this module. */
+const contractSaved = () => ({
+  'zone-reception': {
+    id: 'zone-reception',
+    name: 'Reception',
+    cameras: ['7'],
+    boundaries: { 7: CONTRACT.camera.settings.headcount.zones[0].points },
+  },
+  'zone-waiting': {
+    id: 'zone-waiting',
+    name: 'Waiting area',
+    cameras: ['7'],
+    boundaries: { 7: CONTRACT.camera.settings.headcount.zones[1].points },
+  },
+});
+
+test('cameraPayload builds exactly the zones the detector is given', () => {
+  const payload = cameraPayload(normalizeZones(contractSaved()), '7');
+  assert.deepEqual(payload.zones, CONTRACT.camera.settings.headcount.zones);
+});
+
+test('and the camera-level limit it sends is the contract\'s', () => {
+  // 0, because two zones share this view: a camera-level limit only means
+  // something when one zone IS the camera. The contract records why.
+  const payload = cameraPayload(normalizeZones(contractSaved()), '7');
+  assert.equal(payload.threshold, CONTRACT.expect.threshold);
+  assert.equal(payload.zoneCount, CONTRACT.expect.zoneCount);
+});
+
+test('one zone alone on one camera DOES push its capacity as the limit', () => {
+  // The other half of the same rule, kept out of the contract because the
+  // contract camera is the two-zone case.
+  const solo = {
+    'zone-reception': {
+      id: 'zone-reception',
+      name: 'Reception',
+      cameras: ['7'],
+      maxCapacity: 12,
+      boundaries: { 7: CONTRACT.camera.settings.headcount.zones[0].points },
+    },
+  };
+  const payload = cameraPayload(normalizeZones(solo), '7');
+  assert.equal(payload.threshold, 12);
+  assert.equal(payload.zoneCount, 1);
+});
+
+test('the zone names the detector keys its breakdown by are these ones', () => {
+  // zone_counts comes back keyed by NAME, so a name that does not survive the
+  // push is a chip the wall can never match to a zone.
+  const payload = cameraPayload(normalizeZones(contractSaved()), '7');
+  assert.deepEqual(payload.zones.map((z) => z.name), CONTRACT.expect.zoneNames);
+});
