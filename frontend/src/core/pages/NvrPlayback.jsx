@@ -45,6 +45,13 @@ const LEAD_MIN_S = 2;
 const LEAD_MAX_S = 30;
 const PLAY_RUN_S = 20;
 const DRY_S = 0.4;                  // less than this ahead while playing = the buffer ran dry
+// NVRs send replay in bursts with long silences, so a rate measured over a
+// short window swings wildly. Measure over RATE_WINDOW_MS, and back off: a
+// buffer that runs dry within PLAY_RUN_S of resuming doubles the lead needed
+// next time (2 → 4 → 8 … LEAD_MAX_S s); a long smooth run halves it again.
+// Without this, a link just under real time played ~1 s, stopped, refilled
+// 2 s, played ~1 s … (2026-11-21, testing server: "buffering every second").
+const RATE_WINDOW_MS = 60_000;
 // Play, and if the browser refuses sound without a click (autoplay policy, e.g.
 // a session that restarts on its own while unmuted), play muted instead of
 // leaving the picture stopped.
@@ -171,6 +178,7 @@ export default function NvrPlayback() {
   const [bufferedMs, setBufferedMs] = useState(null);
   const [buffering, setBuffering] = useState(null);   // { rate, lead, target } while holding for footage
   const holdRef = useRef(false);                        // paused by the buffering hold, not by the viewer
+  const waitingRef = useRef(null);                      // the hold's handler for the video 'waiting' event
   const [playing, setPlaying] = useState(false);
   const [rate, setRateState] = useState(1);
   const [uiVisible, setUiVisible] = useState(true);
@@ -599,27 +607,53 @@ export default function NvrPlayback() {
   useEffect(() => {
     if (phase !== 'playing') return undefined;
     const samples = [];
+    let backoff = LEAD_MIN_S;
+    let resumedAt = 0;
+    const enterHold = (v, info) => {
+      const now = performance.now();
+      backoff = resumedAt && now - resumedAt < PLAY_RUN_S * 1000
+        ? Math.min(LEAD_MAX_S, backoff * 2)
+        : Math.max(LEAD_MIN_S, backoff / 2);
+      const target = Math.max(info.rateTarget, backoff);
+      holdRef.current = true;
+      v.pause();
+      setBuffering({ rate: info.rate, lead: info.lead, target: Math.ceil(target) });
+    };
+    const measure = (v) => {
+      let end = 0;
+      try { end = v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0; } catch { /* ignore */ }
+      const now = performance.now();
+      const [t0, e0] = samples.length ? samples[0] : [now, end];
+      const linkRate = now - t0 >= 4000 ? Math.max(0, (end - e0) / ((now - t0) / 1000)) : null;
+      const speed = v.playbackRate || 1;
+      const rateTarget = linkRate != null && linkRate < speed * 0.95
+        ? Math.min(LEAD_MAX_S, Math.max(LEAD_MIN_S, PLAY_RUN_S * (speed - linkRate)))
+        : LEAD_MIN_S;
+      return { end, now, linkRate, rateTarget, lead: Math.max(0, end - v.currentTime) };
+    };
+    // The browser ran out of frames: hold at once, so the sound stops with the
+    // picture instead of running on over a frozen frame.
+    waitingRef.current = () => {
+      const v = videoRef.current;
+      const s = sessionRef.current;
+      if (!v || !s?.played || v.paused || v.seeking || holdRef.current || relayRef.current?.closed) return;
+      const m = measure(v);
+      if (m.lead < DRY_S) enterHold(v, { rate: m.linkRate, lead: Math.floor(m.lead), rateTarget: m.rateTarget });
+    };
     const id = setInterval(() => {
       const v = videoRef.current;
       const s = sessionRef.current;
       if (!v || !s) return;
-      let end = 0;
-      try { end = v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0; } catch { /* ignore */ }
-      const now = performance.now();
+      const { end, now, linkRate, rateTarget, lead } = measure(v);
       samples.push([now, end]);
-      while (samples.length > 2 && now - samples[0][0] > 15_000) samples.shift();
-      const [t0, e0] = samples[0];
-      const linkRate = now - t0 >= 4000 ? Math.max(0, (end - e0) / ((now - t0) / 1000)) : null;
-      const speed = v.playbackRate || 1;
-      const target = linkRate != null && linkRate < speed * 0.95
-        ? Math.min(LEAD_MAX_S, Math.max(LEAD_MIN_S, PLAY_RUN_S * (speed - linkRate)))
-        : LEAD_MIN_S;
-      const lead = Math.max(0, end - v.currentTime);
+      while (samples.length > 2 && now - samples[0][0] > RATE_WINDOW_MS) samples.shift();
       const closed = !!relayRef.current?.closed;
-      const info = { rate: linkRate, lead: Math.floor(lead), target: Math.ceil(target) };
       if (holdRef.current) {
+        const target = Math.max(rateTarget, backoff);
+        const info = { rate: linkRate, lead: Math.floor(lead), target: Math.ceil(target) };
         if (lead >= target || closed) {
           holdRef.current = false;
+          resumedAt = now;
           setBuffering(null);
           playOrMute(v, forcedMute);
         } else {
@@ -629,12 +663,10 @@ export default function NvrPlayback() {
         return;
       }
       if (!v.paused && s.played && lead < DRY_S && !closed) {
-        holdRef.current = true;
-        v.pause();
-        setBuffering(info);
+        enterHold(v, { rate: linkRate, lead: Math.floor(lead), rateTarget });
       }
-    }, 500);
-    return () => { clearInterval(id); holdRef.current = false; setBuffering(null); };
+    }, 250);
+    return () => { clearInterval(id); waitingRef.current = null; holdRef.current = false; setBuffering(null); };
   }, [phase, forcedMute]);
 
   useEffect(() => () => { genRef.current += 1; teardown(); }, [teardown]);
@@ -1066,6 +1098,7 @@ export default function NvrPlayback() {
                   onProgress={onTimeUpdate}
                   onPlay={onPlay}
                   onPlaying={onPlaying}
+                  onWaiting={() => waitingRef.current?.()}
                   onPause={onPause}
                   onClick={togglePlay}
                   className="absolute inset-0 h-full w-full cursor-pointer object-contain"
