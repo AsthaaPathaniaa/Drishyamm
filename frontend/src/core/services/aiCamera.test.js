@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   DEFAULT_FPS, activeFeatureLabels, aiSetupPath, buildDisablePayload, buildEnablePayload, cameraFeatures,
+  featureSetupPath,
 } from './aiCamera.js';
 
 const row = ({ ai, ...over } = {}) => ({
@@ -88,6 +89,33 @@ test('features: the alert rows hang off the face model and say they do nothing',
 test('features: journey mapping is not a model, so it is not a row', () => {
   const f = cameraFeatures(row({ ai: { enabled: true } }));
   assert.equal(f.find((x) => x.key === 'journey'), undefined);
+});
+
+test('a setup row links to the camera it was opened from', () => {
+  const f = cameraFeatures(row({ ai: { enabled: true } }));
+  const gate = f.find((x) => x.key === 'head_count');
+  const zone = f.find((x) => x.key === 'restricted_zone');
+  // Both used to link to a bare /occupancy/zone-setup, which opens on whatever
+  // camera that page picks for itself.
+  assert.equal(featureSetupPath(gate, row()), '/occupancy/zone-setup?gate=m1');
+  assert.equal(featureSetupPath(zone, row()), '/occupancy/zone-setup?cam=m1');
+});
+
+test('a setup link falls back to the bare page rather than a broken one', () => {
+  const f = cameraFeatures(row({ ai: { enabled: true } }));
+  const gate = f.find((x) => x.key === 'head_count');
+  assert.equal(featureSetupPath(gate, {}), '/occupancy/zone-setup');
+  assert.equal(featureSetupPath(gate, undefined), '/occupancy/zone-setup');
+  assert.equal(featureSetupPath({}, row()), '');
+});
+
+test('a monitorId with URL characters is encoded', () => {
+  const f = cameraFeatures(row({ ai: { enabled: true } }));
+  const gate = f.find((x) => x.key === 'head_count');
+  assert.equal(
+    featureSetupPath(gate, { monitorId: 'cam 1&x=2' }),
+    '/occupancy/zone-setup?gate=cam%201%26x%3D2',
+  );
 });
 
 test('setup path selects the camera', () => {

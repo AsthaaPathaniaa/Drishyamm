@@ -62,12 +62,12 @@ export const AI_FEATURES = [
   // (PersonTracker.jsx, backed by personTracker.controller.js). Two screens
   // writing one flag is how the two drift apart. The flag itself is untouched
   // and still carried through every payload.
-  { key: 'head_count', kind: 'setup', label: 'Head count / footfall', short: 'Count', note: 'Counts people crossing a gate line. Footfall counting is part of the face pipeline, so it needs face recognition on; the live head count in a room does not.', setupLabel: 'Draw a gate line', setupPath: '/occupancy/zone-setup' },
+  { key: 'head_count', kind: 'setup', label: 'Head count / footfall', short: 'Count', note: 'Counts people crossing a gate line. Footfall counting is part of the face pipeline, so it needs face recognition on; the live head count in a room does not.', setupLabel: 'Draw a gate line', setupPath: '/occupancy/zone-setup', setupParam: 'gate' },
   // Restricted zones are created on the counting-areas page, which is the only
   // writer of /restricted-zones. /ai-feed draws AI DETECTION areas — a
   // different thing on a near-identical canvas, which saves successfully and
   // arms nothing.
-  { key: 'restricted_zone', kind: 'setup', label: 'Restricted zone', short: 'Zone', note: 'Alerts when someone enters an area you draw.', setupLabel: 'Draw a zone', setupPath: '/occupancy/zone-setup' },
+  { key: 'restricted_zone', kind: 'setup', label: 'Restricted zone', short: 'Zone', note: 'Alerts when someone enters an area you draw.', setupLabel: 'Draw a zone', setupPath: '/occupancy/zone-setup', setupParam: 'cam' },
   // A CHILD of the row above, and labelled for what it DOES rather than for
   // the service that implements it: an operator choosing this is deciding
   // whether a hooded or turned-away person sets the zone off, not whether to
@@ -256,6 +256,28 @@ export function cameraFeatures(row) {
 }
 
 /** The features worth showing a control for on this camera, in display order. */
+/**
+ * Where a setup row sends the operator, ON THE CAMERA THEY CAME FROM.
+ *
+ * Both rows used to link to a bare `/occupancy/zone-setup`, which opens on
+ * whichever camera that page picks by itself -- so an operator who clicked
+ * "Draw a gate line" from a camera's panel arrived somewhere else and had to
+ * find their camera again. The page has understood deep links all along
+ * (ZoneSetup.jsx reads `gate`, `cam`, `zone` and `group`); the panel simply
+ * never used them.
+ *
+ * `gate` opens the gate-line editor on that camera directly; `cam` selects it
+ * in the zone rail, which is the right landing place for drawing a zone
+ * because a zone can span cameras and the rail is where that is decided.
+ * Both take the monitorId, which is what ZoneSetup matches on.
+ */
+export function featureSetupPath(feature, row) {
+  const base = feature?.setupPath || '';
+  const monitorId = row?.monitorId;
+  if (!base || !feature?.setupParam || !monitorId) return base;
+  return `${base}?${feature.setupParam}=${encodeURIComponent(monitorId)}`;
+}
+
 export function visibleFeatures(row) {
   return cameraFeatures(row).filter((f) => !f.hidden);
 }

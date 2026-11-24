@@ -6,6 +6,7 @@ import {
   buildDisablePayload,
   buildEnablePayload,
   cameraFeatures,
+  featureSetupPath,
   lifecycleCopy,
   visibleFeatures,
 } from '@/core/services/aiCamera';
@@ -185,7 +186,7 @@ function SetupDrawer({ camera, onClose, onSaved }) {
               <FeatureLine key={f.key} feature={f}>
                 {drawn[f.key] ? (
                   <span className="flex shrink-0 items-center gap-3">
-                    <Link to={f.setupPath} className="inline-flex items-center gap-1 text-small font-medium text-success-ink hover:underline">
+                    <Link to={featureSetupPath(f, camera)} className="inline-flex items-center gap-1 text-small font-medium text-success-ink hover:underline">
                       <Check className="h-3.5 w-3.5" /> Ready
                     </Link>
                     {f.key === 'head_count' ? (
@@ -197,7 +198,7 @@ function SetupDrawer({ camera, onClose, onSaved }) {
                     ) : null}
                   </span>
                 ) : (
-                  <Link to={f.setupPath} className="text-small font-medium text-brand-ink hover:underline">
+                  <Link to={featureSetupPath(f, camera)} className="text-small font-medium text-brand-ink hover:underline">
                     {f.setupLabel.replace(/^Draw a /, 'Draw ')}
                   </Link>
                 )}
