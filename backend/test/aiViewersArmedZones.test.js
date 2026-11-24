@@ -57,6 +57,20 @@ describe('armedMonitorIds', () => {
     expect(arg.attributes).toEqual(['monitorId']);
   });
 
+  test('a camera whose only zone is DISABLED is absent', async () => {
+    // Filtered by the query, so the mock has to honour `where` or this test
+    // would pass against an implementation that asked for every row. A
+    // disabled zone is kept for a re-enable rather than deleted, so "every
+    // zone" would keep boxes flowing for zones an operator switched off.
+    const all = [
+      { monitorId: 'armed-cam', enabled: true },
+      { monitorId: 'disabled-cam', enabled: false },
+    ];
+    RestrictedZone.findAll.mockImplementation(({ where }) =>
+      Promise.resolve(all.filter((z) => z.enabled === where.enabled)));
+    expect(await armedMonitorIds()).toEqual(['armed-cam']);
+  });
+
   test('de-duplicates a camera carrying several zones', async () => {
     RestrictedZone.findAll.mockResolvedValue(rows('cam-a', 'cam-a', 'cam-b'));
     expect((await armedMonitorIds()).sort()).toEqual(['cam-a', 'cam-b']);
@@ -139,5 +153,51 @@ describe('overlayNeededMonitorIds', () => {
     expect(await overlayNeededMonitorIds()).toEqual(['zone-cam']);
     expect(await overlayNeededMonitorIds(null)).toEqual(['zone-cam']);
     expect(await overlayNeededMonitorIds(['', null, 'ok'])).toEqual(['ok', 'zone-cam']);
+  });
+});
+
+/**
+ * The endpoint itself, not just the function behind it.
+ *
+ * The AI forwarder reads `monitorIds` off this response; a changed shape
+ * breaks every camera's overlay silently, so the contract is pinned here
+ * rather than left to the two lines in the route. The handler is pulled out
+ * of the Express router by path, which is as close to an HTTP test as this
+ * suite gets -- supertest is not a dependency.
+ */
+describe('GET /api/internal/ai/viewers', () => {
+  const loadHandler = () => {
+    let handler;
+    jest.isolateModules(() => {
+      jest.doMock('../src/middleware/serviceAuth', () => (_req, _res, next) => next());
+      jest.doMock('../src/services/ws.service', () => ({ getWatchedMonitors: () => ['watched-cam'] }));
+      const router = require('../src/routes/internal.routes');
+      const layer = router.stack.find((l) => l.route && l.route.path === '/ai/viewers');
+      expect(layer).toBeDefined();
+      handler = layer.route.stack[layer.route.stack.length - 1].handle;
+    });
+    return handler;
+  };
+
+  // asyncHandler does not return its promise, so awaiting the handler resolves
+  // before the route's body has run. Wait for the response instead.
+  const call = (handler) => new Promise((resolve, reject) => {
+    const res = { json: (b) => { resolve(b); return res; }, status: () => res };
+    handler({}, res, (err) => reject(err || new Error('next() was called')));
+  });
+
+  test('returns { ok, monitorIds } with the union, shape unchanged', async () => {
+    RestrictedZone.findAll.mockResolvedValue(rows('zone-cam'));
+    const body = await call(loadHandler());
+    expect(Object.keys(body).sort()).toEqual(['monitorIds', 'ok']);
+    expect(body.ok).toBe(true);
+    expect(Array.isArray(body.monitorIds)).toBe(true);
+    expect(body.monitorIds.sort()).toEqual(['watched-cam', 'zone-cam']);
+  });
+
+  test('still answers with the browser set when the zone lookup fails', async () => {
+    RestrictedZone.findAll.mockRejectedValue(new Error('db down'));
+    const body = await call(loadHandler());
+    expect(body).toEqual({ ok: true, monitorIds: ['watched-cam'] });
   });
 });
