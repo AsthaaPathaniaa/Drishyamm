@@ -89,9 +89,16 @@ class TestOfflineCamerasAreNotDialled:
 
 
 class TestSelection:
-    def test_disabled_cameras_are_skipped(self):
-        cams = relay(3) + [cam("off", "rtsp://stream-service:8554/cam_off", enabled=False)]
-        assert len(_to_streams(cams, prefer_sub=False, max_streams=32, max_per_host=4)) == 3
+    def test_eligibility_is_the_backends_call(self):
+        """The backend's /cameras/headcount list is already filtered: feature flag,
+        the camera's own AI switch and the owner's plan (aiFeatureCameras.service.js,
+        tested in backend/test/aiFeatureCameras.test.js). This service no longer
+        second-guesses it on the flag alone, so a listed camera is started even if
+        its `headcount.enabled` is stale -- the `headcount` block is only read here
+        for the counting zones."""
+        cams = relay(3) + [cam("stale", "rtsp://stream-service:8554/cam_stale", enabled=False)]
+        got = _to_streams(cams, prefer_sub=False, max_streams=32, max_per_host=4)
+        assert [s.id for s in got] == ["c0", "c1", "c2", "stale"]
 
     def test_camera_without_a_url_is_skipped(self):
         cams = relay(2) + [{"name": "x", "monitorId": "x",
