@@ -22,9 +22,32 @@ let _again = false;          // a reconcile was asked for while one was running
 let _eventTimer = null;
 const _paused = new Set();   // monitorIds we stopped for playback (for logging)
 
+/**
+ * The MASTER switch: is this camera used by AI at all?
+ *
+ * Every AI feature is gated on this -- face recognition, head count, activity
+ * monitoring and zone-guard. It is deliberately NOT the face-recognition test;
+ * see faceRecognitionOn below.
+ */
 function isAiEnabled(camera) {
   const ai = camera.settings?.ai || {};
   return ai.enabled === true && ai.mode !== 'off';
+}
+
+/**
+ * Is FACE RECOGNITION wanted on this camera?
+ *
+ * One feature under the master, alongside head count and the rest. ABSENT MEANS
+ * ON: every camera created before this flag existed carries no key and must go
+ * on recognising faces exactly as it did, with no migration.
+ *
+ * Switching it off while the master stays on is the anonymous-counting case --
+ * heads are counted, no face is matched. Before the split that was impossible,
+ * because the only way to stop the face pipeline was to switch the master off,
+ * which stopped the counting with it.
+ */
+function faceRecognitionOn(camera) {
+  return (camera.settings?.ai || {}).faceRecognition !== false;
 }
 
 async function getRuntime() {
@@ -77,11 +100,31 @@ async function reconcile({ stopUnselected = true } = {}) {
     let stopped = 0;
 
     for (const camera of cameras) {
-      // Detection runs only when the per-camera AI flag is on AND the owner's
-      // plan includes AI. A downgrade to Basic drops the owner from aiUserIds,
-      // so this loop /stop-camera's their orchestrators within one reconcile
-      // even if settings.ai.enabled is still stale-true.
-      const wanted = isAiEnabled(camera) && aiUserIds.has(camera.userId);
+      // FOUR conditions now, from two independent changes that compose.
+      //
+      // `ai.enabled` is the MASTER switch -- "use this camera for AI at all" --
+      // and every AI feature is gated on it. But this loop starts one specific
+      // thing: the FACE pipeline. While face AI was the only consumer of the
+      // master, the two meant the same and one flag served both. It no longer
+      // can: with the master governing head count, zones and activity too,
+      // reading it here as "run face recognition" would make it impossible to
+      // count people without recognising them -- which is exactly what
+      // "Anonymous counting only" promises the operator. So face recognition
+      // has its own flag; absent means ON, so every camera that existed before
+      // the split behaves exactly as it did.
+      //
+      // A downgrade to Basic drops the owner from aiUserIds, so this loop
+      // /stop-camera's their orchestrators within one reconcile even if
+      // settings.ai.enabled is still stale-true.
+      //
+      // `wanted` is the standing intent; `yielding` is the momentary override
+      // while footage is replayed from this camera's recorder. Keeping them
+      // apart is what lets detection RESUME afterwards: a camera that is
+      // merely yielding is still wanted, so the next reconcile restarts it,
+      // whereas one whose flag is off must stay stopped.
+      const wanted = isAiEnabled(camera)
+        && faceRecognitionOn(camera)
+        && aiUserIds.has(camera.userId);
       const yielding = wanted && yieldsToPlayback(camera);
       const enabled = wanted && !yielding;
       const isRunning = runtime[camera.monitorId]?.running === true;
@@ -115,6 +158,25 @@ async function reconcile({ stopUnselected = true } = {}) {
 
     if (started || stopped) {
       logger.info('aiLifecycle: reconciled camera runtime', { started, stopped });
+    }
+
+    // The activity monitor, re-stated on the same tick and for the same reason.
+    // It is the one AI service that had no loop: its camera set was pushed once
+    // per toggle, a failure was a log line, and nothing ever re-stated it -- so
+    // a toggle made while it was restarting was lost for good, a backend
+    // restart never re-sent the set, and changing a camera's AI switch or
+    // losing an AI plan never reached it at all.
+    //
+    // Loaded here rather than at module scope: activityPush depends on the
+    // feature selectors, which depend on this module for isAiEnabled, and a
+    // top-level require would close that circle.
+    try {
+      // eslint-disable-next-line global-require
+      await require('./activityPush.service').pushActivityCameras();
+    } catch (err) {
+      // pushActivityCameras does not throw; this is belt and braces so an
+      // unexpected failure can never stop the face reconcile that precedes it.
+      logger.warn('aiLifecycle: activity reconcile failed', { error: err.message });
     }
   } finally {
     _running = false;
@@ -160,5 +222,13 @@ module.exports = {
   reconcile,
   start,
   stop,
+  // Exported so every service that has to ask "is this camera's AI on?" asks
+  // it the same way. The zone-guard selector (internal.routes.js) is the first
+  // other caller; restating the test there would let the two drift, and a
+  // camera the operator switched off being watched anyway is the whole defect
+  // that selector exists to fix.
+  isAiEnabled,
+  // The face-recognition half of what `ai.enabled` used to mean on its own.
+  faceRecognitionOn,
   _internals: { yieldsToPlayback, paused: _paused },
 };

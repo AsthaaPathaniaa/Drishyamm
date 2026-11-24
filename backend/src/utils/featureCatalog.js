@@ -163,7 +163,14 @@ const AI_LICENCES = Object.freeze([
   {
     key: 'face', label: 'Face recognition & tracking',
     features: FACE_ENGINE_KEYS,
-    isOn: (c) => c.settings?.ai?.enabled === true && c.settings?.ai?.mode !== 'off',
+    // The MASTER switch AND the face flag. `ai.enabled` alone would count a
+    // camera that is AI-on for counting only, with face recognition
+    // deliberately off, as holding a face licence it never uses.
+    // `faceRecognition` absent means on, so nothing changes for cameras saved
+    // before the flag existed.
+    isOn: (c) => c.settings?.ai?.enabled === true
+      && c.settings?.ai?.mode !== 'off'
+      && c.settings?.ai?.faceRecognition !== false,
   },
   {
     key: 'headcount', label: 'Head count',

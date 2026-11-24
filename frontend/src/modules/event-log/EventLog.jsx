@@ -664,13 +664,14 @@ export default function EventLog({ mode = null }) {
       start: new Date(start).toISOString(),
       end: new Date(end).toISOString(),
       name: `breach_${camera.replace(/[^\w-]+/g, '_')}_${stamp}`,
+      kind: 'breach',      // the backend caps a breach clip at this padded window
     });
     playbackService.download(url, end - start, (message) => setNote({
       tone: 'danger', text: `Clip export failed: ${message}`,
     }));
     setNote({
       tone: 'info',
-      text: `Exporting the ${Math.round((end - start) / 1000)} s clip from ${camera} as MP4. Your browser saves it as it arrives; the NVR replays in real time, so it takes about as long as the clip.`,
+      text: `Exporting the ${Math.round((end - start) / 1000)} s clip from ${camera} as MP4. The NVR replays in real time, so the download starts in about ${Math.round((end - start) / 1000)} s, once the clip is complete and can be scrubbed.`,
     });
   }, []);
 

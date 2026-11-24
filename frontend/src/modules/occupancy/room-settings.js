@@ -36,6 +36,7 @@
  */
 import { aiService } from '@/core/services/ai';
 import { FULL_PCT, PROFILE_BY_ID, ROOM_PROFILES } from './occupancy-data';
+import { cameraFailures, partialNote } from './room-messages';
 import { boundaryOn, cameraPayload, normalizeZone, normalizeZones } from './zone-model';
 import { defaultAccess } from './zone-setup/access-data';
 import { deleteZone, listZones, putZone } from './zone-setup/restricted-zones-api';
@@ -194,12 +195,22 @@ export async function syncRooms() {
  * send, when nothing is left on the camera, or when the operator cleared a
  * shape on purpose (`clear`). Otherwise it is left off: an empty list also
  * means "the shape had not loaded yet", and must not wipe the camera's area.
+ *
+ * Returns the two failures SEPARATELY, because they are different events and
+ * only one of them is the camera's fault:
+ *
+ *   unknown  the registry has no row for this monitor, so there is no camera
+ *            id to write to and nothing was ever sent. The save silently did
+ *            not switch counting on there -- which is the one thing the
+ *            operator needs told, by name, since nothing on screen shows it.
+ *   failed   the write was sent and refused.
  */
 async function pushCameras(rooms, monitorIds, registry, { clear = [], enable = [] } = {}) {
   const failed = [];
+  const unknown = [];
   for (const m of monitorIds) {
     const cam = registry[m];
-    if (!cam?.id) { failed.push(m); continue; }
+    if (!cam?.id) { unknown.push(m); continue; }
     const { threshold, zones, zoneCount } = cameraPayload(rooms, m);
     // Every write carries `enabled`. A camera the saved zone is drawn on is
     // switched ON -- a zone on a camera that is not counting would never show
@@ -213,7 +224,7 @@ async function pushCameras(rooms, monitorIds, registry, { clear = [], enable = [
       failed.push(m);
     }
   }
-  return failed;
+  return { failed, unknown };
 }
 
 /** The single-camera registry older callers can still describe with two fields. */
@@ -231,7 +242,10 @@ function fallbackRegistry(monitorId, cameraId, enabled) {
  * `opts.registry` is monitorId -> camera row, covering every camera the zone
  * touches now or touched before this save. `opts.clearBoundary` says the
  * operator removed a shape on purpose, so an empty boundary goes out as "count
- * the whole view" rather than being left off.
+ * the whole view" rather than being left off. `opts.cameraName` turns a
+ * monitorId into the name the operator knows it by, so a camera this save
+ * could not reach can be named rather than counted -- pass the same resolver
+ * the page's own lists use (see ZoneSetup's `nameOf`).
  *
  * Returns `{ rooms, engineSaved, serverSaved, error }` — `error` is a sentence
  * naming which half did not land, not a stack trace.
@@ -249,16 +263,15 @@ export async function saveRoom(room, opts = {}) {
   // ── the cameras: what the detector counts and alarms on ─────────────────
   const registry = opts.registry || fallbackRegistry(zone.cameras[0], room.cameraId, opts.cameraEnabled);
   const touched = [...new Set([...zone.cameras, ...(prev?.cameras || [])])];
-  const failed = await pushCameras(next, touched, registry, {
+  const { failed, unknown } = await pushCameras(next, touched, registry, {
     clear: opts.clearBoundary ? zone.cameras : [],
     enable: zone.cameras,
   });
-  const engineSaved = failed.length === 0;
-  if (failed.length) {
-    failures.push(failed.length === touched.length
-      ? 'the boundary and capacity could not be pushed to the camera'
-      : `${failed.length} of ${touched.length} cameras could not be updated`);
-  }
+  // A camera with no registry row was never asked at all, so it is named
+  // rather than counted -- see room-messages.js for why that distinction is
+  // the whole message.
+  const engineSaved = failed.length === 0 && unknown.length === 0;
+  failures.push(...cameraFailures({ unknown, failed, touched, cameraName: opts.cameraName }));
 
   // ── the server: what the intrusion pipeline enforces ────────────────────
   // It holds one camera per zone, so it is given the primary and the shape on
@@ -284,7 +297,7 @@ export async function saveRoom(room, opts = {}) {
     rooms: final,
     engineSaved,
     serverSaved,
-    error: failures.length ? `Saved on this browser, but ${failures.join('; and ')}.` : null,
+    error: partialNote('Saved on this browser, but', failures),
   };
 }
 
@@ -311,12 +324,12 @@ export async function removeRoom(id, opts = {}) {
 
   const cameras = zone?.cameras || [];
   const registry = opts.registry || fallbackRegistry(cameras[0], opts.cameraId, opts.cameraEnabled);
-  const failed = await pushCameras(rooms, cameras, registry);
-  if (failed.length) failures.push('a camera still has the old boundary and limit');
+  const { failed, unknown } = await pushCameras(rooms, cameras, registry);
+  if (failed.length || unknown.length) failures.push('a camera still has the old boundary and limit');
 
   return {
     rooms,
-    error: failures.length ? `Deleted here, but ${failures.join('; and ')}.` : null,
+    error: partialNote('Deleted here, but', failures),
   };
 }
 

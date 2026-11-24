@@ -101,6 +101,13 @@ class YOLOPersonDetector:
     state we read on either side of session.run isn't, and the GPU is faster
     served sequentially anyway."""
 
+    # detect() returns 5-tuples (x1, y1, x2, y2, score): a detector, not a
+    # tracker, so nothing here identifies the same person across frames.
+    # services/footfall_source.py reads this to refuse these boxes as a
+    # footfall source -- a crossing counter fed id-less boxes counts zero.
+    # Flip to True only once detect() emits a track_id as a sixth field.
+    emits_track_ids = False
+
     def __init__(
         self,
         model_path: str | Path,

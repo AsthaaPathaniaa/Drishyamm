@@ -33,7 +33,8 @@ boxes are an intrusion. Nothing in the detector writes an alert.
                                                                                              │
  ┌───────────── zone-sim container (image drishyam/head-count, gpus: all) ─────────────────┐ │
  │ main(): poll GET /api/internal/cameras every 60 s → 1 thread per monitorId              │<┘
- │ camera_worker(): cv2 decode EVERY frame → YOLOv8n.track @ 4 fps → boxes                  │
+ │ camera_worker(): cv2 grab EVERY frame, decode only the inferred ones →                   │
+ │                 YOLOv8n.predict @ 4 fps on ONE shared model (batched) → boxes            │
  │                 └─ POST /api/internal/ai/overlay  (only when ≥1 box)                     │
  └──────────────────────────────────────────────────────────────────────────────────────────┘
                                    │ HTTP JSON, X-Service-Token
@@ -49,8 +50,27 @@ boxes are an intrusion. Nothing in the detector writes an alert.
 Compose (`docker-compose.drisyam-original.yml`, service `zone-sim`, container
 `drisyam-original-zone-sim`): entrypoint `python -u /srv/zone-sim/zone_sim.py`, image reused from
 head-count because it already has ultralytics + OpenCV; weights mounted at `/models/yolov8n.pt`. The POC
-compose runs the same script the same way. Which cameras get covered is set only by `ZONE_SIM_MONITORS`
-(compose default = the local demo camera; set a comma list of monitorIds or `all`).
+compose runs the same script the same way.
+
+**Which cameras get covered is decided by the PRODUCT, not by this service.** `GET
+/api/internal/zone-guard/cameras` answers it, on four conditions (see
+`backend/src/services/aiFeatureCameras.service.js`):
+
+1. the camera's own AI switch is on;
+2. it has at least one **enabled restricted zone**;
+3. the owner's plan includes AI;
+4. **`settings.ai.zoneBodyDetection` is on for that camera** — the per-camera switch for this
+   service, surfaced in the UI as "Catch people with no visible face". **Off by default.**
+
+Condition 4 exists because the right answer differs per *zone*, not per deployment: a strict lockout
+wants our nameless body boxes; an allow-list zone is *broken* by them (they carry no name, so an
+allow-list excuses nobody); and a camera with face recognition off needs them or its zone never fires
+at all. So an operator opts a camera in, rather than the deployment opting everyone in.
+
+`ZONE_SIM_MONITORS` survives only as a development **narrowing** filter over that answer (compose
+default = the local demo camera; a comma list of monitorIds, or `all` for no filter). There is no value
+of it, and no `ZONE_SIM_SOURCES` override, that can add a camera the backend did not list —
+`test_camera_selection.py` pins that.
 
 ---
 
@@ -58,14 +78,14 @@ compose runs the same script the same way. Which cameras get covered is set only
 
 | # | Stage | Where | What happens (real values) |
 |---|---|---|---|
-| 1 | Camera discovery | `zone_sim.py:main` → `fetch_cameras` | `GET {BACKEND_URL}/api/internal/cameras` every `ZONE_SIM_REGISTRY_REFRESH`=60 s. Backend `internal.routes.js` returns `{monitorId,userId,name,rtsp,rtspSub}`; `rtsp` = `drishyamStreaming.getRtspEgressUrl(monitorId,false)` (main stream). `ZONE_SIM_SOURCES` can override the URL per monitorId. Threads are only added, never removed. |
+| 1 | Camera discovery | `zone_sim.py:main` → `fetch_cameras` | `GET {BACKEND_URL}/api/internal/cameras` every `ZONE_SIM_REGISTRY_REFRESH`=60 s. Backend `internal.routes.js` returns `{monitorId,userId,name,rtsp,rtspSub}`; `pick_source` takes **`rtspSub` by preference** and falls back to `rtsp` (main) for a camera with no sub-stream, logging which it opened. `ZONE_SIM_SOURCES` can override the URL per monitorId. A camera is listed only while one of its zones is **armed now** (backend `zoneArming.js`), so the list moves with the clock as well as the database; threads are started **and stopped** to match it. |
 | 2 | Source open | `open_capture` | `cv2.VideoCapture(url, cv2.CAP_FFMPEG)`, `CAP_PROP_BUFFERSIZE=1`. Compose sets `OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp` (H.265 over UDP corrupts). Reconnect backoff 1 s doubling to 30 s. |
-| 3 | Decode | `camera_worker` loop, `cap.read()` | FFmpeg **software** decode inside OpenCV, every frame, on the worker thread. Output BGR uint8 H×W×3 at native resolution (1920×1080 in the tests). No NVDEC. |
+| 3 | Decode | `camera_worker` loop, `cap.grab()` + `cap.retrieve()` | FFmpeg **software** decode inside OpenCV, on the worker thread — but only for the frames actually inferred on. Every frame is still `grab()`bed (the decoder stays on the live edge and builds no backlog); at 25 fps and `ZONE_SIM_FPS`=4 that is 21 frames a second grabbed and not decoded. Output BGR uint8 H×W×3 at native resolution (1920×1080 in the tests). No NVDEC. |
 | 4 | Sampling | `camera_worker` | Paces the **model, not the decoder**: infer only when `monotonic() - last_post >= 1/ZONE_SIM_FPS` (= 0.25 s). The check runs once per decoded frame, so at 25 fps the real rate is 3.6 fps (C01). |
 | 5 | Pre-processing | Ultralytics `predict`/`track` internals | `LetterBox(imgsz=640)` with `auto=True` for a PyTorch model → minimum rectangular padding to stride 32: 1920×1080 → **640×384**, pad value 114. BGR→RGB, HWC→CHW, `/255.0`, float32. No mean/std. |
-| 6 | Model | `YOLO(MODEL_PATH)`, one instance **per camera thread** | **YOLOv8n** COCO (80 classes, `classes=[0]` = person). Checkpoint metadata (read from `yolov8n.pt`): 3,157,200 params, stored FP16, Ultralytics 8.0.0.dev0, 2022-12-30, trained `imgsz 640`, 500 epochs. Architecture: CSPDarknet backbone with C2f blocks, PAN-FPN neck, anchor-free decoupled head at strides 8/16/32. At 640×384 the head emits 5,040 candidates × (4 box + 80 class). Runtime: PyTorch eager, **FP32** (`half` not passed), device = `ZONE_SIM_DEVICE` or Ultralytics auto (cuda:0 when visible). |
+| 6 | Model | `YOLO(MODEL_PATH)`, **ONE instance for every camera** (`SharedDetector`); one **per camera thread** only when `ZONE_SIM_TRACK` is on, and the shared path refuses to be built for tracking. Frames waiting at the same moment go through as one `predict` call (`ZONE_SIM_MAX_BATCH`=8); none is ever held back to fill a batch | **YOLOv8n** COCO (80 classes, `classes=[0]` = person). Checkpoint metadata (read from `yolov8n.pt`): 3,157,200 params, stored FP16, Ultralytics 8.0.0.dev0, 2022-12-30, trained `imgsz 640`, 500 epochs. Architecture: CSPDarknet backbone with C2f blocks, PAN-FPN neck, anchor-free decoupled head at strides 8/16/32. At 640×384 the head emits 5,040 candidates × (4 box + 80 class). Runtime: PyTorch eager, **FP32** (`half` not passed), device = `ZONE_SIM_DEVICE` or Ultralytics auto (cuda:0 when visible). |
 | 7 | Post-processing | Ultralytics NMS | `conf=ZONE_SIM_CONF`=0.35, IoU = Ultralytics default 0.7 (not set in code), `classes=[0]`, `max_det` 300; boxes rescaled to the original frame. |
-| 8 | Tracking | `model.track(persist=True)` when `ZONE_SIM_TRACK`=true (default) | Ultralytics default tracker = **BoT-SORT** (`botsort.yaml`; exact thresholds depend on the installed Ultralytics version). The tracker's output **replaces** the detections, so boxes that are not yet confirmed tracks are dropped. If `lap` is missing the worker falls back to `predict()` for its whole life. The engine ignores `trackId`; only the browser overlay uses it. |
+| 8 | Tracking | `model.track(persist=True)` when `ZONE_SIM_TRACK` is on — **off by default now**, as §7 recommends (it dropped 56 % of detected people), and it is the only reason a model per camera was ever needed | Ultralytics default tracker = **BoT-SORT** (`botsort.yaml`; exact thresholds depend on the installed Ultralytics version). The tracker's output **replaces** the detections, so boxes that are not yet confirmed tracks are dropped. If `lap` is missing the worker falls back to `predict()` for its whole life. The engine ignores `trackId`; only the browser overlay uses it. |
 | 9 | Failure guard | `camera_worker` | 10 consecutive inference exceptions (`ZONE_SIM_INFER_FAIL_LIMIT`) → rebuild the model on CPU ("a watched zone beats an unwatched one"). |
 | 10 | Serialise | `camera_worker` | Per box `{"bbox":[x1,y1,x2,y2] (0.1 px), "conf": 3 dp, "trackId": int?}`. **No `name`** on purpose (an unnamed body is what the engine treats as an intruder). **No `snap`** (no crop). |
 | 11 | Output | `post_overlay` | Only if `boxes` is non-empty: `POST /api/internal/ai/overlay` `{userId, monitorId, ts(ms), frameW, frameH, boxes}`, header `X-Service-Token`, timeout 6 s, **synchronous** in the worker loop. Cadence ≈ 4 Hz per camera while anyone is in view; ~11 POST/s for the office cameras (`FACE_SYSTEM_DESIGN.md`). |
@@ -95,7 +115,9 @@ End-to-end latency to an alert ≈ RTSP/decoder lag + dwell + ≤ 1 sample (0.25
 | Device | auto (CUDA if visible) / CPU fallback after 10 failures | `ZONE_SIM_DEVICE`, `ZONE_SIM_INFER_FAIL_LIMIT` |
 | Confidence | 0.35 | `ZONE_SIM_CONF` |
 | NMS IoU | 0.7 | Ultralytics default (not exposed) |
-| Tracker | BoT-SORT default config, `persist=True` | `ZONE_SIM_TRACK` |
+| Tracker | off by default; BoT-SORT default config, `persist=True` when on | `ZONE_SIM_TRACK` |
+| Model instances | 1 for the whole service (per camera when tracking) | `ZONE_SIM_TRACK`, `ZONE_SIM_MAX_BATCH` |
+| Stream | sub-stream preferred, main as fallback | `ZONE_SIM_STREAM` |
 | Analysis rate | 4 fps target per camera | `ZONE_SIM_FPS` |
 
 Other base checkpoints: the harness used Ultralytics **yolo11n/s/m/l/x** COCO checkpoints
@@ -152,14 +174,17 @@ need `restricted_zone`). The controller checks only `monitorId` and `name`.
 |---|---|---|
 | `BACKEND_URL` | `http://smart-cam-backend:5000` | Registry + overlay target |
 | `SERVICE_TOKEN` | required | Internal API auth; process exits if unset |
-| `ZONE_SIM_MONITORS` | code `all`; compose = demo camera | Which monitorIds get a worker |
+| `ZONE_SIM_MONITORS` | code `all`; compose = demo camera | NARROWS the backend's camera list; never widens it |
 | `ZONE_SIM_SOURCES` | empty (compose: demo publisher path) | `monitorId=rtsp://...` URL overrides |
 | `ZONE_SIM_MODEL` | `/models/yolov8n.pt` | Weights path (any Ultralytics detect model) |
 | `ZONE_SIM_FPS` | 4 | Analysed frames/s per camera |
 | `ZONE_SIM_CONF` | 0.35 | Person confidence floor |
 | `ZONE_SIM_IMGSZ` | 640 | Letterbox size |
 | `ZONE_SIM_DEVICE` | auto | `cuda:0` / `cpu` |
-| `ZONE_SIM_TRACK` | true | BoT-SORT on/off (see §7: on drops people) |
+| `ZONE_SIM_TRACK` | **false** | BoT-SORT on/off (see §7: on drops people). On, each camera gets its own model instance again |
+| `ZONE_SIM_STREAM` | `sub` | Which stream to prefer; the other is the fallback |
+| `ZONE_SIM_MAX_BATCH` | 8 | Most frames in one shared inference call |
+| `ZONE_SIM_RETRIEVE_FAIL_LIMIT` | 15 | Grabbed-but-undecodable frames before a reconnect |
 | `ZONE_SIM_REGISTRY_REFRESH` | 60 s | Camera registry poll |
 | `ZONE_SIM_INFER_FAIL_LIMIT` | 10 | Failures before CPU fallback |
 | `ZONE_SIM_LOG` | INFO | Log level |

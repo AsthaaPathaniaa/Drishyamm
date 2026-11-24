@@ -246,6 +246,11 @@ export function useOccupancy({ live = true } = {}) {
     // or not -- and a way to re-read them after a gate is saved.
     gates,
     refreshGates: pollFootfall,
+    // Re-read the AI camera registry. Needed by anything that CHANGES a
+    // camera's AI settings and then shows what they are -- the zone editor's
+    // inline body-detection switch -- so the screen stops saying a detector is
+    // off the moment it is on.
+    refreshRegistry: pollRegistry,
     refresh: refreshAll,
   };
 }
