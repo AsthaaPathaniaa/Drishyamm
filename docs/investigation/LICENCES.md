@@ -16,6 +16,7 @@ Rule 10 of the plan: check the commercial licence of every model weight and data
 | `models/trained/crowd-people-yolo26m/...best.pt` | Candidate people model | AGPL-3.0 (Ultralytics 8.4.x, YOLO26) | ⚠️ | YOLO26 outputs NMS-free boxes, so it needs a parser change before use. |
 | `google/siglip-base-patch16-224` | I-1 image fingerprint + I-2 text search (candidate) | **Apache-2.0** | ✅ | Preferred candidate. SigLIP 2 checkpoints are also Apache-2.0. |
 | `laion/CLIP-ViT-B-32-laion2B-s34B-b79K` | I-1 / I-2 (candidate for comparison) | MIT (weights), LAION-2B training data | ❓ | The weights' licence is permissive. The training-data provenance (LAION) is a reputational and legal question for a forensic product: prefer SigLIP unless it clearly wins. |
+| `openai/whisper-small` (rev 973afd24) | Phase 4 Audio Search (speech to text, English + Hindi) | **MIT** | ✅ | Exported to ONNX by `investigate/tools/export_whisper.py`; files in `data/ai-models/whisper/` (not in git). |
 | OpenAI CLIP | — | MIT, but its model card says deployed use (and surveillance specifically) is out of scope | ❌ Don't use | |
 | `osnet_x1_0_msmt17.onnx` | Body ReID (existing journey; I-2 grouping, I-3 seeds) | Code MIT (torchreid). Weights trained on **MSMT17**, a research-only dataset | ⚠️ | Already shipping in Drishyam. Retrain on our own labelled data, or confirm dataset terms. |
 | Pedestrian attribute datasets (PA-100K, PETA, RAP) | I-1 attribute heads | Research / non-commercial | ⚠️ | The plan already says: train attribute heads on our own labelled crops. |

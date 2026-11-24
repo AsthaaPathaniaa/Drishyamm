@@ -64,10 +64,15 @@ async function getRuntime() {
   }
 }
 
-async function postAiForm(path, monitorId) {
-  const body = new URLSearchParams({ monitor_id: monitorId });
+// The owner's org JWT, like ai.controller's reconcileAiRuntime: without it the
+// AI files the camera under its shared default tenant, and everything the
+// camera produces (sightings, journey points, the investigation index) is
+// invisible to that organisation's searches, which carry the org tenant.
+async function postAiForm(path, camera) {
+  const { aiAuthHeader } = require('../utils/aiTenant');
+  const body = new URLSearchParams({ monitor_id: camera.monitorId });
   const { data } = await axios.post(`${config.aiServiceUrl}${path}`, body, {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...aiAuthHeader({ id: camera.userId }) },
     timeout: 12000,
   });
   return data;
@@ -130,13 +135,13 @@ async function reconcile({ stopUnselected = true } = {}) {
       const isRunning = runtime[camera.monitorId]?.running === true;
       try {
         if (enabled && !isRunning) {
-          await postAiForm('/set-camera', camera.monitorId);
+          await postAiForm('/set-camera', camera);
           started += 1;
           if (_paused.delete(camera.monitorId)) {
             logger.info('aiLifecycle: playback ended, detection resumed', { monitorId: camera.monitorId });
           }
         } else if (!enabled && isRunning && (stopUnselected || yielding)) {
-          await postAiForm('/stop-camera', camera.monitorId);
+          await postAiForm('/stop-camera', camera);
           stopped += 1;
           if (yielding) {
             _paused.add(camera.monitorId);

@@ -12,6 +12,9 @@ const systemAlertsRoutes = require('./systemAlerts.routes');
 const occupancyRoutes = require('./occupancy.routes');
 const spaceRoutes = require('./space.routes');
 const personTrackerRoutes = require('./personTracker.routes');
+const investigateRoutes = require('./investigate.routes');
+const evidenceRoutes = require('./evidence.routes');
+const casesRoutes = require('./cases.routes');
 const turnRoutes = require('./turn.routes');
 const livekitRoutes = require('./livekit.routes');
 const siteRoutes = require('./site.routes');
@@ -52,6 +55,9 @@ router.use('/notifications', notificationRoutes);
 // → stitched video / PDF / map. Reverse-proxied; backend handles JWT
 // + injects X-Service-Token. See person-tracker/docs/DEPLOYMENT.md.
 router.use('/person-tracker', personTrackerRoutes);
+router.use('/investigate', investigateRoutes);
+router.use('/evidence', evidenceRoutes);
+router.use('/cases', casesRoutes);
 // TURN credentials (Phase 1.4) — coturn use-auth-secret REST scheme.
 // Returns { available: false } until TURN_URI + TURN_SHARED_SECRET are set.
 router.use('/turn', turnRoutes);

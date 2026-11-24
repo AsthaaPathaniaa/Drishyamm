@@ -43,9 +43,10 @@ from vms_face.infra.insightface_runtime import FaceObservation, FaceRuntime, Fac
 from vms_face.infra.minio_store import ObjectStore
 from vms_face.infra.recognizers import Recognizer
 from vms_face.infra.redis_bus import RedisBus
+from vms_face.investigate.indexer import CameraIndexer, get_index_writer
 from vms_face.investigate.measure import TrackMeter
 from vms_face.pipeline.ingest import Frame, RTSPIngest, make_ingest
-from vms_face.infra.person_detector import get_person_detector
+from vms_face.infra.person_detector import detect_people_and_vehicles, get_person_detector
 from vms_face.services.detection_zones import bbox_zone, normalize_zones
 from vms_face.services.footfall import FootfallConfig, get_registry as get_footfall_registry
 from vms_face.services.footfall_source import FootfallSourceGate
@@ -199,6 +200,32 @@ class StreamOrchestrator:
         self._meter: TrackMeter | None = (
             TrackMeter(str(ctx.camera_id)) if settings.investigate_measure_enabled else None
         )
+        # I-1 search index: one record per person pass (off by default; needs
+        # person detection for the boxes). Summaries go to a process-wide
+        # writer queue, never awaited here.
+        self._indexer: CameraIndexer | None = (
+            CameraIndexer(
+                ctx.camera_id, ctx.tenant_id, get_index_writer().submit,
+                max_gap_s=float(settings.investigate_person_track_max_gap_s),
+                min_seconds=float(settings.investigate_min_track_seconds),
+                min_hits=int(settings.investigate_min_track_hits),
+                heartbeat_s=float(settings.investigate_heartbeat_s),
+                crop_max_h=int(settings.investigate_crop_max_h),
+            )
+            if settings.investigate_index_enabled and settings.pipeline_person_detection_enabled else None
+        )
+        # Vehicles (I-10): their own tracker and records, from the same YOLO pass.
+        self._vehicle_indexer: CameraIndexer | None = (
+            CameraIndexer(
+                ctx.camera_id, ctx.tenant_id, get_index_writer().submit, object_class="vehicle",
+                max_gap_s=float(settings.investigate_person_track_max_gap_s),
+                min_seconds=float(settings.investigate_min_track_seconds),
+                min_hits=int(settings.investigate_min_track_hits),
+                heartbeat_s=float(settings.investigate_heartbeat_s),
+                crop_max_h=int(settings.investigate_crop_max_h),
+            )
+            if self._indexer is not None and settings.investigate_vehicles_enabled else None
+        )
         self._publisher: StatePublisher = state_publisher or get_state_publisher()
         # Bounded fan-out for concurrent per-face processing within a single
         # frame; see _consume_loop. One semaphore per orchestrator (one per
@@ -274,6 +301,17 @@ class StreamOrchestrator:
         self._current_cadence = cadence
         return cadence
 
+    @staticmethod
+    def _index_faces(tracked) -> list[tuple[list[float], str, str | None]]:
+        """Face boxes for the investigation index: (bbox, face track id, latched person)."""
+        out = []
+        for tf in tracked or ():
+            try:
+                out.append((tf.observation.bbox.tolist(), tf.track.track_id, _latched_person(tf.track)))
+            except Exception:
+                continue
+        return out
+
     def stats(self) -> dict:
         """Lightweight snapshot of pipeline state for /debug/pipeline.
         No locks — readers see a slightly stale view, which is fine for a
@@ -342,6 +380,10 @@ class StreamOrchestrator:
                 "snapshot_top_k": self._ctx.snapshot_top_k,
             },
             "investigate_measure": self._meter.snapshot() if self._meter is not None else {"enabled": False},
+            "investigate_index": (
+                {"emitted": self._indexer.emitted, "junk": self._indexer.junk, "writer": get_index_writer().snapshot()}
+                if self._indexer is not None else {"enabled": False}
+            ),
         }
 
     def _identity_stats(self) -> dict:
@@ -456,6 +498,13 @@ class StreamOrchestrator:
                 self._meter.close()
             except Exception:
                 pass
+        if self._indexer is not None:
+            try:
+                self._indexer.flush()
+                if self._vehicle_indexer is not None:
+                    self._vehicle_indexer.flush()
+            except Exception as e:
+                log.warning("investigate index flush failed", camera=self._ctx.camera_code, err=str(e))
         try:
             await self._snapshot_pump.aclose()
         except Exception as e:
@@ -603,9 +652,16 @@ class StreamOrchestrator:
                 detector = get_person_detector()
                 if detector is not None:
                     try:
-                        persons = await loop.run_in_executor(
-                            get_gpu_pool(), detector.detect, frame.bgr
-                        )
+                        vehicles = None
+                        if self._vehicle_indexer is not None:
+                            # One YOLO pass, people and vehicles both.
+                            persons, vehicles = await loop.run_in_executor(
+                                get_gpu_pool(), detect_people_and_vehicles, detector, frame.bgr
+                            )
+                        else:
+                            persons = await loop.run_in_executor(
+                                get_gpu_pool(), detector.detect, frame.bgr
+                            )
                         self._last_person_count = len(persons)
                         person_boxes_this_frame = persons
                         if self._meter is not None:
@@ -613,6 +669,13 @@ class StreamOrchestrator:
                                 self._meter.person_step(persons)
                             except Exception as e:
                                 log.warning("investigate meter failed", camera=self._ctx.camera_code, err=str(e))
+                        if self._indexer is not None:
+                            try:
+                                self._indexer.step(frame.bgr, persons, self._index_faces(tracked))
+                                if self._vehicle_indexer is not None and vehicles is not None:
+                                    self._vehicle_indexer.step(frame.bgr, vehicles)
+                            except Exception as e:
+                                log.warning("investigate index failed", camera=self._ctx.camera_code, err=str(e))
                     except Exception as e:
                         log.warning("person detect failed", camera=self._ctx.camera_code, err=str(e))
                     self._person_last_run_frame = self._frame_count
@@ -1338,6 +1401,13 @@ class StreamOrchestrator:
             ).inc()
 
 # ── module-level helpers ─────────────────────────────────────────────────
+
+
+def _latched_person(track) -> str | None:
+    latch = getattr(track, "identity", None)
+    if latch is not None and latch.state is LatchState.LATCHED and latch.person_id:
+        return str(latch.person_id)
+    return None
 
 
 def _snapshot_key(tenant_id, camera_id, track_id: str) -> str:

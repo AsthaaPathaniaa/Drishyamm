@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import Hls from 'hls.js';
 import {
   AlertTriangle, ArrowRight, Bookmark, Camera as CameraIcon, CalendarDays, Check, ChevronDown, CirclePlay,
-  Clock, Loader2, Maximize, Pause, Play, RotateCcw, RotateCw, Video, Volume2, VolumeX,
+  Clock, Loader2, Maximize, Pause, Play, RotateCcw, RotateCw, Video, Volume2, VolumeX, ShieldCheck, Footprints, FolderPlus, FastForward, Clapperboard, AudioLines,
 } from 'lucide-react';
 import { cn } from '@/core/lib/utils';
 import TimeField from '@/core/ui/TimeField';
@@ -19,6 +19,17 @@ import CameraPicker from '@/core/pages/playback/CameraPicker';
 import PlaybackTimeline from '@/core/pages/playback/PlaybackTimeline';
 import EventsPanel from '@/core/pages/playback/EventsPanel';
 import ClipExport from '@/core/pages/playback/ClipExport';
+import EvidenceExportDialog from '@/modules/investigation/EvidenceExportDialog';
+import AddToCaseDialog from '@/modules/investigation/AddToCaseDialog';
+import SynopsisDialog from '@/modules/investigation/SynopsisDialog';
+import { speechService } from '@/core/services/investigate';
+import { itemFrom } from '@/modules/investigation/case-model';
+import { journeyService } from '@/core/services/investigate';
+import { clickToGrid } from '@/modules/investigation/journey-model';
+import { shades, skimTarget, skimTotals, toRanges } from '@/modules/investigation/skim-model';
+import api from '@/core/services/api';
+import { useAuthStore } from '@/core/store/authStore';
+import { makeEntitlement } from '@/core/nav/entitlements';
 import {
   DAY, EVENT_CATEGORIES, MINUTE, PRESETS, PREROLL_MS, SESSION_MAX_MS, atTime, binToMarker, cameraState, clamp, clipAround,
   dayEnd, dayKey, dayStart, fmtClock, fmtDate, fmtDuration, iso, linkWindow, loadBookmarks, loadThumbs,
@@ -192,6 +203,18 @@ export default function NvrPlayback() {
   const [hidden, setHidden] = useState(() => new Set());
   const [exportRange, setExportRange] = useState(() => clipAround(win.start + 45_000));
   const [exportNotice, setExportNotice] = useState(null);
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const entitlement = makeEntitlement(useAuthStore((st) => st.user));
+  const canEvidence = entitlement.has('evidence_export');
+  const canCase = entitlement.has('investigate_cases');
+  const canAudio = entitlement.has('investigate_audio');
+  const [casing, setCasing] = useState(false);
+  // Click to track (investigation I-3): while on, a click on the picture finds
+  // the person there (from the search index) and opens where they went.
+  const canTrack = entitlement.has('investigate_search');
+  const navigate = useNavigate();
+  const [trackMode, setTrackMode] = useState(false);
+  const [trackNote, setTrackNote] = useState(null);
 
   useEffect(() => { winRef.current = win; }, [win]);
   useEffect(() => { monitorRef.current = monitorId; }, [monitorId]);
@@ -264,6 +287,33 @@ export default function NvrPlayback() {
     refetchInterval: span.end > now ? 60_000 : false,
     retry: (n, err) => err?.response?.status !== 403 && n < 2,
   });
+  // Smart Skim (investigation I-6): people on screen along the timeline, from
+  // the search index, and the busy stretches "Play only activity" plays.
+  const activityQuery = useQuery({
+    queryKey: ['playback', 'activity', monitorId, span.start, span.end],
+    enabled: Boolean(monitorId) && canTrack,
+    queryFn: () => api.get('/investigate/activity', {
+      params: { monitorId, from: iso(span.start), to: iso(Math.min(span.end, now)), binS: Math.max(5, (span.end - span.start) / 1000 / 600) },
+    }).then((r) => r.data),
+    staleTime: 30_000,
+    refetchInterval: span.end > now ? 60_000 : false,
+    retry: false,
+  });
+  const activity = useMemo(() => {
+    const d = activityQuery.data;
+    if (!d?.bins?.length || !d.passes) return null;
+    return { since: Date.parse(d.since), binS: d.bin_s, bins: d.bins, shade: shades(d.bins), ranges: toRanges(d.segments) };
+  }, [activityQuery.data]);
+  const [skim, setSkim] = useState(false);
+  const [synopsisOpen, setSynopsisOpen] = useState(false);
+  const skimInfo = activity ? skimTotals(activity.ranges, span.start, Math.min(span.end, now)) : null;
+  // Read by the video's timeupdate handler; kept current by the effect below.
+  const skimRef = useRef(null);
+  const seekRef = useRef(null);
+  useEffect(() => {
+    skimRef.current = skim && activity ? { ranges: activity.ranges, lastJump: skimRef.current?.lastJump || 0 } : null;
+  }, [skim, activity]);
+
   // AI routes answer 403 on plans without AI; that is a plan fact, not a fault.
   const eventsUnavailable = eventsQuery.error?.response?.status === 403
     ? "AI events aren't part of this account's plan. Playback, the timeline and clip export still work."
@@ -707,6 +757,15 @@ export default function NvrPlayback() {
         setBufferedMs((prev) => (prev != null && Math.abs(prev - end) < 1000 ? prev : end));
       }
     } catch { /* ignore */ }
+    // Play only activity (Smart Skim): outside a busy stretch, jump to the next.
+    const sk = skimRef.current;
+    if (sk && !v.paused) {
+      const target = skimTarget(sk.ranges, wall);
+      if (target !== null && target - wall > 1500 && Date.now() - sk.lastJump > 3000) {
+        sk.lastJump = Date.now();
+        seekRef.current?.(target);
+      }
+    }
   };
   const onPlay = () => { setPlaying(true); pausedAtRef.current = null; pokeUi(); };
   const onPlaying = () => {
@@ -741,6 +800,22 @@ export default function NvrPlayback() {
     playOrMute(v, forcedMute);
   }, [forcedMute]);
 
+  const pickPerson = async (e) => {
+    const v = videoRef.current;
+    if (!v || !camera || wallRef.current == null) return;
+    const g = clickToGrid(v.getBoundingClientRect(), v.videoWidth, v.videoHeight, e.clientX, e.clientY);
+    if (!g) return;
+    setTrackNote('Finding that person…');
+    try {
+      const { track_id: id } = await journeyService.trackAt({
+        cameraCode: camera.monitorId, ts: new Date(wallRef.current).toISOString(), x: g.x, y: g.y,
+      });
+      navigate(`/investigate/track/${id}`);
+    } catch (err) {
+      setTrackNote(err?.response?.data?.message || 'No one indexed there. Click on a person while they are on screen.');
+    }
+  };
+
   const toggleMute = useCallback(() => {
     const next = !mutedRef.current;
     mutedRef.current = next;
@@ -766,6 +841,9 @@ export default function NvrPlayback() {
     }
     startRef.current?.(t);
   }, [forcedMute]);
+  useEffect(() => { seekRef.current = seekTo; }, [seekTo]);
+
+
 
   const nudge = useCallback((sec) => {
     seekTo((wallRef.current ?? winRef.current.start) + sec * 1000);
@@ -1100,9 +1178,25 @@ export default function NvrPlayback() {
                   onPlaying={onPlaying}
                   onWaiting={() => waitingRef.current?.()}
                   onPause={onPause}
-                  onClick={togglePlay}
-                  className="absolute inset-0 h-full w-full cursor-pointer object-contain"
+                  onClick={trackMode ? (e) => pickPerson(e) : togglePlay}
+                  className={cn('absolute inset-0 h-full w-full object-contain', trackMode ? 'cursor-crosshair' : 'cursor-pointer')}
                 />
+                {skim && !trackMode ? (
+                  <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center">
+                    <span className="rounded-full bg-black/70 px-3 py-1 text-small font-semibold text-white">
+                      {wallMs != null && activity && skimTarget(activity.ranges, wallMs) === null
+                        ? 'No more activity in this range.'
+                        : 'Playing only activity: empty stretches are skipped'}
+                    </span>
+                  </div>
+                ) : null}
+                {trackMode ? (
+                  <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center">
+                    <span className="rounded-full bg-black/70 px-3 py-1 text-small font-semibold text-white">
+                      {trackNote || 'Click a person to see where they went'}
+                    </span>
+                  </div>
+                ) : null}
 
                 <div className={cn('pointer-events-none absolute inset-x-3 top-3 z-20 flex items-start justify-between gap-3 transition-opacity duration-200', overlayOn ? 'opacity-100' : 'opacity-0')}>
                   <div className="min-w-0 rounded-md bg-black/55 px-2.5 py-1.5 backdrop-blur-sm">
@@ -1321,6 +1415,34 @@ export default function NvrPlayback() {
                       <PlayerButton label="Save snapshot" onClick={snapshot} disabled={phase !== 'playing'}>
                         <CameraIcon className="h-4 w-4" />
                       </PlayerButton>
+                      {canAudio ? (
+                        <PlayerButton label="Transcribe speech in this range (at most 6 hours) so it shows up in Audio search"
+                          disabled={!camera}
+                          onClick={() => speechService.transcribe({ monitorId: camera.monitorId, from: new Date(span.start).toISOString(), to: new Date(Math.min(span.end, now)).toISOString() })
+                            .then(() => flash('Transcribing… results appear in Audio search', 3500))
+                            .catch((e) => flash(e?.response?.data?.message || 'Could not transcribe this range', 4000))}>
+                          <AudioLines className="h-4 w-4" />
+                        </PlayerButton>
+                      ) : null}
+                      {activity ? (
+                        <PlayerButton label="Synopsis: only the busy moments of this range, sped up, as one video"
+                          onClick={() => setSynopsisOpen(true)} disabled={!camera}>
+                          <Clapperboard className="h-4 w-4" />
+                        </PlayerButton>
+                      ) : null}
+                      {activity ? (
+                        <PlayerButton
+                          label={skim ? 'Play everything' : `Play only activity (${Math.max(1, Math.round((skimInfo?.busyMs || 0) / 60000))} min of ${Math.round((skimInfo?.spanMs || 0) / 60000)} min)`}
+                          onClick={() => setSkim((v) => !v)} disabled={!camera}>
+                          <FastForward className={cn('h-4 w-4', skim && 'text-amber-400')} />
+                        </PlayerButton>
+                      ) : null}
+                      {canTrack ? (
+                        <PlayerButton label={trackMode ? 'Stop click to track' : 'Click to track: click a person on the video'}
+                          onClick={() => { setTrackMode((m) => !m); setTrackNote(null); }} disabled={!camera}>
+                          <Footprints className={cn('h-4 w-4', trackMode && 'text-brand')} />
+                        </PlayerButton>
+                      ) : null}
                       <PlayerButton label="Bookmark this moment (B)" onClick={addBookmark} disabled={!camera}>
                         <Bookmark className="h-4 w-4" />
                       </PlayerButton>
@@ -1348,6 +1470,7 @@ export default function NvrPlayback() {
               hidden={hidden}
               onToggleLayer={toggleLayer}
               onSeek={seekTo}
+              activity={activity}
             />
           </div>
 
@@ -1390,7 +1513,44 @@ export default function NvrPlayback() {
           onExport={runExport}
           notice={exportNotice}
           onDismissNotice={() => setExportNotice(null)}
+          extraAction={(canEvidence || canCase) ? (<>
+            {canCase ? (
+              <button type="button" disabled={!camera} onClick={() => setCasing(true)}
+                title="Pin this clip to a case (legal hold keeps the footage)"
+                className="inline-flex h-10 items-center gap-2 rounded-lg border border-line bg-surface px-4 text-small font-semibold text-fg-secondary transition hover:bg-surface-sunken disabled:opacity-60">
+                <FolderPlus className="h-4 w-4" /> Add to case
+              </button>
+            ) : null}
+            {canEvidence ? (
+            <button
+              type="button"
+              disabled={!camera}
+              onClick={() => setEvidenceOpen(true)}
+              title="A sealed, signed pack for police or court: footage, report and SHA-256 hashes"
+              className="inline-flex h-10 items-center gap-2 rounded-lg border border-line bg-surface px-4 text-small font-semibold text-fg-secondary transition hover:bg-surface-sunken disabled:opacity-60"
+            >
+              <ShieldCheck className="h-4 w-4" />
+              Export evidence
+            </button>
+            ) : null}
+          </>) : null}
         />
+        {synopsisOpen && camera ? (
+          <SynopsisDialog open onOpenChange={setSynopsisOpen} camera={camera} from={span.start} to={Math.min(span.end, now)} />
+        ) : null}
+        {canCase && casing && camera ? (
+          <AddToCaseDialog open onOpenChange={setCasing} item={itemFrom.clip(camera, exportRange.start, exportRange.end)}
+            what={`The clip from ${camera.name} you marked for export.`} />
+        ) : null}
+        {canEvidence && evidenceOpen && camera ? (
+          <EvidenceExportDialog
+            open
+            onOpenChange={setEvidenceOpen}
+            camera={camera}
+            start={new Date(exportRange.start)}
+            end={new Date(exportRange.end)}
+          />
+        ) : null}
       </div>
     </div>
   );

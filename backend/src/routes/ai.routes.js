@@ -1,5 +1,6 @@
 const { Router }  = require('express');
 const authenticate = require('../middleware/authenticate');
+const withAccount = require('../middleware/withAccount');
 const requireAiCapability = require('../middleware/requireAiCapability');
 const personTracker = require('../controllers/personTracker.controller');
 const { aiTenantId } = require('../utils/aiTenant');
@@ -21,6 +22,7 @@ const ZONES        = requireFeature('restricted_zone');
 const router = Router();
 
 router.use(authenticate);          // every AI route is user-scoped
+router.use(withAccount);   // org (account owner) for sub-users: the AI tenant is the organisation's
 router.use(requireAiCapability);   // ...and gated to AI+VMS plans (Basic VMS → 403)
 
 // Events

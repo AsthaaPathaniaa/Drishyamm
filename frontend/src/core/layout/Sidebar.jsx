@@ -31,6 +31,13 @@ import {
   MapPin,
   SlidersHorizontal,
   // IndianRupee, // used by the parked "Plans & Pricing" nav item
+  TextSearch,
+  Footprints,
+  FolderOpen,
+  Upload,
+  MessageCircleQuestion,
+  AudioLines,
+  ShieldCheck,
 } from 'lucide-react';
 import logo from '@/assets/drishyam-logo.svg';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/core/ui/tooltip';
@@ -70,6 +77,7 @@ const NAV_SECTIONS = [
   {
     id: 'cameras',
     label: 'Cameras',
+    collapsible: true,
     items: [
       { to: '/live',         label: 'Watch live', icon: Cctv,    hint: 'See your cameras right now' },
       { to: '/monitor-wall', label: 'Video wall', icon: Tv,      feature: 'monitor_wall', hint: 'Many cameras on one big screen' },
@@ -80,6 +88,7 @@ const NAV_SECTIONS = [
   {
     id: 'alerts',
     label: 'Alerts',
+    collapsible: true,
     items: [
       { to: '/alerts',     label: 'Alerts',           icon: BellRing,   feature: 'alerts',    hint: 'Things that need your attention' },
       { to: '/event-logs', label: 'Activity history', icon: ScrollText, feature: 'event_log', hint: 'Everything the cameras noticed, by day' },
@@ -88,6 +97,7 @@ const NAV_SECTIONS = [
   {
     id: 'smart',
     label: 'Smart features',
+    collapsible: true,   // chevron beside the heading folds the whole section
     ai: true,
     items: [
       {
@@ -130,6 +140,25 @@ const NAV_SECTIONS = [
       // Children are filled in per vertical below (core/nav/activityPages.js).
       { id: 'staff', to: '/activity-monitoring', label: 'Staff activity', icon: Activity, feature: 'activity', hint: 'Activity log, attendance and staff performance', activity: true },
       { to: '/ai-feed', label: 'Live detections', icon: Rss, feature: 'ai_feed', hint: 'Everything the cameras detect, as it happens' },
+    ],
+  },
+  {
+    // Investigation toolkit (docs/investigation): find → follow → case →
+    // evidence. Its own heading, not under Smart features: these are tools an
+    // investigator works through, and Evidence doesn't need AI. Each row still
+    // has its own switch (Smart Search also needs the AI tier); with none on,
+    // the heading is hidden. New tools (Click to track, Cases, Smart Skim) go here.
+    id: 'investigation',
+    label: 'Investigation tools',
+    collapsible: true,
+    items: [
+      { to: '/investigate',          label: 'Smart Search', icon: TextSearch,  feature: 'investigate_search', end: true, hint: 'Describe someone (clothes, bag, place, time) and find them on every camera' },
+      { to: '/investigate/track',    label: 'Click to track', icon: Footprints, feature: 'investigate_search', hint: 'Pick a person and see where they went across your cameras' },
+      { to: '/investigate/ask',      label: 'Ask Drishyam',   icon: MessageCircleQuestion, feature: 'investigate_ask', hint: 'Ask about what your cameras saw, in English or Hindi; summaries of last night' },
+      { to: '/investigate/audio',    label: 'Audio search',   icon: AudioLines, feature: 'investigate_audio', hint: 'Search what was said in imported videos and transcribed recordings' },
+      { to: '/investigate/imports',  label: 'Import video',   icon: Upload,     feature: 'investigate_search', hint: 'Bring in phone, USB or recorder video and search it like a camera' },
+      { to: '/investigate/cases',    label: 'Cases',          icon: FolderOpen, feature: 'investigate_cases', hint: 'One workspace per incident: people, clips, notes, legal hold' },
+      { to: '/investigate/evidence', label: 'Evidence',     icon: ShieldCheck, feature: 'evidence_export', hint: 'Sealed evidence packs: export log and verify' },
     ],
   },
   {
@@ -274,6 +303,20 @@ export default function Sidebar({ open, variant = 'rail', onNavigate }) {
     });
   };
 
+  // Whole-section fold (Cameras, Alerts, Smart features, Investigation tools): the user's own
+  // choice, remembered per browser. The collapsed 64px rail ignores it, as it
+  // has no headings to click.
+  const [foldedSections, setFoldedSections] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('sidebar-sections') || '{}'); } catch { return {}; }
+  });
+  const toggleSection = (id) => {
+    setFoldedSections((prev) => {
+      const next = { ...prev, [id]: !prev[id] };
+      try { localStorage.setItem('sidebar-sections', JSON.stringify(next)); } catch { /* private mode */ }
+      return next;
+    });
+  };
+
   // ONE row is lit: the best match for this URL across the whole menu, so a
   // prefix row (/occupancy) never lights beside an exact one
   // (/occupancy/breaches) in another group.
@@ -322,27 +365,51 @@ export default function Sidebar({ open, variant = 'rail', onNavigate }) {
 
       {/* ── Main nav ── */}
       <nav className="flex-1 overflow-y-auto py-2 px-1.5 [scrollbar-width:thin] [scrollbar-color:var(--sidebar-border)_transparent] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-sidebar-border hover:[&::-webkit-scrollbar-thumb]:bg-line-strong">
-        {navSections.map((section, idx) => (
-          <div key={section.id} className={idx === 0 ? '' : open ? (section.label ? 'mt-3' : 'mt-2') : 'mt-4'}>
-            {open ? (
-              section.label ? (
-                <div className="px-3 pt-2 pb-1.5">
-                  <span className="text-caption font-bold uppercase tracking-[0.12em] text-fg-muted">
-                    {section.label}
-                  </span>
-                </div>
-              ) : null
-            ) : idx > 0 ? (
-              <div className="mx-2 my-2 border-t border-sidebar-border" />
-            ) : null}
+        {navSections.map((section, idx) => {
+          const folded = open && section.collapsible && !!foldedSections[section.id];
+          return (
+            <div key={section.id} className={idx === 0 ? '' : open ? (section.label ? 'mt-3' : 'mt-2') : 'mt-4'}>
+              {open ? (
+                section.label ? (
+                  section.collapsible ? (
+                    <button
+                      type="button"
+                      onClick={() => toggleSection(section.id)}
+                      aria-expanded={!folded}
+                      aria-controls={`nav-section-${section.id}`}
+                      title={folded ? `Show all ${section.label.toLowerCase()}` : `Hide all ${section.label.toLowerCase()}`}
+                      className="group flex w-full items-center justify-between rounded-md px-3 pt-2 pb-1.5 text-left hover:bg-sidebar-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50"
+                    >
+                      <span className="text-caption font-bold uppercase tracking-[0.12em] text-fg-muted group-hover:text-sidebar-foreground">
+                        {section.label}
+                      </span>
+                      <ChevronDown
+                        aria-hidden="true"
+                        className={`h-3.5 w-3.5 shrink-0 text-fg-muted transition-transform duration-200 group-hover:text-sidebar-foreground ${folded ? '-rotate-90' : ''}`}
+                      />
+                    </button>
+                  ) : (
+                    <div className="px-3 pt-2 pb-1.5">
+                      <span className="text-caption font-bold uppercase tracking-[0.12em] text-fg-muted">
+                        {section.label}
+                      </span>
+                    </div>
+                  )
+                ) : null
+              ) : idx > 0 ? (
+                <div className="mx-2 my-2 border-t border-sidebar-border" />
+              ) : null}
 
-            <div className={open ? 'space-y-px' : 'space-y-1'}>
-              {section.items.map((item) => (
-                <NavItem key={item.groupKey || item.to} item={item} {...rowProps} />
-              ))}
+              {folded ? null : (
+                <div id={`nav-section-${section.id}`} className={open ? 'space-y-px' : 'space-y-1'}>
+                  {section.items.map((item) => (
+                    <NavItem key={item.groupKey || item.to} item={item} {...rowProps} />
+                  ))}
+                </div>
+              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </nav>
 
       {/* ── Footer (setup + user) ── */}

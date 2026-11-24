@@ -43,6 +43,10 @@ const WallLayout = require('./WallLayout')(sequelize);
 const Report = require('./Report')(sequelize);
 const AdminAuditLog = require('./AdminAuditLog')(sequelize);
 const PlatformEvent = require('./PlatformEvent')(sequelize);
+const EvidenceExport = require('./EvidenceExport')(sequelize);
+const EvidenceKey = require('./EvidenceKey')(sequelize);
+const { Case, CaseMember, CaseItem, CaseAudit } = require('./Case')(sequelize);
+const VideoImport = require('./VideoImport')(sequelize);
 
 const models = {
   User, Plan, Subscription, Payment,
@@ -56,6 +60,10 @@ const models = {
   Report,
   AdminAuditLog,
   PlatformEvent,
+  EvidenceExport,
+  EvidenceKey,
+  Case, CaseMember, CaseItem, CaseAudit,
+  VideoImport,
 };
 
 // Set up associations

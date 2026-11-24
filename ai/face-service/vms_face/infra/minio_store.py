@@ -30,6 +30,7 @@ class ObjectStore:
             settings.minio_bucket_snapshots,
             settings.minio_bucket_enrollments,
             settings.minio_bucket_output,
+            settings.minio_bucket_investigate,
         ):
             self.ensure_bucket(bucket)
 

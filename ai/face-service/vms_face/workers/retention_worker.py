@@ -34,7 +34,7 @@ from vms_face.core.tracing import (
 from vms_face.domain.models import AuditLog, DetectionEvent
 from vms_face.infra.minio_store import get_object_store
 from vms_face.infra.postgres import session_scope
-from vms_face.infra.qdrant import get_qdrant_appearance
+from vms_face.infra.qdrant import get_qdrant_appearance, get_qdrant_tracks
 
 log = get_logger(__name__)
 
@@ -123,6 +123,56 @@ async def _prune_minio_snapshots(now: dt.datetime) -> int:
     return deleted
 
 
+async def _prune_investigate_tracks(now: dt.datetime) -> int:
+    """I-1 search index: tracks older than `investigate_retention_days` go,
+    in Postgres (points cascade), MinIO (their crop) and Qdrant — except tracks
+    a case holds (`case_id` set), which stay until the case lets them go."""
+    from qdrant_client.http.models import FieldCondition, Filter, IsEmptyCondition, MatchValue, PayloadField, Range
+
+    from vms_face.domain.models import Track
+
+    cutoff = now - dt.timedelta(days=settings.investigate_retention_days)
+    async with session_scope() as session:
+        result = await session.execute(
+            # Imported files (source='file') are dated by when they were recorded,
+            # often long ago: they go when their import is deleted, not by age.
+            delete(Track).where(Track.first_seen < cutoff, Track.case_id.is_(None), Track.source != "file")
+            .returning(Track.best_crop_key)
+        )
+        keys = [k for (k,) in result.all() if k]
+        await session.commit()
+    if keys:
+        def _remove() -> None:
+            from minio.deleteobjects import DeleteObject  # type: ignore
+
+            client = get_object_store()._client  # noqa: SLF001 — same as the snapshot prune
+            for i in range(0, len(keys), 1000):
+                list(client.remove_objects(settings.minio_bucket_investigate, [DeleteObject(k) for k in keys[i:i + 1000]]))
+
+        await asyncio.get_running_loop().run_in_executor(None, _remove)
+    if settings.investigate_index_enabled:
+        await get_qdrant_tracks().client.delete(
+            collection_name=settings.qdrant_collection_tracks,
+            points_selector=Filter(must=[
+                FieldCondition(key="first_seen_ts", range=Range(lt=int(cutoff.timestamp()))),
+                IsEmptyCondition(is_empty=PayloadField(key="case_id")),
+            ], must_not=[FieldCondition(key="source", match=MatchValue(value="file"))]),
+        )
+    # Audio Search transcripts of cameras age out with the index; transcripts of
+    # imported videos go with the import (their camera row cascades).
+    from vms_face.domain.models import SpeechSegment
+
+    async with session_scope() as session:
+        r = await session.execute(delete(SpeechSegment).where(SpeechSegment.start_ts < cutoff, SpeechSegment.source != "file"))
+        await session.commit()
+    if r.rowcount:
+        RETENTION_DELETED.labels(target="investigate_speech").inc(int(r.rowcount))
+    if keys:
+        RETENTION_DELETED.labels(target="investigate_tracks").inc(len(keys))
+        log.info("retention: pruned investigation tracks", deleted=len(keys), cutoff=cutoff.isoformat())
+    return len(keys)
+
+
 async def _tick() -> None:
     now = dt.datetime.now(dt.timezone.utc)
     log.info("retention sweep starting", at=now.isoformat())
@@ -142,6 +192,10 @@ async def _tick() -> None:
         await _prune_minio_snapshots(now)
     except Exception as e:
         log.warning("retention: minio failed", err=str(e))
+    try:
+        await _prune_investigate_tracks(now)
+    except Exception as e:
+        log.warning("retention: investigation tracks failed", err=str(e))
     log.info("retention sweep done")
 
 

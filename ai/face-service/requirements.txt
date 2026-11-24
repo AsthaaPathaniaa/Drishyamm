@@ -31,6 +31,12 @@ opencv-python-headless>=4.10
 numpy>=1.26,<3.0
 scipy>=1.14            # Hungarian assignment for the SORT-style tracker (Phase 2)
 Pillow>=10.0
+# Investigation index (I-1/I-2): the SigLIP 2 text tokenizer (Gemma
+# SentencePiece, loaded from tokenizer.json). Rust wheel, no torch needed.
+tokenizers>=0.21,<1.0
+# Full IANA time-zone data incl. old names browsers still send (Asia/Calcutta);
+# the base image's zoneinfo has no "backward" links.
+tzdata>=2024.1
 
 # Observability — psutil is required (CPU/RSS gauges); nvidia-ml-py is
 # optional (GPU gauges) and the poller falls back gracefully when missing.

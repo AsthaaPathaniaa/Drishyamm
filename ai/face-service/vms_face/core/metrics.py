@@ -123,6 +123,12 @@ INVESTIGATE_TRACK_DURATION = Histogram(
     ["kind"],
     buckets=(1, 2, 5, 10, 20, 30, 60, 120, 300, 900, 1800),
 )
+# I-1 search index writer: track summaries written / dropped (queue full) / failed.
+INVESTIGATE_INDEX_TRACKS = Counter(
+    "vms_investigate_index_tracks_total",
+    "Track summaries handled by the investigation index writer",
+    ["outcome"],
+)
 MATCHES = Counter(
     "vms_matches_total",
     "Match results",
