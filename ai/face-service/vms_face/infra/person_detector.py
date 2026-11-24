@@ -209,6 +209,61 @@ class YOLOPersonDetector:
         ]
 
 
+# COCO class ids of road vehicles (Ultralytics ordering) → the vehicle type
+# the investigation index stores. Auto-rickshaws and tempos are not COCO
+# classes: they come out as car / truck / motorcycle.
+COCO_VEHICLES: dict[int, str] = {1: "bicycle", 2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
+
+
+def _decode_class_group(pred, rows: list[int], names: list[str], score_threshold: float, iou_threshold: float,
+                        scale: float, dx: int, dy: int, w_img: int, h_img: int) -> list[tuple]:
+    """Boxes whose best class among `rows` clears the threshold, NMS across the
+    group, mapped to frame pixels. Returns (x1, y1, x2, y2, score, name)."""
+    scores_all = pred[[4 + r for r in rows]]              # (G, N)
+    best = scores_all.argmax(axis=0)
+    scores = scores_all.max(axis=0)
+    keep_mask = scores >= score_threshold
+    if not np.any(keep_mask):
+        return []
+    cx, cy, w, h = (pred[i, keep_mask] for i in range(4))
+    boxes = np.stack([cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5], axis=1)
+    sc = scores[keep_mask]
+    cls = best[keep_mask]
+    keep = _nms(boxes, sc, iou_threshold)
+    if not keep:
+        return []
+    boxes, sc, cls = boxes[keep], sc[keep], cls[keep]
+    inv = 1.0 / max(scale, 1e-6)
+    boxes[:, [0, 2]] = np.clip((boxes[:, [0, 2]] - dx) * inv, 0.0, float(w_img))
+    boxes[:, [1, 3]] = np.clip((boxes[:, [1, 3]] - dy) * inv, 0.0, float(h_img))
+    return [(float(b[0]), float(b[1]), float(b[2]), float(b[3]), float(s), names[int(c)]) for b, s, c in zip(boxes, sc, cls)]
+
+
+def detect_people_and_vehicles(detector: "YOLOPersonDetector", frame_bgr) -> tuple[list[tuple], list[tuple]]:
+    """One YOLO pass, two answers: people (x1, y1, x2, y2, score) as detect()
+    gives them, and road vehicles (x1, y1, x2, y2, score, type). For the
+    investigation index (I-1 people, I-10 vehicles)."""
+    if frame_bgr is None or frame_bgr.size == 0:
+        return [], []
+    canvas, scale, dx, dy = _letterbox(frame_bgr, detector._det_size)
+    x = np.transpose(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0, (2, 0, 1))[None, ...]
+    with detector._call_lock:
+        try:
+            outputs = detector._session.run(None, {detector._input_name: x})
+        except Exception as e:
+            log.warning("yolov8 inference failed", err=str(e))
+            return [], []
+    pred = outputs[0]
+    if pred.ndim != 3 or pred.shape[1] < 4 + max(COCO_VEHICLES) + 1:
+        return [], []
+    pred = pred[0]
+    h_img, w_img = frame_bgr.shape[:2]
+    args = (detector._score_threshold, detector._iou_threshold, scale, dx, dy, w_img, h_img)
+    people = [b[:5] for b in _decode_class_group(pred, [_COCO_PERSON_CLASS], ["person"], *args)]
+    vehicles = _decode_class_group(pred, list(COCO_VEHICLES), list(COCO_VEHICLES.values()), *args)
+    return people, vehicles
+
+
 # ── Module-level singleton + lazy init ────────────────────────────────────
 
 _instance: YOLOPersonDetector | None = None

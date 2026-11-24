@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { DEMO_KEYS } from '@/core/nav/entitlements'
+import { DEMO_KEYS, OPT_IN_KEYS } from '@/core/nav/entitlements'
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { Topbar } from './layout/Layout.jsx'
 import { Spinner, Modal, InfoRow } from './ui.jsx'
@@ -227,7 +227,7 @@ function LicencesTab({ id, data, onSaved }) {
   // "All features" = every key EXCEPT the demo (sample-data) ones: a full
   // account never gets those — featureCatalog.isFeatureOn / DEMO_KEYS.
   const effective = (all, list) => (all
-    ? features.groups.flatMap((g) => g.items.map((i) => i.key)).filter((k) => !DEMO_KEYS.includes(k))
+    ? features.groups.flatMap((g) => g.items.map((i) => i.key)).filter((k) => !DEMO_KEYS.includes(k) && !OPT_IN_KEYS.includes(k))
     : list)
   const savedOn = new Set(effective(savedAll, features.enabled))
   const draftOn = new Set(effective(featAll, featDraft))
@@ -494,6 +494,7 @@ function LicencesTab({ id, data, onSaved }) {
                         <span style={{ minWidth: 0, flex: 1 }}>
                           <span style={{ fontSize: 13, fontWeight: 500 }}>{it.label}</span>
                           {DEMO_KEYS.includes(it.key) && <span className="mono" title="Runs on sample data, not a real detector. Off for every account until switched on here." style={{ fontSize: 10.5, fontWeight: 700, marginLeft: 6, padding: '1px 5px', borderRadius: 4, border: '1px solid var(--color-border)', color: 'var(--color-text-secondary)' }}>DEMO</span>}
+                          {OPT_IN_KEYS.includes(it.key) && <span className="mono" title="New feature. Off for every account until switched on here." style={{ fontSize: 10.5, fontWeight: 700, marginLeft: 6, padding: '1px 5px', borderRadius: 4, border: '1px solid var(--color-border)', color: 'var(--color-text-secondary)' }}>NEW</span>}
                           {changed && <span className="tone-warning" style={{ fontSize: 11, fontWeight: 700, marginLeft: 6 }}>unsaved</span>}
                           {help && <span style={{ display: 'block', fontSize: 11.5, color: 'var(--color-text-muted)' }}>{help}</span>}
                         </span>

@@ -15,6 +15,9 @@ from qdrant_client.http.models import (
     PayloadSchemaType,
     PointStruct,
     Range,
+    ScalarQuantization,
+    ScalarQuantizationConfig,
+    ScalarType,
     VectorParams,
 )
 
@@ -38,11 +41,36 @@ class QdrantStore:
       - distance    = Cosine on L2-normed embeddings
       - payload     = {tenant_id, person_id, ...} for enrolled
                       {tenant_id, camera_id, occurred_at, person_id?, event_id} for appearance
-      - tenant_id, person_id, camera_id, role indexed for fast filtering."""
+      - tenant_id, person_id, camera_id, role indexed for fast filtering.
 
-    def __init__(self, collection: str) -> None:
+    A collection with another shape (the investigation index `vms_tracks`:
+    768-d image embedding, int8, its own payload indexes) passes
+    `vector_size`, `distance`, `payload_indexes` and `quantize_int8`; the
+    defaults are exactly the face collections' settings."""
+
+    DEFAULT_PAYLOAD_INDEXES: tuple[tuple[str, PayloadSchemaType], ...] = (
+        ("tenant_id", PayloadSchemaType.KEYWORD),
+        ("person_id", PayloadSchemaType.KEYWORD),
+        ("camera_id", PayloadSchemaType.KEYWORD),
+        ("role", PayloadSchemaType.KEYWORD),
+        ("occurred_at_ts", PayloadSchemaType.INTEGER),
+    )
+
+    def __init__(
+        self,
+        collection: str,
+        *,
+        vector_size: int | None = None,
+        distance: str | None = None,
+        payload_indexes: Iterable[tuple[str, PayloadSchemaType]] | None = None,
+        quantize_int8: bool = False,
+    ) -> None:
         self._client = self._new_client()
         self._collection = collection
+        self._vector_size = int(vector_size or settings.qdrant_vector_size)
+        self._distance = (distance or settings.qdrant_distance).upper()
+        self._payload_indexes = tuple(payload_indexes) if payload_indexes is not None else self.DEFAULT_PAYLOAD_INDEXES
+        self._quantize_int8 = quantize_int8
 
     @staticmethod
     def _new_client() -> AsyncQdrantClient:
@@ -80,20 +108,17 @@ class QdrantStore:
             await self._client.create_collection(
                 collection_name=self._collection,
                 vectors_config=VectorParams(
-                    size=settings.qdrant_vector_size,
-                    distance=Distance[settings.qdrant_distance.upper()],
+                    size=self._vector_size,
+                    distance=Distance[self._distance],
                 ),
+                quantization_config=ScalarQuantization(
+                    scalar=ScalarQuantizationConfig(type=ScalarType.INT8, always_ram=True),
+                ) if self._quantize_int8 else None,
             )
         else:
             self._validate_collection_schema(existing)
 
-        for field, schema in (
-            ("tenant_id", PayloadSchemaType.KEYWORD),
-            ("person_id", PayloadSchemaType.KEYWORD),
-            ("camera_id", PayloadSchemaType.KEYWORD),
-            ("role", PayloadSchemaType.KEYWORD),
-            ("occurred_at_ts", PayloadSchemaType.INTEGER),
-        ):
+        for field, schema in self._payload_indexes:
             try:
                 await self._client.create_payload_index(self._collection, field_name=field, field_schema=schema)
             except UnexpectedResponse as e:
@@ -124,8 +149,8 @@ class QdrantStore:
                 collection=self._collection,
             )
             return
-        expected_size = int(settings.qdrant_vector_size)
-        expected_distance = settings.qdrant_distance.upper()
+        expected_size = self._vector_size
+        expected_distance = self._distance
         if actual_size and actual_size != expected_size:
             raise RuntimeError(
                 f"qdrant collection {self._collection!r} has vector size {actual_size}, "
@@ -292,12 +317,25 @@ def get_qdrant_appearance() -> QdrantStore:
     return _get_or_create(settings.qdrant_collection_appearance)
 
 
+def get_qdrant_tracks() -> QdrantStore:
+    """Investigation index (I-1): one point per track, id = tracks.id."""
+    from vms_face.investigate.index_schema import TRACKS_PAYLOAD_INDEXES
+
+    return _get_or_create(
+        settings.qdrant_collection_tracks,
+        vector_size=settings.investigate_embed_dim,
+        distance="Cosine",
+        payload_indexes=TRACKS_PAYLOAD_INDEXES,
+        quantize_int8=True,
+    )
+
+
 def get_qdrant() -> QdrantStore:
     """Legacy alias. Returns the enrolled gallery store."""
     return get_qdrant_enrolled()
 
 
-def _get_or_create(collection: str) -> QdrantStore:
+def _get_or_create(collection: str, **params: Any) -> QdrantStore:
     existing = _stores.get(collection)
     if existing is not None:
         return existing
@@ -305,7 +343,7 @@ def _get_or_create(collection: str) -> QdrantStore:
         existing = _stores.get(collection)
         if existing is not None:
             return existing
-        store = QdrantStore(collection)
+        store = QdrantStore(collection, **params)
         _stores[collection] = store
         return store
 

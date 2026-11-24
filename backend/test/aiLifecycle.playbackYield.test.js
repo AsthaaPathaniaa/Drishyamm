@@ -10,12 +10,15 @@ jest.mock('../src/services/entitlements.service', () => ({ getAiEntitledUserIds:
 const mockCameras = [];
 jest.mock('../src/models', () => ({ Camera: { findAll: async () => mockCameras }, CameraGroup: {} }));
 jest.mock('../src/services/liveRelay.service', () => ({ sessionsOnHost: () => 0 }));
+jest.mock('../src/utils/aiTenant', () => ({ aiAuthHeader: (u) => ({ Authorization: `Bearer org-of-${u.id}` }) }));
+const mockHeaders = [];
 const mockRuntime = {};
 const mockPosts = [];
 jest.mock('axios', () => ({
   get: jest.fn(async () => ({ data: { cameras: mockRuntime }, headers: {} })),
-  post: jest.fn(async (url, body) => {
+  post: jest.fn(async (url, body, opts) => {
     const id = body.get('monitor_id');
+    mockHeaders.push(opts?.headers?.Authorization);
     mockPosts.push(`${url.split('/').pop()} ${id}`);
     mockRuntime[id] = { running: url.endsWith('/set-camera') };
     return { data: {} };
@@ -58,6 +61,8 @@ test("a user's playback pauses detection on their cameras on that NVR only, and 
   await ai.reconcile();
   expect(mockPosts).toEqual(['stop-camera a', 'set-camera a']);
   expect(ai._internals.paused.has('a')).toBe(false);
+  // Every start/stop carries the owner's org token, so the camera runs under that tenant.
+  expect(new Set(mockHeaders)).toEqual(new Set(['Bearer org-of-u1']));
 });
 
 test("a camera is matched by its group's NVR host too", () => {

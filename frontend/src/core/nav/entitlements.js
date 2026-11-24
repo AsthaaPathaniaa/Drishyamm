@@ -51,6 +51,12 @@ export const DEFAULT_ON_KEYS = [
 export const DEMO_KEYS = ['weapon', 'fire', 'aggression', 'anpr', 'activity'];
 
 /**
+ * New real features shipped dark: on ONLY when listed, like DEMO_KEYS, but
+ * they don't open the demo pages. Mirror of featureCatalog.js (`optIn: true`).
+ */
+export const OPT_IN_KEYS = ['investigate_search', 'evidence_export', 'investigate_cases', 'investigate_ask', 'investigate_audio'];
+
+/**
  * Who may save zones — restricted zones, head-count rooms and gates, AI Feed
  * detection areas — and so may re-take a camera's saved reference picture.
  * Mirror of the backend's POST /stream/snapshot/:monitorId/refresh gate.
@@ -59,7 +65,7 @@ export const ZONE_EDIT_KEYS = ['restricted_zone', 'headcount', 'ai_feed'];
 
 /** Is `key` on for this stored features value (null = full account)? Tier not checked. */
 export function featureOn(features, key) {
-  if (DEMO_KEYS.includes(key)) return Array.isArray(features) && features.includes(key);
+  if (DEMO_KEYS.includes(key) || OPT_IN_KEYS.includes(key)) return Array.isArray(features) && features.includes(key);
   if (!Array.isArray(features) || !features.length) return true;
   if (DEFAULT_ON_KEYS.includes(key)) return !features.includes(`!${key}`);
   return features.includes(key);
@@ -94,6 +100,7 @@ export function makeEntitlement(user) {
 const AI_KEYS = new Set([
   'face_watchlist', 'face_detection', 'person_search', 'person_tracker', 'journey_map',
   'headcount', 'restricted_zone', 'activity', 'weapon', 'fire', 'aggression', 'anpr', 'ai_feed',
+  'investigate_search', 'investigate_ask', 'investigate_audio',
   // Activity history only lists AI detections today (User / System sources are
   // not recorded yet), so a VMS-only account (aiEnabled false) would only ever
   // see an empty page. Move it out of this set once those sources exist.
@@ -148,6 +155,11 @@ const ROUTE_FEATURES = [
   { prefix: '/ai-analytics/aggression',     any: ['aggression'], ai: true },
   { prefix: '/ai-analytics/vehicle',        any: ['anpr'], ai: true },
   { prefix: '/ai-feed',                     any: ['ai_feed'], ai: true },
+  { prefix: '/investigate/evidence',        any: ['evidence_export'] },
+  { prefix: '/investigate/cases',           any: ['investigate_cases'] },
+  { prefix: '/investigate/ask',             any: ['investigate_ask'], ai: true },
+  { prefix: '/investigate/audio',           any: ['investigate_audio'], ai: true },
+  { prefix: '/investigate',                 any: ['investigate_search'], ai: true },
 ].sort((a, b) => b.prefix.length - a.prefix.length);
 
 /** True when `user` may open `pathname`. Unlisted routes are always allowed. */

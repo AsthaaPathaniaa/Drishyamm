@@ -339,16 +339,20 @@ const searchNvrRecordings = asyncHandler(async (req, res) => {
   });
 });
 
-function exportArgs(nvrRtsp, durationSec, format) {
+function exportArgs(nvrRtsp, durationSec, format, encode = null) {
   // 'original' keeps the NVR's own encode (often H.265: smaller and faster, but
   // many desktop players need a codec pack). 'mp4' re-encodes to H.264 so the
   // clip opens anywhere — the right default for evidence that gets forwarded.
-  const video = format === 'original'
-    ? ['-c:v', 'copy']
-    : ['-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p'];
+  // `encode` (services/h264Encode) puts that re-encode on the GPU when one is
+  // there; without it, libx264.
+  const reencode = format !== 'original';
+  const video = reencode
+    ? (encode?.video || ['-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p'])
+    : ['-c:v', 'copy'];
   return [
     '-hide_banner', '-loglevel', 'error',
     '-rtsp_transport', 'tcp',
+    ...(reencode && encode?.input ? encode.input : []),
     '-i', nvrRtsp,
     '-t', String(durationSec),
     '-map', '0:v:0', ...video,
@@ -401,7 +405,9 @@ const exportNvrClip = asyncHandler(async (req, res) => {
     return;
   }
   // An H.264 replay is already what 'mp4' would re-encode to: copy it.
-  const proc = spawn('ffmpeg', exportArgs(src.url, durationSec, src.h264 ? 'original' : format), {
+  const effective = src.h264 ? 'original' : format;
+  const encode = effective === 'original' ? null : await require('../services/h264Encode').h264Encode();
+  const proc = spawn('ffmpeg', exportArgs(src.url, durationSec, effective, encode), {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   entry.proc = proc;
@@ -472,5 +478,8 @@ module.exports = {
   // exported for tests
   exportArgs,
   _internals: { sessions, stopSession, sweepEndedRelaySessions, claimNvr },
+  // Shared with evidence export (services/evidence/build.js): the same NVR
+  // claim, the same one-pull-per-user lock and the same range cap.
+  nvrPull: { loadCamera, assertPlayback, playbackSource, claimNvr, parseRange, exportsByUser, MAX_EXPORT_MS },
   exportFilename,
 };

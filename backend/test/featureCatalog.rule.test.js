@@ -1,7 +1,9 @@
 const {
-  ALL_FEATURE_KEYS, AI_FEATURE_KEYS, DEFAULT_ON_KEYS, DEMO_KEYS,
+  ALL_FEATURE_KEYS, AI_FEATURE_KEYS, DEFAULT_ON_KEYS, DEMO_KEYS, OPT_IN_KEYS,
   isFeatureOn, featureStateOf, storedFeatures,
 } = require('../src/utils/featureCatalog');
+// Off until listed: the demo (sample-data) keys and new opt-in features.
+const LISTED_ONLY = [...DEMO_KEYS, ...OPT_IN_KEYS];
 const { allowsAny } = require('../src/services/entitlements.service');
 
 // Sharda's production list, exactly as stored (written before the 2026-10
@@ -36,7 +38,7 @@ describe('feature catalog shape', () => {
 
 describe('isFeatureOn / allowsAny', () => {
   test('a full account (NULL or []) has every key except the demo ones', () => {
-    for (const k of ALL_FEATURE_KEYS.filter((x) => !DEMO_KEYS.includes(x))) {
+    for (const k of ALL_FEATURE_KEYS.filter((x) => !LISTED_ONLY.includes(x))) {
       expect(isFeatureOn(null, k)).toBe(true);
       expect(isFeatureOn([], k)).toBe(true);
       expect(allowsAny(ent(null), [k])).toBe(true);
@@ -106,7 +108,7 @@ describe('featureStateOf / storedFeatures round trip', () => {
   });
 
   test('everything on → NULL; everything off → nothing matches', () => {
-    expect(storedFeatures(ALL_FEATURE_KEYS.filter((k) => !DEMO_KEYS.includes(k)))).toBeNull();
+    expect(storedFeatures(ALL_FEATURE_KEYS.filter((k) => !LISTED_ONLY.includes(k)))).toBeNull();
     const none = storedFeatures([]);
     for (const k of ALL_FEATURE_KEYS) expect(isFeatureOn(none, k)).toBe(false);
     // only basic video on, every AI key and map/reports off
@@ -150,16 +152,16 @@ describe('demo keys (sample-data pages): on only when listed', () => {
   test('admin view of a full account shows demo switches off', () => {
     const st = featureStateOf(null);
     expect(st.mode).toBe('all');
-    for (const k of DEMO_KEYS) expect(st.enabled).not.toContain(k);
+    for (const k of LISTED_ONLY) expect(st.enabled).not.toContain(k);
     expect(st.enabled).toEqual(expect.arrayContaining(['face_watchlist', 'headcount', 'playback']));
   });
 
   test('a demo key switched on is stored as an explicit list, never NULL', () => {
-    const stored = storedFeatures([...ALL_FEATURE_KEYS.filter((k) => !DEMO_KEYS.includes(k)), 'weapon']);
+    const stored = storedFeatures([...ALL_FEATURE_KEYS.filter((k) => !LISTED_ONLY.includes(k)), 'weapon']);
     expect(Array.isArray(stored)).toBe(true);
     expect(stored).toContain('weapon');
     for (const k of ALL_FEATURE_KEYS) {
-      expect(isFeatureOn(stored, k)).toBe(!DEMO_KEYS.includes(k) || k === 'weapon');
+      expect(isFeatureOn(stored, k)).toBe(!LISTED_ONLY.includes(k) || k === 'weapon');
     }
     const all = storedFeatures([...ALL_FEATURE_KEYS]);
     for (const k of ALL_FEATURE_KEYS) expect(isFeatureOn(all, k)).toBe(true);

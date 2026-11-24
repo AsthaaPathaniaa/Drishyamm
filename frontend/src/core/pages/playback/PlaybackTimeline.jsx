@@ -32,6 +32,7 @@ const VIEWS = [
 export default function PlaybackTimeline({
   span, range, viewMode, onViewMode, now, playhead, recordings, markers, exportRange,
   hidden, onToggleLayer, onSeek, emptyNote = NVR_EMPTY_NOTE,
+  activity = null,     // Smart Skim: { since, binS, bins: [count…] } people on screen per bin
 }) {
   const trackRef = useRef(null);
   const [hover, setHover] = useState(null);
@@ -223,6 +224,23 @@ export default function PlaybackTimeline({
             );
           })}
         </div>
+
+        {activity?.bins?.length ? (
+          <div className="relative mt-1 h-2.5 overflow-hidden rounded-sm bg-surface-muted" title="People on screen (Smart Skim)">
+            {activity.bins.map((c, i) => {
+              if (!c) return null;
+              const t0 = activity.since + i * activity.binS * 1000;
+              const t1 = t0 + activity.binS * 1000;
+              if (t1 < vStart || t0 > vStart + visible) return null;
+              const l = Math.max(0, pct(t0));
+              return (
+                <span key={i} className="absolute inset-y-0 bg-amber-500"
+                  title={`${c} ${c === 1 ? 'person' : 'people'} · ${fmtClock(t0)}`}
+                  style={{ left: `${l}%`, width: `${Math.max(0.3, Math.min(100, pct(t1)) - l)}%`, opacity: activity.shade[i] }} />
+              );
+            })}
+          </div>
+        ) : null}
 
         <div className="relative mt-1 h-8 rounded-md bg-surface-sunken">
           {buckets.map((b) => (

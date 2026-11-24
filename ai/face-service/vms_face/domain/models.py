@@ -11,12 +11,13 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     JSON,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 
@@ -390,3 +391,101 @@ class JourneyStop(Base):
     __table_args__ = (
         UniqueConstraint("journey_id", "seq", name="uq_journey_stop_seq"),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Investigation search index (I-1). One row per person / vehicle pass, written
+# by vms_face/investigate when INVESTIGATE_INDEX_ENABLED is on. The image
+# embedding lives in Qdrant `vms_tracks` under point id = Track.id; the best
+# crop in MinIO at Track.best_crop_key. Migration 0007_investigate_tracks.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Track(Base):
+    __tablename__ = "tracks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    camera_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("cameras.id", ondelete="CASCADE"))
+    source: Mapped[str] = mapped_column(String(16), default="live", server_default="live")   # live | backfill | file
+    case_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))   # held by a case: retention skips it
+    tracker_id: Mapped[str | None] = mapped_column(String(64))              # per-process pipeline id
+    object_class: Mapped[str] = mapped_column(String(32), default="person", server_default="person")
+    first_seen: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    hits: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    best_crop_key: Mapped[str | None] = mapped_column(Text)
+    best_crop_ts: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    attributes: Mapped[dict] = mapped_column(JSONB, default=dict)
+    zones: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+    appearance_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    body_vector_id: Mapped[str | None] = mapped_column(String(64))
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("persons.id", ondelete="SET NULL")
+    )
+    plate: Mapped[str | None] = mapped_column(String(32))
+    quality: Mapped[float | None] = mapped_column(Float)
+    ir: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    model_info: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class TrackPoint(Base):
+    """Where a track's box was, 1 point/s, x1/y1/x2/y2 on a 0–1000 grid."""
+
+    __tablename__ = "track_points"
+
+    track_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), primary_key=True
+    )
+    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    bbox: Mapped[list[int]] = mapped_column(ARRAY(SmallInteger))
+
+
+class ActivityBucket(Base):
+    """Per camera, per minute, per object class: how many tracks were seen."""
+
+    __tablename__ = "activity_buckets"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    camera_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cameras.id", ondelete="CASCADE"), primary_key=True
+    )
+    minute: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    object_class: Mapped[str] = mapped_column(String(32), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class TrackReview(Base):
+    """A person's decision on a proposed journey sighting (migration 0008)."""
+
+    __tablename__ = "track_reviews"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    seed_track_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"))
+    track_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"))
+    verdict: Mapped[str] = mapped_column(String(16))
+    score: Mapped[float | None] = mapped_column(Float)
+    actor: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (UniqueConstraint("tenant_id", "seed_track_id", "track_id", name="uq_track_review"),)
+
+
+class SpeechSegment(Base):
+    """What was said in one transcribed chunk (Audio Search, migration 0009)."""
+
+    __tablename__ = "speech_segments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    camera_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("cameras.id", ondelete="CASCADE"))
+    source: Mapped[str] = mapped_column(String(16), default="recording", server_default="recording")
+    start_ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    end_ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    text: Mapped[str] = mapped_column(Text)
+    lang: Mapped[str | None] = mapped_column(String(8))
+    model_info: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

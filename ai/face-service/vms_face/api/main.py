@@ -13,7 +13,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import select
 
 from vms_face import __version__
-from vms_face.api.routes import cameras, edge, embed, events, footfall, journey, learning, legacy, personnel, persons, reid, search, streams, tenants, ws
+from vms_face.api.routes import cameras, edge, embed, events, footfall, investigate, journey, learning, legacy, personnel, persons, reid, search, streams, tenants, ws
 from vms_face.config import settings
 from vms_face.core.executors import shutdown_all
 from vms_face.core.logging import configure_logging, get_logger
@@ -35,7 +35,7 @@ from vms_face.infra.detection_state import run_cam_state_subscriber
 from vms_face.infra.insightface_runtime import FaceRuntime
 from vms_face.infra.minio_store import get_object_store
 from vms_face.infra.postgres import session_scope
-from vms_face.infra.qdrant import close_all as close_qdrant, get_qdrant_appearance, get_qdrant_enrolled
+from vms_face.infra.qdrant import close_all as close_qdrant, get_qdrant_appearance, get_qdrant_enrolled, get_qdrant_tracks
 from vms_face.infra.redis_bus import get_bus
 from vms_face.services.footfall import get_registry as get_footfall_registry
 from vms_face.services.known_faces_bootstrap import schedule_bootstrap
@@ -69,6 +69,25 @@ async def _reconcile_streams() -> None:
             select(Camera).where(Camera.enabled.is_(True), Camera.status == CameraStatus.ONLINE)
         )
         cams = list(rows.scalars())
+        # A default-tenant camera whose code is also registered under an
+        # organisation is a stale twin (pre-2026-11-24 registrations without
+        # the org token, see legacy._retire_default_tenant_twins): disable it
+        # instead of restarting a second pipeline on the same stream.
+        from vms_face.domain.models import Tenant
+
+        default = (await session.execute(
+            select(Tenant).where(Tenant.name == settings.default_tenant_name))).scalar_one_or_none()
+        if default is not None:
+            org_codes = {c.code for c in (await session.execute(
+                select(Camera).where(Camera.tenant_id != default.id))).scalars()}
+            twins = [c for c in cams if c.tenant_id == default.id and c.code in org_codes]
+            for c in twins:
+                c.enabled = False
+                c.status = CameraStatus.OFFLINE
+            if twins:
+                await session.commit()
+                log.info("reconciler: retired default-tenant twin cameras", codes=sorted(c.code for c in twins))
+                cams = [c for c in cams if c not in twins]
         if sharding.is_primary():
             sharding.prune({str(c.id) for c in cams})
         # Only this shard's cameras; the others restart theirs (sharding.owns).
@@ -84,6 +103,26 @@ async def _reconcile_streams() -> None:
         except Exception as e:
             log.warning("reconciler: failed to restart camera", camera_id=str(cam.id), err=str(e))
 
+
+
+async def _loop_freeze_watchdog(stop: asyncio.Event) -> None:
+    """If the event loop stops running for `loop_freeze_exit_sec`, dump every
+    thread's stack to stderr and exit, so the container restarts instead of
+    hanging forever. Seen 2026-11-24 on WSL2 with NVDEC decoders reopening
+    every ~30 s: the whole process froze (a thread stuck in native GPU code
+    holding the GIL) and /healthz never answered again. The dump says where."""
+    limit = float(settings.loop_freeze_exit_sec or 0)
+    if limit <= 0:
+        return
+    try:
+        while not stop.is_set():
+            faulthandler.dump_traceback_later(limit, exit=True)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=min(10.0, limit / 4))
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 async def _loop_lag_probe(stop: asyncio.Event, period: float = 0.1) -> None:
@@ -152,6 +191,7 @@ async def lifespan(app: FastAPI):
     stop_signal = asyncio.Event()
     background: list[asyncio.Task] = []
     background.append(asyncio.create_task(_loop_lag_probe(stop_signal), name="loop-lag-probe"))
+    background.append(asyncio.create_task(_loop_freeze_watchdog(stop_signal), name="loop-freeze-watchdog"))
     if float(settings.python_switch_interval) > 0:
         sys.setswitchinterval(float(settings.python_switch_interval))
         log.info("python switch interval set", seconds=float(settings.python_switch_interval))
@@ -172,6 +212,19 @@ async def lifespan(app: FastAPI):
     if settings.qdrant_appearance_enabled:
         appearance = get_qdrant_appearance()
         await appearance.ensure_collection()
+    if settings.investigate_index_enabled:
+        await get_qdrant_tracks().ensure_collection()
+        # Load SigLIP 2 (~1.5 GB) now, in the background, so the first search
+        # or index write doesn't wait for it (it takes 20-40 s from disk).
+        def _warm_siglip() -> None:
+            try:
+                from vms_face.investigate.embedder import SiglipEmbedder
+
+                SiglipEmbedder.shared()
+            except Exception as e:   # a missing model must not stop the API
+                log.warning("investigate: SigLIP model not loaded", err=str(e))
+
+        asyncio.get_running_loop().run_in_executor(None, _warm_siglip)
 
     objects = get_object_store()
     objects.ensure_buckets()
@@ -353,6 +406,7 @@ app.include_router(events.router)
 app.include_router(search.router)
 app.include_router(learning.router)
 app.include_router(journey.router)
+app.include_router(investigate.router)
 app.include_router(ws.router)
 app.include_router(reid.router)
 app.include_router(legacy.router)
