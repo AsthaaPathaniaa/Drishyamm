@@ -31,7 +31,9 @@ const config         = require('../config/env');
 const s3Service      = require('../services/s3.service');
 const { aiAuthHeader } = require('../utils/aiTenant');
 const { assertAiLicence, getAiEntitledUserIds } = require('../services/entitlements.service');
-const { isAiEnabled } = require('../services/aiLifecycle.service');
+const {
+  isAiEnabled, countingOnlyAi, AI_TURNED_ON_FOR_COUNTING,
+} = require('../services/aiLifecycle.service');
 const { AIEvent, Camera, CameraGroup, RestrictedZone } = require('../models');
 const {
   bodyDetectionRequired, nextZoneBodyFlag, NO_PRODUCER_REASON,
@@ -1412,17 +1414,39 @@ const setCameraHeadcount = asyncHandler(async (req, res) => {
     ? (ALLOWED_DETAIL.includes(Number(req.body.imgsz)) ? Number(req.body.imgsz) : null)
     : (prev.imgsz ?? null);
 
+  // THE TICK IS THE WHOLE SWITCH. Counting is gated on the camera's master AI
+  // switch like every other feature, and this endpoint is the only switch an
+  // operator is given for counting -- the Head Count page's tick, and Zone
+  // Setup's save, both land here. So turning counting on turns the master on
+  // with it, for counting only: see countingOnlyAi for what that does and does
+  // not switch on, and why an explicit face flag is overridden rather than
+  // honoured. Without this a camera sat ticked here and excluded by
+  // aiFeatureCameras.service `eligible`, counting nothing, with no page able to
+  // say why -- and a zone drawn on it saved successfully and never got a number.
+  //
+  // Turning counting OFF leaves the master alone. Other features hang off it,
+  // and un-ticking a camera here is not a request to stop them.
+  const now = new Date().toISOString();
+  const startAi = enabled && !isAiEnabled(camera);
+
   const next = {
     ...current,
+    ...(startAi ? { ai: countingOnlyAi(current.ai, now) } : {}),
     headcount: {
       ...prev, enabled, threshold, zones,
       ...(detail ? { imgsz: detail } : { imgsz: undefined }),
-      updatedAt: new Date().toISOString(),
+      updatedAt: now,
     },
   };
   await camera.update({ settings: next });
 
-  return res.json({ success: true, data: { id: camera.id, headcount: next.headcount } });
+  return res.json({
+    success: true,
+    data: { id: camera.id, headcount: next.headcount, ai: next.ai || current.ai || {} },
+    // Said where the tick was, because the tick did more than it said. One
+    // notice, only on the save that actually changed the master switch.
+    notices: startAi ? [AI_TURNED_ON_FOR_COUNTING] : [],
+  });
 });
 
 /**

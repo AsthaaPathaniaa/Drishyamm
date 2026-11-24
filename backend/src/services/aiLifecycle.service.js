@@ -50,6 +50,66 @@ function faceRecognitionOn(camera) {
   return (camera.settings?.ai || {}).faceRecognition !== false;
 }
 
+/**
+ * The `settings.ai` a camera needs in order to be COUNTED, and nothing else.
+ *
+ * Head count is gated on the master switch like every other feature, but the
+ * only switch an operator is given for counting is the tick on the Head Count
+ * page, which writes `settings.headcount.enabled`. So a camera could be ticked
+ * for counting and excluded by the master switch at the same time: counting
+ * never started, and no page said why. Turning the master on IS what the tick
+ * means -- "use this camera for AI, to count people on it" -- so the endpoint
+ * that takes the tick does it.
+ *
+ * COUNTING ONLY, and that is the whole care taken here. Switching the master
+ * on is switching on the thing every feature hangs off, so each feature is
+ * checked against what this returns:
+ *
+ *   face          `faceRecognitionOn` -- ABSENT MEANS ON, so it is set
+ *                 explicitly FALSE. This is the anonymous-counting case the
+ *                 master/face split was built for (see above): heads counted,
+ *                 no face matched. Left absent, ticking a camera for counting
+ *                 would start matching faces against the org's gallery and
+ *                 spend a face licence, which is not what was asked for and
+ *                 not reversible by un-ticking.
+ *   activity      `settings.ai.activityMonitoring === true` -- absent, so off.
+ *   zone-guard    `settings.ai.zoneBodyDetection === true` -- absent, so off.
+ *   head count    `settings.headcount.enabled` + this master. Both on.
+ *
+ * A camera whose master is ALREADY on is not passed through here at all: its
+ * settings are its own, and counting needs nothing changed.
+ *
+ * An explicit `faceRecognition: true` on a camera whose master is off is
+ * overridden rather than honoured. Nothing was running (the master was off),
+ * honouring it would spend a face licence that can be refused -- failing the
+ * tick for a reason the Head Count page cannot act on -- and turning it back
+ * on in Camera Setup is one switch, additively.
+ *
+ * Does NOT reconcile the AI runtime: with face off the reconcile loop does not
+ * want this camera (`isAiEnabled && faceRecognitionOn`), so starting it here
+ * would be a start followed immediately by a stop. The head-count service
+ * reads the flag from its own registry poll, within ~15s.
+ */
+function countingOnlyAi(previousAi = {}, now = new Date().toISOString()) {
+  const prev = previousAi || {};
+  return {
+    ...prev,
+    enabled: true,
+    // A stored mode is kept unless it is the off state we are leaving.
+    mode: prev.mode && prev.mode !== 'off' ? prev.mode : 'continuous',
+    faceRecognition: false,
+    updatedAt: now,
+    createdAt: prev.createdAt || now,
+    disabledAt: null,
+    lastError: null,
+  };
+}
+
+/** Said once, where the tick was, when the tick also switched the master on. */
+const AI_TURNED_ON_FOR_COUNTING = 'This camera\'s AI was switched on so it can be counted. '
+  + 'It counts people only — faces are not matched. Turn on face recognition in '
+  + 'Camera Setup → AI Detection if you want that too.';
+
 async function getRuntime() {
   try {
     const sentAt = Date.now();
@@ -230,5 +290,8 @@ module.exports = {
   isAiEnabled,
   // The face-recognition half of what `ai.enabled` used to mean on its own.
   faceRecognitionOn,
+  // Turning the master ON for counting, without turning anything else on.
+  countingOnlyAi,
+  AI_TURNED_ON_FOR_COUNTING,
   _internals: { yieldsToPlayback, paused: _paused },
 };

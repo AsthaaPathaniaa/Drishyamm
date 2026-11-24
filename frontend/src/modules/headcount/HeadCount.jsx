@@ -104,6 +104,9 @@ export default function HeadCount() {
   const [query, setQuery] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
   const [fixingAi, setFixingAi] = useState(false);
+  // What a save did beyond what was asked. Cleared by the next save, and by
+  // the operator, so it never becomes furniture.
+  const [notices, setNotices] = useState([]);
 
   const poll = useCallback(async () => {
     try {
@@ -185,12 +188,23 @@ export default function HeadCount() {
     setCamList((list) => list.map((c) => (c.id === cam.id
       ? { ...c, headcount: { ...(c.headcount || {}), enabled: next } } : c)));
     try {
-      await aiService.setHeadcount(cam.id, { enabled: next, threshold: cam.headcount?.threshold || 0 });
+      const res = await aiService.setHeadcount(cam.id, {
+        enabled: next, threshold: cam.headcount?.threshold || 0,
+      });
+      // The tick can do more than it says: on a camera whose AI was off, the
+      // backend switches the master on so counting can actually start (see
+      // aiLifecycle.service countingOnlyAi). It did it, so it says it -- here,
+      // where the tick was, and only on the save that changed it.
+      setNotices(Array.isArray(res?.notices) ? res.notices : []);
+      // The master switch just changed, so re-read the registry rather than
+      // waiting up to 10s for the poll: the "not counting" note and this
+      // camera's own card are both derived from it.
+      if (res?.notices?.length) loadCams();
     } catch {
       setCamList((list) => list.map((c) => (c.id === cam.id
         ? { ...c, headcount: { ...(c.headcount || {}), enabled: !next } } : c)));
     } finally { setSavingId(null); }
-  }, []);
+  }, [loadCams]);
 
   // Detail level = how much of the picture the detector examines. Measured on
   // identical footage: 640 -> 1280 found 71% more people, all of them distant.
@@ -323,6 +337,9 @@ export default function HeadCount() {
               commonest version of this problem is EVERY selected camera
               stranded -- and that renders as "No cameras are being counted
               yet", which is true and tells the operator nothing. */}
+          {notices.map((n) => (
+            <DidMoreNote key={n} note={n} onDismiss={() => setNotices([])} />
+          ))}
           {loaded && strandedNote && (
             <StrandedNote
               note={strandedNote}
@@ -408,6 +425,35 @@ export default function HeadCount() {
 }
 
 /* ── pieces ────────────────────────────────────────────────── */
+
+/**
+ * What a save did beyond what was asked.
+ *
+ * Ticking a camera for counting also switches its AI on when it was off,
+ * because counting is gated on that switch and the tick is the only one an
+ * operator is given (backend aiLifecycle.service countingOnlyAi). Doing it
+ * silently would be the same class of fault as not doing it at all: a setting
+ * changed that nobody was told about. Informational, not a warning — it is the
+ * save working.
+ *
+ * Dismissible, and replaced by the next save, so it cannot become furniture.
+ */
+function DidMoreNote({ note, onDismiss }) {
+  return (
+    <div className="flex shrink-0 items-start gap-2.5 rounded-xl border border-brand/35 bg-brand-soft px-3 py-2">
+      <Check className="mt-0.5 h-4 w-4 shrink-0 text-brand-ink" strokeWidth={2.5} />
+      <p className="min-w-0 flex-1 text-caption leading-relaxed text-brand-ink">{note}</p>
+      <button
+        aria-label="Dismiss"
+        className="shrink-0 cursor-pointer rounded p-0.5 text-brand-ink/70 transition hover:text-brand-ink"
+        onClick={onDismiss}
+        type="button"
+      >
+        <X size={14} strokeWidth={2.5} />
+      </button>
+    </div>
+  );
+}
 
 /**
  * One line accounting for every camera the operator selected that the detector
