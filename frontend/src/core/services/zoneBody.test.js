@@ -229,7 +229,9 @@ test('an anonymous camera cannot be read as having the zone covered', () => {
 
 test('every other feature keeps its shape', () => {
   const f = cameraFeatures(row());
-  for (const key of ['face', 'unknown_alerts', 'watchlist_alerts', 'journey', 'head_count', 'restricted_zone']) {
+  // 'journey' is deliberately absent: journey mapping left this panel for
+  // Person Tracker, which already owns the per-camera flag.
+  for (const key of ['face', 'unknown_alerts', 'watchlist_alerts', 'head_count', 'restricted_zone']) {
     assert.equal(find(f, key).hidden, false, `${key} must stay visible`);
     assert.equal(find(f, key).forced, undefined, `${key} must not be forced`);
   }
