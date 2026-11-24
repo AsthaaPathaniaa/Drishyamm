@@ -126,9 +126,10 @@ function AccountHub({ id }) {
           <div className="hub-head-meta">
             <StatusDot tone={active ? 'success' : 'danger'}>{active ? 'Active' : 'Suspended'}</StatusDot>
             <span>{hub.plan ? `${hub.plan.name} plan${hub.plan.aiEnabled ? '' : ' · no AI'}` : 'No plan'}</span>
-            <span>Customer since {formatDate(account.createdAt)}</span>
+            <span>{account.operator ? 'Platform operator · ' : ''}Customer since {formatDate(account.createdAt)}</span>
           </div>
-          {!confirming && (
+          {/* Operators can't be suspended (the backend refuses it too). */}
+          {!confirming && !(account.operator && active) && (
             <button className={`btn ${active ? 'btn-danger' : 'btn-primary'}`} onClick={() => setConfirming(true)}>
               <span className="material-symbols-outlined icon-sm">{active ? 'block' : 'lock_open'}</span>
               {active ? 'Suspend account' : 'Reactivate account'}
