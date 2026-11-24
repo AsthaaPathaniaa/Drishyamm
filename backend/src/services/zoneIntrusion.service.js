@@ -88,6 +88,71 @@ function inZone(zone, xPct, yPct) {
 }
 
 
+/**
+ * Every camera carrying an ENABLED restricted zone, for any user.
+ *
+ * This engine's only input is the ephemeral overlay channel, and the face
+ * service does not POST to it for cameras nobody is watching in a browser
+ * (backend_forwarder.py: `if gating and monitor_id not in watched: continue`).
+ * So a zone on an unwatched camera sees nothing at all -- it is armed only
+ * while somebody has that camera's live view open, and blind overnight, which
+ * is the hour it was drawn for. /ai/viewers is what the AI service asks, and
+ * these cameras need their boxes whether or not a person is looking.
+ *
+ * Cached on the same clock as zonesFor: /ai/viewers is polled every couple of
+ * seconds by every AI shard, so this must not become a query per poll.
+ *
+ * Entitlements are deliberately NOT applied here, unlike zonesFor. This is the
+ * cheap, wide answer to "keep the boxes flowing"; the entitlement is still
+ * checked before any alert is raised. Including a camera whose account has
+ * restricted zones switched off costs a little overlay traffic. Excluding one
+ * wrongly silences a security control, and the two mistakes are not the same
+ * size.
+ */
+let armedCache = { at: 0, ids: [] };
+
+async function armedMonitorIds() {
+  if (armedCache.at && Date.now() - armedCache.at <= ZONE_RELOAD_MS) return armedCache.ids;
+  const { RestrictedZone } = require('../models');
+  const rows = await RestrictedZone.findAll({
+    where: { enabled: true },
+    attributes: ['monitorId'],
+  });
+  // De-duplicated in JS rather than with GROUP BY: a camera can carry several
+  // zones, and the column list is short enough that the grouping is not worth
+  // a dialect-specific query.
+  const ids = [...new Set(rows.map((r) => r && r.monitorId).filter(Boolean))];
+  armedCache = { at: Date.now(), ids };
+  return ids;
+}
+
+let armedWarned = false;
+
+/**
+ * Whose overlay boxes does somebody need? The browsers drawing them, plus the
+ * cameras above. This is the whole answer /ai/viewers gives.
+ *
+ * Fails to the browser set, never to an empty one. The AI side reads an empty
+ * list as "nobody needs anything" and stops posting for every camera, so a
+ * database blip here would silence the live overlay across the deployment on
+ * top of the zones. Logged once per failure streak, because the endpoint is
+ * polled every couple of seconds and a line per poll is a line nobody reads.
+ */
+async function overlayNeededMonitorIds(watched = []) {
+  const out = new Set(Array.isArray(watched) ? watched.filter(Boolean) : []);
+  try {
+    for (const id of await armedMonitorIds()) out.add(id);
+    armedWarned = false;
+  } catch (err) {
+    if (!armedWarned) {
+      armedWarned = true;
+      logger.warn('zoneIntrusion: could not list armed zones for /ai/viewers -- a zone on a camera nobody is watching will not fire until this clears', { error: err.message });
+    }
+  }
+  return [...out];
+}
+
+
 async function zonesFor(userId, monitorId) {
   let entry = zoneCache.get(userId);
   if (!entry || Date.now() - entry.at > ZONE_RELOAD_MS) {
@@ -270,4 +335,14 @@ function init() {
   logger.info('zoneIntrusion engine armed (occupancy model: enter/stay-heartbeat/clear)');
 }
 
-module.exports = { init };
+module.exports = {
+  init,
+  // Read by internal.routes.js's /ai/viewers. Exported from here, rather than
+  // the route querying zones itself, so that what a zone needs stays with the
+  // engine that needs it.
+  overlayNeededMonitorIds,
+  armedMonitorIds,
+  _internals: {
+    resetArmedCache: () => { armedCache = { at: 0, ids: [] }; armedWarned = false; },
+  },
+};
