@@ -47,14 +47,47 @@ test('features: flags and drawn shapes show when AI is on', () => {
       detectionZones: [{ shape: 'polygon', enabled: true }, { shape: 'line', enabled: true }],
     },
   });
-  assert.deepEqual(activeFeatureLabels(r), ['Face', 'Unknown', 'Journey', 'Count', 'Zone']);
+  // No 'Journey': journey mapping is a feature built on the face model's
+  // output, not a model, and Person Tracker owns the per-camera choice.
+  assert.deepEqual(activeFeatureLabels(r), ['Face', 'Unknown', 'Count', 'Zone']);
+});
+
+test('features: head count is READY only when a gate line is drawn', () => {
+  // This test used to be called "a drawn gate ..." while its fixture drew
+  // nothing -- `headcount.enabled` with `zones: []` -- and asserted that the
+  // bare flag counted as a drawn gate. That is the defect: the row said
+  // "Ready" on cameras with no gate line at all. The flag is the row's
+  // TOGGLE; a drawn zone is its setup state. They are different questions.
+  const flagOnly = cameraFeatures(row({ headcount: { enabled: true, zones: [] } }));
+  const bare = flagOnly.find((x) => x.key === 'head_count');
+  assert.equal(bare.on, false);
+  assert.equal(bare.needsSetup, false, 'a flag with nothing drawn is not a gate');
 });
 
 test('features: a drawn gate on a camera with AI off needs setup', () => {
-  const f = cameraFeatures(row({ headcount: { enabled: true, zones: [] } }));
+  const f = cameraFeatures(row({ headcount: { enabled: false, zones: [{ enabled: true }] } }));
   const count = f.find((x) => x.key === 'head_count');
   assert.equal(count.on, false);
   assert.equal(count.needsSetup, true);
+});
+
+test('features: the alert rows hang off the face model and say they do nothing', () => {
+  const f = cameraFeatures(row({ ai: { enabled: true } }));
+  for (const key of ['unknown_alerts', 'watchlist_alerts']) {
+    const r = f.find((x) => x.key === key);
+    assert.equal(r.parent, 'face', `${key} belongs under the model that produces it`);
+    assert.ok(r.notEnforced, `${key} must state that no service reads it`);
+  }
+  // Face off hides them: an alert from a model that is not running is not a
+  // choice an operator can meaningfully make.
+  const anon = cameraFeatures(row({ ai: { enabled: true, faceRecognition: false } }));
+  assert.equal(anon.find((x) => x.key === 'unknown_alerts').hidden, true);
+  assert.equal(anon.find((x) => x.key === 'watchlist_alerts').hidden, true);
+});
+
+test('features: journey mapping is not a model, so it is not a row', () => {
+  const f = cameraFeatures(row({ ai: { enabled: true } }));
+  assert.equal(f.find((x) => x.key === 'journey'), undefined);
 });
 
 test('setup path selects the camera', () => {

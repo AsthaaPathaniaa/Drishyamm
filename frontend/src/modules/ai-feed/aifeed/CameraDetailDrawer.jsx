@@ -124,7 +124,12 @@ export default function CameraDetailDrawer({
               <Action icon={Cctv} primary onClick={() => navigate(`/live?camera=${encodeURIComponent(cam.monitorId)}`)} disabled={demo}>View Live</Action>
               <Action icon={History} onClick={() => navigate(`/playback?camera=${encodeURIComponent(cam.monitorId)}`)} disabled={demo}>Playback</Action>
               {aiEnabled
-                ? <Action icon={MapPinned} onClick={onOpenZones} disabled={demo}>Detection Area{zones.length ? ` (${zones.length})` : ''}</Action>
+                ? (
+                  <>
+                    <Action icon={MapPinned} onClick={onOpenZones} disabled={demo}>Detection Area{zones.length ? ` (${zones.length})` : ''}</Action>
+                    <Action icon={ScanFace} onClick={() => onEnableAi?.(cam)} disabled={demo}>Edit AI</Action>
+                  </>
+                )
                 : <Action icon={ScanFace} onClick={() => onEnableAi?.(cam)} disabled={demo || !online}>Set up AI</Action>}
               <Action icon={UserPlus} onClick={onRegisterFace} disabled={demo}>Register Face</Action>
             </div>

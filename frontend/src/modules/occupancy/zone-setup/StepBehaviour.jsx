@@ -29,6 +29,35 @@ import {
 
 const INPUT = 'mt-1 w-full rounded-lg border border-line bg-surface px-2.5 py-1.5 text-body text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/25';
 
+/**
+ * A control that is drawn, saves to this browser, and enforces NOTHING.
+ *
+ * RoomBehaviorPanel.jsx gained this treatment first; the same controls are
+ * offered again HERE, on the zone-setup drawer, and were missed. Verified
+ * against restricted-zones-api.js `toApi`, which is the whole save payload:
+ * `hours`, `offHoursLock`, `minCapacity`, `maxDwellMin`, `dwellEnabled` and
+ * `privacy` appear in it ZERO times. The server never learns any of them.
+ *
+ * A disabled <fieldset> is deliberate: it disables every control inside it
+ * natively, including Toggle and Segmented, which take no `disabled` prop of
+ * their own and are shared with screens where they DO work.
+ *
+ * Kept visible rather than deleted: the values are already stored on real
+ * zones, and hiding them would turn a known gap into a mystery. Each is
+ * re-enabled by making it reach a service, not by removing this wrapper.
+ */
+function NotEnforced({ reason, children }) {
+  return (
+    <fieldset className="m-0 min-w-0 border-0 p-0" disabled title={reason}>
+      <p className="mb-1.5 inline-flex items-center gap-1 rounded border border-line bg-surface-sunken px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">
+        Not enforced
+      </p>
+      <div className="pointer-events-none opacity-55">{children}</div>
+      <p className="mt-1 text-[10.5px] leading-relaxed text-fg-subtle">{reason}</p>
+    </fieldset>
+  );
+}
+
 /** The limit in force right now: 0 under strict lockout or the off-hours lock. */
 const capInForce = (draft, lockedOut) => (
   lockedOut || (draft.offHoursLock && !withinHours(draft)) ? 0 : Number(draft.maxCapacity) || 0
@@ -126,6 +155,7 @@ export function CapacityStep({ draft, set, lockedOut }) {
 export function ScheduleRules({ draft, set }) {
   const lockedNow = draft.offHoursLock && !withinHours(draft);
   return (
+    <NotEnforced reason="These hours and the lock are held on this browser; no service reads them. A zone's real arming schedule is the one in its access rules, which is saved to the server.">
     <div className="flex flex-col gap-2">
       <div className="grid grid-cols-2 gap-2">
         <Field htmlFor="z-start" label="Opens at">
@@ -141,8 +171,10 @@ export function ScheduleRules({ draft, set }) {
           <Lock className="h-3.5 w-3.5 shrink-0 text-brand" strokeWidth={2.25} />
           Off-hours security lock
           <InfoTip label="About the off-hours lock">
-            Outside the hours above, the allowed occupancy becomes 0, so anyone inside is a breach, with no
-            schedule to maintain by hand.
+            Intended: outside the hours above the allowed occupancy becomes 0, so anyone inside is a breach.
+            It does not happen yet &mdash; this lock is held on this browser and never reaches the engine, so
+            it colours the badge above and raises nothing. A zone&#x27;s real arming schedule is the one in
+            its access rules, which IS saved.
           </InfoTip>
           {draft.offHoursLock ? (
             <span className={`rounded-md px-1.5 py-0.5 text-small font-bold ${lockedNow ? 'bg-danger-soft text-danger-ink' : 'bg-success-soft text-success-ink'}`}>
@@ -153,12 +185,14 @@ export function ScheduleRules({ draft, set }) {
         <Toggle checked={Boolean(draft.offHoursLock)} label="Off-hours security lock" onChange={(v) => set({ offHoursLock: v })} />
       </div>
     </div>
+    </NotEnforced>
   );
 }
 
 /** Minimum staffing & the dwell ceiling. */
 export function StaffingRules({ draft, set }) {
   return (
+    <NotEnforced reason="No service reads a minimum occupancy, and nothing measures how long a person stays, so neither of these raises anything.">
     <div className="flex flex-col">
       <div className="flex items-center justify-between gap-3 rounded-lg border border-line bg-surface-sunken px-3 py-2">
         <span className="flex min-w-0 items-center gap-1.5">
@@ -191,6 +225,7 @@ export function StaffingRules({ draft, set }) {
         onChange={set}
       />
     </div>
+    </NotEnforced>
   );
 }
 
@@ -226,7 +261,9 @@ export function IdentityTracking({ draft, set }) {
         <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-brand" strokeWidth={2.25} />
         Identity tracking
       </p>
-      <Segmented compact name="Identity tracking" onChange={(v) => set({ privacy: v })} options={PRIVACY_MODES} value={draft.privacy} />
+      <NotEnforced reason="This choice never leaves the browser. Face recognition is governed by the camera's own AI settings, not by this control, so picking 'anonymous' here does not stop faces being matched.">
+        <Segmented compact name="Identity tracking" onChange={(v) => set({ privacy: v })} options={PRIVACY_MODES} value={draft.privacy} />
+      </NotEnforced>
     </div>
   );
 }
