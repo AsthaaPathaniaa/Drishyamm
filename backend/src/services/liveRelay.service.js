@@ -108,6 +108,10 @@ function codecFromInit(init) {
 // re-encodes it to AAC (the video stays a stream copy). G.711 at 8 kHz mono
 // costs next to nothing to encode. RELAY_AUDIO=0 turns it off.
 const AUDIO_ON = process.env.RELAY_AUDIO !== '0';
+// NVR playback (`once` relays) carries audio on its own switch: RELAY_AUDIO=0
+// is about live-view latency, which a recording replay doesn't have.
+// PLAYBACK_AUDIO=0 turns playback audio off.
+const PLAYBACK_AUDIO_ON = process.env.PLAYBACK_AUDIO !== '0';
 const AUDIO_CODEC = 'mp4a.40.2'; // AAC-LC
 
 // The track ID of the video track in an init segment (the trak whose handler
@@ -261,9 +265,10 @@ async function spawnRelay(relay) {
     if (relay.nvrUrl) { input = relay.nvrUrl; relay.direct = true; }
   }
   if (relay.stopped) return;
-  // Live view carries the camera's audio as AAC. NVR playback (once) stays
-  // video only: its player has no sound control and is always muted.
-  const audio = AUDIO_ON && !relay.once;
+  // Live view and NVR playback (once) carry the camera's audio as AAC, each on
+  // its own switch. Playback fills audio gaps with silence (aresample) so a
+  // late NVR audio packet can't hold the picture back in MediaSource.
+  const audio = relay.once ? PLAYBACK_AUDIO_ON : AUDIO_ON;
   const args = [
     '-hide_banner', '-loglevel', process.env.RELAY_TRACE ? 'debug' : 'error', '-nostdin',
     '-rtsp_transport', 'tcp',
@@ -285,6 +290,7 @@ async function spawnRelay(relay) {
     // `?`: a camera without audio just has none.
     ...(audio ? [
       '-map', '0:a:0?', '-c:a', 'aac', '-ar', '48000', '-ac', '1', '-b:a', '64k',
+      ...(relay.once ? ['-af', 'aresample=async=1'] : []),
       // Don't hold video back more than 1 s waiting for audio.
       '-max_interleave_delta', '1000000',
     ] : []),
@@ -386,6 +392,7 @@ async function spawnRelay(relay) {
       : ran > 30_000 ? 1000
         : refused ? Math.min(60_000, 1000 * 2 ** Math.min(relay.restarts, 6))
           : Math.min(15_000, 1000 * 2 ** Math.min(relay.restarts, 4));
+    const stalled = !!relay.killReason;
     const msg = relay.killReason
       || err.trim().split('\n').slice(-2).join(' | ').replace(/rtsp:\/\/[^@\s/]*@/g, 'rtsp://***@');
     relay.killReason = null;
@@ -393,6 +400,17 @@ async function spawnRelay(relay) {
     // is done, or the NVR had nothing. Never restart it from the beginning.
     if (relay.once) {
       logger.info('liveRelay: replay ended', { path: relay.path, ranMs: ran, error: code ? msg : undefined });
+      stopRelay(relay.path);
+      return;
+    }
+    // Nobody is watching (a warm-keeper pin only) and the source stalled or
+    // failed fast: release the NVR session instead of knocking again. On a
+    // saturated recorder every restart is one more session competing for the
+    // same uplink, which is what kept the lab NVR at 15% of real time
+    // (2026-11-21). The warm-keeper re-pins on its next heartbeat if the NVR
+    // has room (nvrLoad); a viewer arriving starts the relay on demand.
+    if (relay.direct && !relay.viewers.size && (stalled || ran < 30_000)) {
+      logger.info('liveRelay: unwatched relay lost its source, releasing it', { path: relay.path, ranMs: ran, error: msg });
       stopRelay(relay.path);
       return;
     }
@@ -517,6 +535,25 @@ function releaseIfIdle(path) {
   return stopRelay(path);
 }
 
+/**
+ * Stop every live relay nobody is watching that `belongs(path, relay)` says
+ * is on a given NVR. Playback relays (once) are never touched. Returns the
+ * paths stopped.
+ */
+function releaseIdleWhere(belongs) {
+  const out = [];
+  for (const [path, r] of [..._relays]) {
+    if (r.once || r.viewers.size || !belongs(path, r)) continue;
+    if (stopRelay(path)) out.push(path);
+  }
+  return out;
+}
+
+/** The NVR a direct relay reads from, or null when it reads Stream Service. */
+function hostOf(relay) {
+  return relay?.nvrUrl ? nvrHost(relay.nvrUrl) : null;
+}
+
 function isRunning(path) {
   const r = _relays.get(path);
   return !!(r && !r.stopped);
@@ -617,4 +654,4 @@ function stats() {
   }));
 }
 
-module.exports = { attach, issueTicket, issueAudioTicket, pin, isRunning, stopRelay, stats, viewerCount, releaseIfIdle, codecOf, sessionsOnHost, hasSource, _internals: { codecFromInit, isKeyframe, findBox, sweepStalled, sourceReady, sourceUrl, relays: _relays } };
+module.exports = { attach, issueTicket, issueAudioTicket, pin, isRunning, stopRelay, stats, viewerCount, releaseIfIdle, releaseIdleWhere, hostOf, codecOf, sessionsOnHost, hasSource, _internals: { codecFromInit, isKeyframe, findBox, sweepStalled, sourceReady, sourceUrl, relays: _relays } };

@@ -14,6 +14,7 @@ const streamReconcile = require('./services/streamReconcile.service');
 const streamQuality    = require('./services/streamQuality.service');
 const streamBus        = require('./services/streamBus.service');
 const aiLifecycle      = require('./services/aiLifecycle.service');
+const nvrFocus         = require('./services/nvrFocus.service');
 const aiEventRetention = require('./services/aiEventRetention.service');
 const s3Retention      = require('./services/s3Retention.service');
 const recordingBackfill = require('./services/recordingBackfill.service');
@@ -105,6 +106,10 @@ async function startServer() {
       // vms_face runtime: selected cameras run continuously, unselected ones stop.
       aiLifecycle.start();
 
+      // While footage is replayed from an NVR, park that NVR's background
+      // streams so the replay gets its whole uplink (nvrFocus.service).
+      nvrFocus.start().catch((err) => logger.warn('nvrFocus start failed', { error: err.message }));
+
       // Restricted-zone intrusion engine — evaluates live AI overlay boxes
       // against the user's RestrictedZones (K-of-N confirm + dwell + zone
       // cooldown) and emits zone.intrusion events → toasts/bell/email.
@@ -160,6 +165,7 @@ async function startServer() {
         recordingSync.stop();
         recordingBackfill.stop();
         aiLifecycle.stop();
+        nvrFocus.stop();
         streamReconcile.stop();
         liveSnapshot.stopSweep();
         await streamSupervisor.stop().catch(() => {});

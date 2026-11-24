@@ -55,6 +55,8 @@ const vendors          = require('./vendors');
 const streamRouter     = require('./streamRouter.service');
 const streamingService = require('./drishyamStreaming.service');
 const edgeRelay        = require('./edgeRelay.service');
+const nvrLoad          = require('./nvrLoad.service');
+const { AAC_AUDIO_ARGS } = require('../utils/nvrAudio');
 
 let Camera, CameraGroup;
 const loadModels = () => {
@@ -312,7 +314,8 @@ function pullFrom(job, sourceUrl) {
       '-fflags', '+genpts',
       '-i', sourceUrl,
       '-t', String(durSec),
-      '-map', '0:v:0', '-c:v', 'copy', '-an',             // as recorded; NVR audio is G.711
+      '-map', '0:v:0', '-c:v', 'copy',                    // video as recorded
+      ...AAC_AUDIO_ARGS,                                  // NVR G.711 → AAC
       '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
       '-f', 'mp4', '-y', tmp,
     ];
@@ -358,7 +361,7 @@ function splitClips(src, dir, startMs) {
   return new Promise((resolve) => {
     const proc = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-y', '-i', src,
-      '-map', '0:v:0', '-c', 'copy',
+      '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy',   // keep the audio track
       '-f', 'segment', '-segment_time', String(CLIP_SEC), '-reset_timestamps', '1',
       '-segment_format', 'mp4', '-segment_format_options', 'movflags=+faststart',
       '-segment_list', list, '-segment_list_type', 'csv',
@@ -506,6 +509,17 @@ async function runJobs(jobs) {
   const budgetEnd = Date.now() + PASS_BUDGET_MS;
   const inFlight = new Set();
   const stopGuard = await guardLive(jobs, inFlight);
+  // A camera's owner opened playback/export on an NVR we are pulling their
+  // camera from directly: give those sessions back now (other accounts' jobs
+  // carry on). A stopped job counts as 'busy' (retried on the next pass, not
+  // a failure).
+  const onInteractive = (host, userId) => {
+    const victims = [...inFlight].filter((j) => !j.edge && j.host === host && (j.camera.userId ?? null) === userId);
+    for (const j of victims) { j.stopped = true; try { j.proc?.kill('SIGTERM'); } catch { /* gone */ } }
+    if (victims.length) logger.info('backfill: playback opened on this NVR, yielding', { host, stopped: victims.length });
+  };
+  nvrLoad.events.on('interactive', onInteractive);
+  let deferred = 0;
 
   await new Promise((done) => {
     const queue = [...jobs];
@@ -522,7 +536,12 @@ async function runJobs(jobs) {
           if (fair && job.edge && cameraBusy(job)) { i++; continue; }
           if (!job.edge && active >= CONCURRENCY) { i++; continue; }
           if ((perHost.get(job.host) || 0) >= (job.edge ? EDGE_PER_SITE : PER_HOST)) { i++; continue; }
+          // Direct NVR: only within its session budget, and never while
+          // someone is replaying from it. Deferred to the next pass (not
+          // skipped in place: with nothing running the pass would never end).
+          if (!job.edge && nvrLoad.backgroundRoom(job.host, job.camera.userId ?? null) <= 0) { queue.splice(i, 1); deferred++; continue; }
           queue.splice(i, 1);
+          job.releaseLease = job.edge ? null : nvrLoad.track(job.host, 'backfill');
           if (!job.edge) active++;
           running++;
           perHost.set(job.host, (perHost.get(job.host) || 0) + 1);
@@ -556,6 +575,7 @@ async function runJobs(jobs) {
             _state.chunks[job.key] = st;
             saveState();
           }).finally(() => {
+            job.releaseLease?.();
             inFlight.delete(job);
             if (!job.edge) active--;
             running--;
@@ -569,6 +589,8 @@ async function runJobs(jobs) {
     pump();
   });
   stopGuard();
+  nvrLoad.events.off('interactive', onInteractive);
+  if (deferred) logger.info('backfill: NVR busy, gaps left for the next pass', { deferred });
   return { filled, failed };
 }
 

@@ -136,6 +136,8 @@ async function pickSource(camera, { persist = false, skipRecording = false, live
     }
   }
   if (persist) {
+    // The camera's owner is replaying footage from this NVR: their background picture waits.
+    if (require('./nvrLoad.service').interactiveActive(camera.host, camera.userId ?? null)) return { kind: 'deferred', readyPaths: 0 };
     const readyPaths = await readyPathsOnNvr(camera.host);
     if (readyPaths >= NVR_VIEW_BUDGET) return { kind: 'deferred', readyPaths };
   }

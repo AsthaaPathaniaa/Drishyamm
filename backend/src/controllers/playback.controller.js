@@ -29,6 +29,7 @@ const { randomUUID } = require('node:crypto');
 const { pipeline } = require('node:stream/promises');
 const asyncHandler = require('../middleware/asyncHandler');
 const AppError = require('../utils/AppError');
+const { AAC_AUDIO_ARGS } = require('../utils/nvrAudio');
 const { Camera, CameraGroup } = require('../models');
 const vendors = require('../services/vendors');
 const streamRouter = require('../services/streamRouter.service');
@@ -38,6 +39,7 @@ const edgeRelay = require('../services/edgeRelay.service');
 const logger = require('../config/logger');
 const config = require('../config/env');
 const liveRelay = require('../services/liveRelay.service');
+const nvrLoad = require('../services/nvrLoad.service');
 
 const MAX_RANGE_MS = 6 * 3600 * 1000;      // cap one request at 6h of footage
 const MAX_SESSION_MS = 30 * 60 * 1000;     // hard-kill ffmpeg after 30 min
@@ -78,8 +80,23 @@ function stopSession(pathN) {
   edgeRelay.closeReplay(s.edgeJob);
   if (s.relay) liveRelay.stopRelay(s.relayPath || pathN);
   try { s.proc?.kill('SIGKILL'); } catch { /* already gone */ }
+  s.release?.();
   logger.info('nvr playback session stopped', { pathN });
 }
+
+// A relay replay is over when its relay is (range done, viewer gone, tab
+// closed without the stop beacon). Close the session then, rather than at
+// MAX_SESSION_MS, so its claim on the NVR (nvrLoad) doesn't keep background
+// work there paused for half an hour. The relay starts when the browser
+// redeems its ticket, so a young session without one is still connecting.
+const RELAY_CONNECT_GRACE_MS = 60_000;
+function sweepEndedRelaySessions(now = Date.now()) {
+  for (const [pathN, s] of sessions) {
+    if (!s.relay || now - s.startedAt < RELAY_CONNECT_GRACE_MS) continue;
+    if (!liveRelay.isRunning(s.relayPath || pathN)) stopSession(pathN);
+  }
+}
+setInterval(() => sweepEndedRelaySessions(), 15_000).unref?.();
 
 // `copy`: the source is already H.264 (a relay's replay reports its codec), so
 // it is passed straight through — starts sooner and costs no CPU.
@@ -91,8 +108,9 @@ function spawnTranscode(pathN, nvrRtsp, edgeJob = null, { copy = false } = {}) {
     '-hide_banner', '-loglevel', 'error',
     '-rtsp_transport', 'tcp',
     '-i', nvrRtsp,
-    '-an',                                   // drop NVR G711 audio (HLS trouble)
-    ...video,
+    // NVR audio is G.711, which HLS can't carry: re-encoded to AAC.
+    '-map', '0:v:0', ...video,
+    ...AAC_AUDIO_ARGS,
     '-f', 'rtsp', '-rtsp_transport', 'tcp', `${MEDIAMTX_RTSP}/${pathN}`,
   ];
   const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -101,7 +119,7 @@ function spawnTranscode(pathN, nvrRtsp, edgeJob = null, { copy = false } = {}) {
   proc.on('exit', (code) => {
     if (code && code !== 255) logger.warn('nvr playback ffmpeg exited', { pathN, code, tail: redact(tail).trim().slice(-200) });
     const s = sessions.get(pathN);
-    if (s && s.proc === proc) { clearTimeout(s.timer); sessions.delete(pathN); }
+    if (s && s.proc === proc) { clearTimeout(s.timer); sessions.delete(pathN); s.release?.(); }
     edgeRelay.closeReplay(edgeJob);
   });
   proc.on('error', (e) => logger.error('nvr playback ffmpeg spawn error', { pathN, error: e.message }));
@@ -139,6 +157,40 @@ async function loadCamera(userId, monitorId) {
 
 // The device holding the recordings: the group's NVR, else the camera itself.
 const nvrHost = ({ camera, group }) => group?.host ?? camera.host ?? null;
+
+/**
+ * Recorded playback and export have right of way on the recorder (see
+ * nvrLoad.service.js). Claims the NVR so background work there (warm-keeper,
+ * backfill) yields while this runs, releases the warm-keeper's unwatched
+ * sub-streams on it now, and tracks this pull in its session budget.
+ * Returns { release, load }. Site-relay cameras are on another network and
+ * paced by their relay: nothing to claim.
+ */
+function claimNvr(cam, kind) {
+  if (cam.edge) return { release: () => {}, load: null };
+  const host = nvrHost(cam);
+  // Live view addresses the camera by its own host; normally the NVR's.
+  const hosts = [...new Set([host, cam.camera.host].filter(Boolean))];
+  // The claim is this user's: only their own background streams yield.
+  const userId = cam.camera.userId ?? null;
+  const releases = hosts.map((h) => nvrLoad.claim(h, userId));
+  if (kind) releases.push(nvrLoad.track(host, kind));
+  for (const h of hosts) {
+    require('../services/streamWarm.service')
+      .yieldForMain({ host: h, monitorId: cam.camera.monitorId, userId }).catch(() => {});
+  }
+  const load = nvrLoad.usage(host);
+  if (load.full) {
+    logger.warn('nvr playback: recorder is at its session limit, footage may stall', {
+      monitorId: cam.camera.monitorId, host, total: load.total, limit: load.limit, byKind: load.byKind,
+    });
+  }
+  let done = false;
+  return { load, release: () => { if (done) return; done = true; releases.forEach((r) => r()); } };
+}
+
+// What the player shows: how busy the recorder is, without its address.
+const loadInfo = (load) => (load ? { inUse: load.total, limit: load.limit, full: load.full } : null);
 
 function assertPlayback(cam) {
   if (cam.edge) return;       // the relay knows its NVR's brand and does the replay
@@ -198,12 +250,15 @@ const startNvrPlayback = asyncHandler(async (req, res) => {
       userId: req.user.id, monitorId, path: pathN, variant: 'main',
       nvrUrl: nvrPlaybackRtsp(cam, startMs, endMs), once: true,
     });
-    sessions.set(pathN, { proc: null, relay: true, startedAt: Date.now(), timer: setTimeout(() => stopSession(pathN), MAX_SESSION_MS) });
-    logger.info('nvr playback started', { userId: req.user.id, monitorId, deviceType: cam.deviceType, pathN, mode: 'relay' });
+    // The relay itself is counted by nvrLoad (a direct relay): claim only.
+    const nvr = claimNvr(cam, null);
+    sessions.set(pathN, { proc: null, relay: true, release: nvr.release, startedAt: Date.now(), timer: setTimeout(() => stopSession(pathN), MAX_SESSION_MS) });
+    logger.info('nvr playback started', { userId: req.user.id, monitorId, deviceType: cam.deviceType, pathN, mode: 'relay', nvrLoad: loadInfo(nvr.load) });
     return res.json({
       success: true, mode: 'relay', pathName: pathN, ticket,
       range: { start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() },
       deviceType: cam.deviceType,
+      nvrLoad: loadInfo(nvr.load),
     });
   }
   const src = await playbackSource(cam, startMs, endMs);
@@ -218,9 +273,12 @@ const startNvrPlayback = asyncHandler(async (req, res) => {
       deviceType: cam.deviceType,
     });
   }
+  const nvr = claimNvr(cam, 'playback');
   spawnTranscode(pathN, src.url, src.edgeJob, { copy: src.h264 });
+  const session = sessions.get(pathN);
+  if (session) session.release = nvr.release; else nvr.release();
 
-  logger.info('nvr playback started', { userId: req.user.id, monitorId, deviceType: cam.deviceType, pathN });
+  logger.info('nvr playback started', { userId: req.user.id, monitorId, deviceType: cam.deviceType, pathN, nvrLoad: loadInfo(nvr.load) });
   res.json({
     success: true,
     pathName: pathN,
@@ -232,6 +290,7 @@ const startNvrPlayback = asyncHandler(async (req, res) => {
     webrtcUrl: `${config.streamService.webrtcUrl}/${pathN}`,
     range: { start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() },
     deviceType: cam.deviceType,
+    nvrLoad: loadInfo(nvr.load),
   });
 });
 
@@ -312,8 +371,10 @@ function exportArgs(nvrRtsp, durationSec, format, outPath) {
     '-rtsp_transport', 'tcp',
     '-i', nvrRtsp,
     '-t', String(durationSec),
-    '-an',
-    ...video,
+    // Video mapped explicitly because AAC_AUDIO_ARGS maps audio: once any
+    // -map is given, ffmpeg selects only what is mapped.
+    '-map', '0:v:0', ...video,
+    ...AAC_AUDIO_ARGS,                       // G.711 -> AAC, so the clip has sound
     // Frame one at timeline 0. ffmpeg rebases the first input itself, so this
     // is belt and braces against a source whose own timestamps start hours in
     // (a recorder stamping wall-clock time): whatever it hands us, the clip's
@@ -323,7 +384,7 @@ function exportArgs(nvrRtsp, durationSec, format, outPath) {
     // duration and the seek index, and +faststart writes it in front of the
     // media, so a player has both before it has the whole clip. The fragmented
     // header this replaces declared a duration of 0 (measured on its output),
-    // and its fragment index (mfra) is only written in the trailer — which the
+    // and its fragment index (mfra) is only written in the trailer -- which the
     // ffmpeg we used to SIGKILL never reached. An evidence clip nobody can
     // scrub is not evidence.
     '-movflags', '+faststart',
@@ -432,15 +493,21 @@ const exportNvrClip = asyncHandler(async (req, res) => {
   const entry = { proc: null };
   exportsByUser.set(req.user.id, entry);
   sweepStaleExports().catch(() => {});
+  // Recorded playback and export have right of way on the recorder: claim it so
+  // background work there (warm-keeper, backfill, detection) yields while this
+  // clip is pulled. Released in the finally below, on every exit path.
+  const nvr = claimNvr(cam, 'export');
   let src;
   try {
     src = await playbackSource(cam, startMs, endMs);
   } catch (err) {
     exportsByUser.delete(req.user.id);
+    nvr.release();
     throw err;
   }
   if (req.destroyed) {          // download cancelled while the relay was connecting
     exportsByUser.delete(req.user.id);
+    nvr.release();
     edgeRelay.closeReplay(src.edgeJob);
     return;
   }
@@ -521,6 +588,10 @@ const exportNvrClip = asyncHandler(async (req, res) => {
     }
   } finally {
     clearTimeout(timer);
+    // Every exit path lands here -- spawn error, cancelled download, no
+    // playable clip, finished send -- which is why the recorder's claim is
+    // released here rather than in a closure each path has to remember.
+    nvr.release();
     edgeRelay.closeReplay(src.edgeJob);
     if (exportsByUser.get(req.user.id) === entry) exportsByUser.delete(req.user.id);
     await fsp.rm(tmpPath, { force: true }).catch(() => {});
@@ -534,6 +605,7 @@ module.exports = {
   exportNvrClip,
   // exported for tests
   exportArgs,
+  _internals: { sessions, stopSession, sweepEndedRelaySessions, claimNvr },
   exportFilename,
   hasMoovBox,
   endExportFfmpeg,
