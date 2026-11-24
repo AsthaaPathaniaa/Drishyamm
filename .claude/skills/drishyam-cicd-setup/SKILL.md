@@ -17,7 +17,7 @@ laptops, because people patched servers during demos. Everything is now in
 
 | Environment | Branch | Access | Deploy trigger | Who sets it up |
 |---|---|---|---|---|
-| TESTING (this machine) | `main` | **public via Funnel, no site password** (changed from tailnet-only on 2026-11-13 at the user's request, "option B"), `<testing URL>` | auto on every push/merge to `main` | **us (this project)** |
+| TESTING (this machine) | `main` | **public via Cloudflare Tunnel, no site password** (tailnet-only → Funnel on 2026-11-13, "option B"; Funnel → Cloudflare Tunnel on 2026-11-24, Funnel off), `<testing URL>` | auto on every push/merge to `main` | **us (this project)** |
 | PRODUCTION (other machine) | `production` | Cloudflare Tunnel + gpu-bridge (exists) | auto on push to `production`, runner label `production` | maintainer, separately |
 
 Team flow: `<name>/<module>-<task>` (investigation: `<name>/investigation-i<N>-<feature>`; see docs/GIT_WORKFLOW.md#branch-naming) → PR into `main` → maintainer merges → testing
@@ -142,7 +142,7 @@ Golden rule: code reaches a server only through GitHub + the pipeline.
   http://127.0.0.1:8080`. One origin, no CORS, mirrors the production edge.
   Alternative: `tailscale serve --set-path` per service with no nginx. Fewer parts,
   but path rewriting is limited. **Awaiting user.**
-- **D5 Public access: DECIDED Funnel, fully open (user chose option B, then removed the site password and the public sign-up block, 2026-11-13, after being told the risk).** Edge keeps: real client IP via X-Forwarded-For passthrough, `$is_public` in the access log. **Open risk:** `/ai/` (face search, detections, uploads), `/hls/`, `/live/` have no auth; anyone can self-register. Revisit before sharing the URL widely: re-add Basic auth for requests where `$is_public` = 1 (map `$is_public` → `auth_basic` realm; exempt `/api` and `/socket.io`) or fix AI auth in the app.
+- **D5 Public access: DECIDED fully open; since 2026-11-24 through a Cloudflare Tunnel instead of Funnel (Funnel off). Through the tunnel `$is_public` is always 1, so a Basic-auth gate keyed on it would apply to every visitor.** Original decision: Funnel, fully open (user chose option B, then removed the site password and the public sign-up block, 2026-11-13, after being told the risk).** Edge keeps: real client IP via X-Forwarded-For passthrough, `$is_public` in the access log. **Open risk:** `/ai/` (face search, detections, uploads), `/hls/`, `/live/` have no auth; anyone can self-register. Revisit before sharing the URL widely: re-add Basic auth for requests where `$is_public` = 1 (map `$is_public` → `auth_basic` realm; exempt `/api` and `/socket.io`) or fix AI auth in the app.
 - **D2 Deploy location: proceeding with existing checkout (user didn't object).** deploy **in the existing checkout**. It holds
   `.env`/`backend/.env`, and the compose project name `drishyamm` (→ existing data volumes)
   comes from its directory. The runner's `_work` dir is used only for the workflow
