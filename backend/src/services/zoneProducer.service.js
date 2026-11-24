@@ -39,9 +39,17 @@
  * tested without a database and read without chasing a model.
  */
 
-/** Is this camera used by AI at all? Mirrors aiLifecycle's isAiEnabled. */
+const { flag } = require('./aiFlags');
+
+/**
+ * Is this camera used by AI at all? Mirrors aiLifecycle's isAiEnabled.
+ *
+ * Reads the flag through aiFlags so what absent means lives in ONE table
+ * rather than being restated here -- identical for every stored value, which
+ * that file's tests assert directly.
+ */
 function aiOn(ai) {
-  return (ai || {}).enabled === true && (ai || {}).mode !== 'off';
+  return flag(ai, 'enabled') && (ai || {}).mode !== 'off';
 }
 
 /**
@@ -49,7 +57,7 @@ function aiOn(ai) {
  * camera saved before the face flag existed still counts as a producer.
  */
 function faceProducerOn(ai) {
-  return aiOn(ai) && (ai || {}).faceRecognition !== false;
+  return aiOn(ai) && flag(ai, 'faceRecognition');
 }
 
 /**
@@ -57,7 +65,7 @@ function faceProducerOn(ai) {
  * opt-in, so a camera that has never been told to run it does not.
  */
 function bodyProducerOn(ai) {
-  return aiOn(ai) && (ai || {}).zoneBodyDetection === true;
+  return aiOn(ai) && flag(ai, 'zoneBodyDetection');
 }
 
 /** Which producers would feed a zone on this camera, in display order. */
@@ -83,7 +91,7 @@ function zoneHasProducer(ai) {
  * silently arming something.
  */
 function bodyDetectionRequired(ai) {
-  return aiOn(ai) && (ai || {}).faceRecognition === false;
+  return aiOn(ai) && !flag(ai, 'faceRecognition');
 }
 
 /** The reason shown wherever body detection is forced on or a zone refused. */

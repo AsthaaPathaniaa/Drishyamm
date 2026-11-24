@@ -4,6 +4,7 @@ const config = require('../config/env');
 const logger = require('../config/logger');
 const { Camera, CameraGroup } = require('../models');
 const { getAiEntitledUserIds } = require('./entitlements.service');
+const { flag } = require('./aiFlags');
 const { recordAiClock } = require('./aiClockSkew');
 const nvrLoad = require('./nvrLoad.service');
 
@@ -31,7 +32,11 @@ const _paused = new Set();   // monitorIds we stopped for playback (for logging)
  */
 function isAiEnabled(camera) {
   const ai = camera.settings?.ai || {};
-  return ai.enabled === true && ai.mode !== 'off';
+  // `flag` rather than `=== true`, so what absent means lives in ONE table
+  // (aiFlags.js) instead of being restated by each reader. Identical for every
+  // stored value -- see that file's docblock and its tests. `mode` stays a
+  // separate test: it is not a boolean, and 'off' is a third state.
+  return flag(ai, 'enabled') && ai.mode !== 'off';
 }
 
 /**
@@ -47,50 +52,58 @@ function isAiEnabled(camera) {
  * which stopped the counting with it.
  */
 function faceRecognitionOn(camera) {
-  return (camera.settings?.ai || {}).faceRecognition !== false;
+  return flag(camera.settings?.ai, 'faceRecognition');
 }
 
 /**
- * The `settings.ai` a camera needs in order to be COUNTED, and nothing else.
+ * ON MEANS ON: the `settings.ai` a camera needs for ONE feature to actually
+ * run, and for nothing else to start.
  *
- * Head count is gated on the master switch like every other feature, but the
- * only switch an operator is given for counting is the tick on the Head Count
- * page, which writes `settings.headcount.enabled`. So a camera could be ticked
- * for counting and excluded by the master switch at the same time: counting
- * never started, and no page said why. Turning the master on IS what the tick
- * means -- "use this camera for AI, to count people on it" -- so the endpoint
- * that takes the tick does it.
+ * Every feature is gated on the master switch. But the switch an operator is
+ * given for a feature is the feature's own toggle -- the tick on the Head
+ * Count page (`settings.headcount.enabled`), the tick on the activity page
+ * (`settings.ai.activityMonitoring`) -- and those toggles used to write their
+ * own flag and nothing else. So a camera could be ticked for a feature and
+ * excluded by the master switch at the same time: the feature never started,
+ * and no page said why.
  *
- * COUNTING ONLY, and that is the whole care taken here. Switching the master
- * on is switching on the thing every feature hangs off, so each feature is
- * checked against what this returns:
+ * Turning the master on IS what the toggle means -- "use this camera for AI,
+ * for this" -- so the endpoint that takes the toggle does it. One rule for
+ * every feature toggle, which is the point: a toggle that reads ON must mean
+ * the thing is running.
+ *
+ * THAT FEATURE ONLY, and that is the whole care taken here. Switching the
+ * master on is switching on the thing every feature hangs off, so each one is
+ * checked against what this returns (one test per feature):
  *
  *   face          `faceRecognitionOn` -- ABSENT MEANS ON, so it is set
- *                 explicitly FALSE. This is the anonymous-counting case the
- *                 master/face split was built for (see above): heads counted,
- *                 no face matched. Left absent, ticking a camera for counting
- *                 would start matching faces against the org's gallery and
- *                 spend a face licence, which is not what was asked for and
- *                 not reversible by un-ticking.
- *   activity      `settings.ai.activityMonitoring === true` -- absent, so off.
- *   zone-guard    `settings.ai.zoneBodyDetection === true` -- absent, so off.
- *   head count    `settings.headcount.enabled` + this master. Both on.
+ *                 explicitly FALSE. This is the anonymous case the
+ *                 master/face split was built for: people detected, no face
+ *                 matched. Left absent, ticking a camera for counting would
+ *                 start matching faces against the org's gallery and spend a
+ *                 face licence -- not asked for, and not undone by unticking.
+ *   activity      `activityMonitoring` -- absent, so off unless its own
+ *                 toggle is what brought us here.
+ *   zone-guard    `zoneBodyDetection` -- absent, so off, likewise.
+ *   head count    `settings.headcount.enabled`, written by its own endpoint.
  *
  * A camera whose master is ALREADY on is not passed through here at all: its
- * settings are its own, and counting needs nothing changed.
+ * settings are its own and the feature needs nothing changed. Turning a
+ * feature OFF never comes here either -- other features hang off the master,
+ * and unticking one is not a request to stop them.
  *
- * An explicit `faceRecognition: true` on a camera whose master is off is
- * overridden rather than honoured. Nothing was running (the master was off),
- * honouring it would spend a face licence that can be refused -- failing the
- * tick for a reason the Head Count page cannot act on -- and turning it back
- * on in Camera Setup is one switch, additively.
+ * An explicit `faceRecognition: true` on a camera whose master is OFF is
+ * overridden rather than honoured. Nothing was running, honouring it would
+ * spend a face licence that can be REFUSED -- failing a toggle the feature's
+ * page cannot act on -- and turning it back on in Camera Setup is one switch,
+ * additively.
  *
- * Does NOT reconcile the AI runtime: with face off the reconcile loop does not
- * want this camera (`isAiEnabled && faceRecognitionOn`), so starting it here
- * would be a start followed immediately by a stop. The head-count service
- * reads the flag from its own registry poll, within ~15s.
+ * Does NOT reconcile the face runtime: with face off the reconcile loop does
+ * not want this camera (`isAiEnabled && faceRecognitionOn`), so starting it
+ * here would be a start followed at once by a stop. Each feature's own service
+ * reads the flag on its own registry poll.
  */
-function countingOnlyAi(previousAi = {}, now = new Date().toISOString()) {
+function masterOnForFeature(previousAi = {}, now = new Date().toISOString()) {
   const prev = previousAi || {};
   return {
     ...prev,
@@ -105,10 +118,20 @@ function countingOnlyAi(previousAi = {}, now = new Date().toISOString()) {
   };
 }
 
-/** Said once, where the tick was, when the tick also switched the master on. */
-const AI_TURNED_ON_FOR_COUNTING = 'This camera\'s AI was switched on so it can be counted. '
-  + 'It counts people only — faces are not matched. Turn on face recognition in '
-  + 'Camera Setup → AI Detection if you want that too.';
+/**
+ * Said where the toggle was, when the toggle also switched the master on.
+ *
+ * Both halves matter. The first is why the camera's AI is suddenly on; the
+ * second is what stops that reading as a privacy surprise.
+ */
+function aiTurnedOnFor(what) {
+  return `This camera's AI was switched on so it can be ${what}. It detects people only `
+    + '— faces are not matched. Turn on face recognition in Camera Setup → AI Detection '
+    + 'if you want that too.';
+}
+
+const AI_TURNED_ON_FOR_COUNTING = aiTurnedOnFor('counted');
+const AI_TURNED_ON_FOR_ACTIVITY = aiTurnedOnFor('monitored for activity');
 
 async function getRuntime() {
   try {
@@ -290,8 +313,11 @@ module.exports = {
   isAiEnabled,
   // The face-recognition half of what `ai.enabled` used to mean on its own.
   faceRecognitionOn,
-  // Turning the master ON for counting, without turning anything else on.
-  countingOnlyAi,
+  // Turning the master ON for one feature, without turning anything else on.
+  // One rule for every feature toggle: ON means the thing is running.
+  masterOnForFeature,
+  aiTurnedOnFor,
   AI_TURNED_ON_FOR_COUNTING,
+  AI_TURNED_ON_FOR_ACTIVITY,
   _internals: { yieldsToPlayback, paused: _paused },
 };

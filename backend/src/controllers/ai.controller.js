@@ -32,7 +32,8 @@ const s3Service      = require('../services/s3.service');
 const { aiAuthHeader } = require('../utils/aiTenant');
 const { assertAiLicence, getAiEntitledUserIds } = require('../services/entitlements.service');
 const {
-  isAiEnabled, countingOnlyAi, AI_TURNED_ON_FOR_COUNTING,
+  isAiEnabled, masterOnForFeature,
+  AI_TURNED_ON_FOR_COUNTING, AI_TURNED_ON_FOR_ACTIVITY,
 } = require('../services/aiLifecycle.service');
 const { AIEvent, Camera, CameraGroup, RestrictedZone } = require('../models');
 const {
@@ -1431,7 +1432,7 @@ const setCameraHeadcount = asyncHandler(async (req, res) => {
 
   const next = {
     ...current,
-    ...(startAi ? { ai: countingOnlyAi(current.ai, now) } : {}),
+    ...(startAi ? { ai: masterOnForFeature(current.ai, now) } : {}),
     headcount: {
       ...prev, enabled, threshold, zones,
       ...(detail ? { imgsz: detail } : { imgsz: undefined }),
@@ -2164,21 +2165,40 @@ const setActivityCameras = asyncHandler(async (req, res) => {
   }
 
   const results = [];
+  let turnedAiOn = 0;
   for (const id of ids) {
     const camera = await Camera.findOne({ where: { id, userId: req.user.id } });
     if (!camera) { results.push({ id, ok: false, error: 'not found' }); continue; }
     const current = camera.settings || {};
+    const now = new Date().toISOString();
+    // ON MEANS ON. Activity monitoring is gated on the camera's master AI
+    // switch (aiFeatureCameras.service `eligible`), and this toggle is the only
+    // switch an operator is given for it -- so switching it on switches the
+    // master on too. Without this a camera sat ticked for activity and
+    // excluded by the master, analysing nothing, with no page able to say why:
+    // the same fault head count had. For this feature only -- see
+    // masterOnForFeature for what it does and does not start.
+    //
+    // Turning activity OFF leaves the master alone: other features hang off it.
+    const startAi = enabled && !isAiEnabled(camera);
+    if (startAi) turnedAiOn += 1;
     const nextAi = {
-      ...(current.ai || {}),
+      ...(startAi ? masterOnForFeature(current.ai, now) : (current.ai || {})),
       activityMonitoring: enabled,
-      updatedAt: new Date().toISOString(),
+      updatedAt: now,
     };
     await camera.update({ settings: { ...current, ai: nextAi } });
-    results.push({ id, monitorId: camera.monitorId, ok: true, activityMonitoring: enabled });
+    results.push({
+      id, monitorId: camera.monitorId, ok: true, activityMonitoring: enabled, aiTurnedOn: startAi,
+    });
   }
 
   const push = await pushActivityCameras();
-  res.json({ success: true, count: results.length, enabled, data: results, push });
+  res.json({
+    success: true, count: results.length, enabled, data: results, push,
+    // Said where the toggle was, because the toggle did more than it said.
+    notices: turnedAiOn ? [AI_TURNED_ON_FOR_ACTIVITY] : [],
+  });
 });
 
 // GET /api/ai/activity-cameras → which cameras are enabled (DB truth) + live

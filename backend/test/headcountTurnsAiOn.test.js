@@ -13,20 +13,20 @@
  * off, so "only counting starts" has to be a test and not a comment.
  */
 const {
-  isAiEnabled, faceRecognitionOn, countingOnlyAi, AI_TURNED_ON_FOR_COUNTING,
+  isAiEnabled, faceRecognitionOn, masterOnForFeature, AI_TURNED_ON_FOR_COUNTING,
 } = require('../src/services/aiLifecycle.service');
 
 const asCamera = (ai) => ({ settings: { ai } });
 
-describe('countingOnlyAi — the master switch, for counting', () => {
+describe('masterOnForFeature — the master switch, for one feature', () => {
   test('a camera that has never had AI configured comes out counted', () => {
-    const ai = countingOnlyAi(undefined, 'NOW');
+    const ai = masterOnForFeature(undefined, 'NOW');
     expect(isAiEnabled(asCamera(ai))).toBe(true);
     expect(ai.mode).toBe('continuous');
   });
 
   test('called with nothing at all it still produces a usable master switch', () => {
-    const ai = countingOnlyAi();
+    const ai = masterOnForFeature();
     expect(isAiEnabled(asCamera(ai))).toBe(true);
     expect(typeof ai.updatedAt).toBe('string');
   });
@@ -34,7 +34,7 @@ describe('countingOnlyAi — the master switch, for counting', () => {
   // ── counting only. One assertion per feature that hangs off the master. ──
 
   test('FACE stays off: absent means ON, so it is set explicitly false', () => {
-    const ai = countingOnlyAi({}, 'NOW');
+    const ai = masterOnForFeature({}, 'NOW');
     expect(ai.faceRecognition).toBe(false);
     expect(faceRecognitionOn(asCamera(ai))).toBe(false);
   });
@@ -43,31 +43,31 @@ describe('countingOnlyAi — the master switch, for counting', () => {
     // Nothing was running -- the master was off -- and honouring it would
     // spend a face licence that can be REFUSED, failing a tick the Head Count
     // page cannot act on. Turning it back on in Camera Setup is additive.
-    const ai = countingOnlyAi({ faceRecognition: true }, 'NOW');
+    const ai = masterOnForFeature({ faceRecognition: true }, 'NOW');
     expect(ai.faceRecognition).toBe(false);
   });
 
   test('ACTIVITY stays off — it needs activityMonitoring === true', () => {
-    const ai = countingOnlyAi({}, 'NOW');
+    const ai = masterOnForFeature({}, 'NOW');
     expect(ai.activityMonitoring).toBeUndefined();
     expect(ai.activityMonitoring === true).toBe(false);
   });
 
   test('ZONE-GUARD stays off — it needs zoneBodyDetection === true', () => {
-    const ai = countingOnlyAi({}, 'NOW');
+    const ai = masterOnForFeature({}, 'NOW');
     expect(ai.zoneBodyDetection).toBeUndefined();
     expect(ai.zoneBodyDetection === true).toBe(false);
   });
 
   test('a camera that had asked for zone-guard keeps it; this adds nothing', () => {
-    const ai = countingOnlyAi({ zoneBodyDetection: true }, 'NOW');
+    const ai = masterOnForFeature({ zoneBodyDetection: true }, 'NOW');
     expect(ai.zoneBodyDetection).toBe(true);
   });
 
   // ── what it carries over ────────────────────────────────────────────────
 
   test('every unrelated setting the camera already had is carried over', () => {
-    const ai = countingOnlyAi({
+    const ai = masterOnForFeature({
       fps: 12, detectionInputSize: 1280, purpose: 'entrance', priority: 'high',
       detectionZones: [{ id: 'z1' }], unknownAlerts: false,
     }, 'NOW');
@@ -80,13 +80,13 @@ describe('countingOnlyAi — the master switch, for counting', () => {
   });
 
   test('a stored mode is kept; only the off state we are leaving is replaced', () => {
-    expect(countingOnlyAi({ mode: 'scheduled' }, 'NOW').mode).toBe('scheduled');
-    expect(countingOnlyAi({ mode: 'off' }, 'NOW').mode).toBe('continuous');
-    expect(countingOnlyAi({ mode: '' }, 'NOW').mode).toBe('continuous');
+    expect(masterOnForFeature({ mode: 'scheduled' }, 'NOW').mode).toBe('scheduled');
+    expect(masterOnForFeature({ mode: 'off' }, 'NOW').mode).toBe('continuous');
+    expect(masterOnForFeature({ mode: '' }, 'NOW').mode).toBe('continuous');
   });
 
   test('createdAt is preserved and disabledAt / lastError are cleared', () => {
-    const ai = countingOnlyAi({
+    const ai = masterOnForFeature({
       createdAt: 'FIRST', disabledAt: 'WHEN-OFF', lastError: 'something old',
     }, 'NOW');
     expect(ai.createdAt).toBe('FIRST');
@@ -96,12 +96,12 @@ describe('countingOnlyAi — the master switch, for counting', () => {
   });
 
   test('a camera with no createdAt gets this moment as its first', () => {
-    expect(countingOnlyAi({}, 'NOW').createdAt).toBe('NOW');
+    expect(masterOnForFeature({}, 'NOW').createdAt).toBe('NOW');
   });
 
   test('it does not mutate the settings it was given', () => {
     const prev = { enabled: false, mode: 'off', faceRecognition: true };
-    countingOnlyAi(prev, 'NOW');
+    masterOnForFeature(prev, 'NOW');
     expect(prev).toEqual({ enabled: false, mode: 'off', faceRecognition: true });
   });
 
@@ -115,7 +115,7 @@ describe('countingOnlyAi — the master switch, for counting', () => {
 });
 
 describe('the gate the endpoint applies', () => {
-  // The endpoint runs countingOnlyAi only when `enabled && !isAiEnabled(camera)`.
+  // The endpoint runs masterOnForFeature only when `enabled && !isAiEnabled(camera)`.
   // These pin that condition, because "already on" must be left completely
   // alone -- its settings are its own and counting needs nothing changed.
   const startAi = (enabled, camera) => enabled && !isAiEnabled(camera);
