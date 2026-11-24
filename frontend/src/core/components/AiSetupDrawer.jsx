@@ -3,12 +3,9 @@ import { AlertTriangle, Check, ChevronDown, Loader2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { aiService } from '@/core/services/ai';
 import {
-  PURPOSES,
-  PURPOSE_PRESETS,
   buildDisablePayload,
   buildEnablePayload,
   cameraFeatures,
-  inferPurpose,
   lifecycleCopy,
   visibleFeatures,
 } from '@/core/services/aiCamera';
@@ -60,12 +57,29 @@ function SetupDrawer({ camera, onClose, onSaved }) {
   // the operator has to be something they are told about.
   const [notices, setNotices] = useState([]);
 
-  const submit = async (payload) => {
+  const submit = async (payload, headcountEnabled) => {
     setSaving(true);
     setError('');
     setNotices([]);
     try {
       const res = await aiService.updateCameraAiLifecycle(camera.id, payload);
+      // Counting is a separate route (settings.headcount, not settings.ai), so
+      // the toggle is a second call -- made only when it actually changed, and
+      // AFTER the AI save, so a failure here cannot lose the main edit. `zones`
+      // is deliberately not sent: the backend keeps the counting area already
+      // drawn, so switching counting off and on again never wipes it.
+      if (headcountEnabled !== undefined && headcountEnabled !== (camera.headcount?.enabled === true)) {
+        try {
+          await aiService.setHeadcount(camera.id, {
+            enabled: headcountEnabled,
+            threshold: Number(camera.headcount?.threshold) || 0,
+          });
+        } catch (err) {
+          setError(err?.response?.data?.message
+            || 'The AI settings were saved, but head counting could not be changed.');
+          return;
+        }
+      }
       onSaved?.(res.data);
       if (res.reconcile && res.reconcile.ok === false) {
         // Saved, but the AI service did not start it: keep the drawer open and say so.
@@ -86,8 +100,6 @@ function SetupDrawer({ camera, onClose, onSaved }) {
     }
   };
   const updateDraft = (key, value) => setDraft((prev) => ({ ...prev, [key]: value }));
-  // Picking a place pre-ticks the usual alerts for it; still editable.
-  const applyPurpose = (purpose) => setDraft((prev) => ({ ...prev, purpose, ...(PURPOSE_PRESETS[purpose] || {}) }));
   const on = camera.ai?.enabled === true;
   const status = lifecycleCopy(camera.lifecycle);
   // Both derived with AI forced on, so the list shows what this camera WOULD
@@ -132,6 +144,23 @@ function SetupDrawer({ camera, onClose, onSaved }) {
                 </FeatureLine>
               );
             }
+            // Stored, saved, and read by nothing. Shown disabled with the
+            // reason rather than deleted: the value on the camera is real, and
+            // the fix is to make a service read it -- see alertEngine.js.
+            if (f.notEnforced) {
+              return (
+                <FeatureLine child={Boolean(f.parent)} key={f.key} feature={f} note={f.notEnforced}>
+                  <fieldset className="m-0 flex shrink-0 items-center gap-2 border-0 p-0" disabled title={f.notEnforced}>
+                    <span className="rounded border border-line bg-surface-sunken px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">
+                      Not enforced
+                    </span>
+                    <span className="pointer-events-none opacity-55">
+                      <Switch label={f.label} value={draft[f.flag] === true} onChange={() => {}} />
+                    </span>
+                  </fieldset>
+                </FeatureLine>
+              );
+            }
             if (f.kind === 'flag') {
               // Forced on, with the reason shown. Not merely pre-ticked: an
               // anonymous camera with a zone and no detector is a zone that
@@ -147,12 +176,26 @@ function SetupDrawer({ camera, onClose, onSaved }) {
                 </FeatureLine>
               );
             }
+            // A setup row is READY only when something has been drawn. Head
+            // count then gets a real on/off beside it: "a gate line exists" and
+            // "count across it" are two questions, and reading the flag as the
+            // answer to both is what made this row claim to be ready on a
+            // camera with nothing drawn at all.
             return (
               <FeatureLine key={f.key} feature={f}>
                 {drawn[f.key] ? (
-                  <Link to={f.setupPath} className="inline-flex items-center gap-1 text-small font-medium text-success-ink hover:underline">
-                    <Check className="h-3.5 w-3.5" /> Ready
-                  </Link>
+                  <span className="flex shrink-0 items-center gap-3">
+                    <Link to={f.setupPath} className="inline-flex items-center gap-1 text-small font-medium text-success-ink hover:underline">
+                      <Check className="h-3.5 w-3.5" /> Ready
+                    </Link>
+                    {f.key === 'head_count' ? (
+                      <Switch
+                        label="Count people crossing this gate line"
+                        onChange={(v) => updateDraft('headcountEnabled', v)}
+                        value={draft.headcountEnabled === true}
+                      />
+                    ) : null}
+                  </span>
                 ) : (
                   <Link to={f.setupPath} className="text-small font-medium text-brand-ink hover:underline">
                     {f.setupLabel.replace(/^Draw a /, 'Draw ')}
@@ -162,18 +205,6 @@ function SetupDrawer({ camera, onClose, onSaved }) {
             );
           })}
         </div>
-
-        <label className="mt-5 block">
-          <span className="mb-2 block text-small font-semibold text-fg">Place</span>
-          <select
-            className="h-10 w-full rounded-lg border border-line bg-surface px-3 text-body text-fg outline-none focus:border-brand-line"
-            onChange={(event) => applyPurpose(event.target.value)}
-            value={draft.purpose}
-          >
-            <option value="">Select a place</option>
-            {PURPOSES.map((purpose) => <option key={purpose} value={purpose}>{purpose}</option>)}
-          </select>
-        </label>
 
         <button
           aria-expanded={advancedOpen}
@@ -224,10 +255,13 @@ function SetupDrawer({ camera, onClose, onSaved }) {
         <Button
           className="w-full"
           disabled={saving}
-          onClick={() => submit(buildEnablePayload(camera, {
-            ...draft,
-            ...(bodyForced ? { zoneBodyDetection: true } : null),
-          }))}
+          onClick={() => {
+            const { headcountEnabled, ...ai } = draft;
+            submit(buildEnablePayload(camera, {
+              ...ai,
+              ...(bodyForced ? { zoneBodyDetection: true } : null),
+            }), headcountEnabled);
+          }}
           type="button"
         >
           {saving ? <Loader2 className="animate-spin" /> : null}
@@ -314,11 +348,16 @@ function Segmented({ options, value, onChange }) {
 }
 
 function draftFromCamera(camera) {
-  const draft = buildEnablePayload(camera);
-  // A camera never set up starts from its inferred place's preset.
-  if (!camera.ai?.purpose) {
-    const purpose = inferPurpose(camera);
-    Object.assign(draft, PURPOSE_PRESETS[purpose] || {}, { purpose });
-  }
-  return draft;
+  // `purpose` is still set -- buildEnablePayload infers it from the camera's
+  // name -- because the backend uses it as a fallback zone label. What is gone
+  // is the PRESET: picking a place used to tick four flags at once, two of
+  // which (unknownAlerts, watchlistAlerts) no service reads and one of which
+  // (journeyMapping) is owned by Person Tracker. A shortcut for setting three
+  // controls that do nothing is worse than no shortcut.
+  //
+  // `headcountEnabled` is NOT part of the AI payload -- counting lives in
+  // settings.headcount and has its own route -- so it is stripped before save
+  // and sent separately. It rides in the draft so the row has somewhere to put
+  // the toggle's state.
+  return { ...buildEnablePayload(camera), headcountEnabled: camera?.headcount?.enabled === true };
 }
