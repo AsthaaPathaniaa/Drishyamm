@@ -50,7 +50,7 @@ test('features: flags and drawn shapes show when AI is on', () => {
   });
   // No 'Journey': journey mapping is a feature built on the face model's
   // output, not a model, and Person Tracker owns the per-camera choice.
-  assert.deepEqual(activeFeatureLabels(r), ['Face', 'Unknown', 'Count', 'Zone']);
+  assert.deepEqual(activeFeatureLabels(r), ['Face', 'Count', 'Zone']);
 });
 
 test('features: head count is READY only when a gate line is drawn', () => {
@@ -72,23 +72,22 @@ test('features: a drawn gate on a camera with AI off needs setup', () => {
   assert.equal(count.needsSetup, true);
 });
 
-test('features: the alert rows hang off the face model and say they do nothing', () => {
+test('features: this panel lists models, so alerts and journey are not rows', () => {
+  // An alert is not a model, it is what a model can tell you; journey mapping
+  // is a feature built on the face model's output and Person Tracker owns it.
   const f = cameraFeatures(row({ ai: { enabled: true } }));
-  for (const key of ['unknown_alerts', 'watchlist_alerts']) {
-    const r = f.find((x) => x.key === key);
-    assert.equal(r.parent, 'face', `${key} belongs under the model that produces it`);
-    assert.ok(r.notEnforced, `${key} must state that no service reads it`);
+  for (const key of ['unknown_alerts', 'watchlist_alerts', 'journey']) {
+    assert.equal(f.find((x) => x.key === key), undefined, `${key} must not be a row`);
   }
-  // Face off hides them: an alert from a model that is not running is not a
-  // choice an operator can meaningfully make.
-  const anon = cameraFeatures(row({ ai: { enabled: true, faceRecognition: false } }));
-  assert.equal(anon.find((x) => x.key === 'unknown_alerts').hidden, true);
-  assert.equal(anon.find((x) => x.key === 'watchlist_alerts').hidden, true);
+  assert.deepEqual(f.map((x) => x.key), ['face', 'head_count', 'restricted_zone', 'zone_body']);
 });
 
-test('features: journey mapping is not a model, so it is not a row', () => {
-  const f = cameraFeatures(row({ ai: { enabled: true } }));
-  assert.equal(f.find((x) => x.key === 'journey'), undefined);
+test('the flags the panel stopped showing are still carried through a save', () => {
+  // Removing a row must not quietly clear the value on the camera.
+  const p = buildEnablePayload(row({ ai: { unknownAlerts: false, watchlistAlerts: false, journeyMapping: false } }));
+  assert.equal(p.unknownAlerts, false);
+  assert.equal(p.watchlistAlerts, false);
+  assert.equal(p.journeyMapping, false);
 });
 
 test('a setup row links to the camera it was opened from', () => {

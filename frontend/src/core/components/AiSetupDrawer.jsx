@@ -145,23 +145,6 @@ function SetupDrawer({ camera, onClose, onSaved }) {
                 </FeatureLine>
               );
             }
-            // Stored, saved, and read by nothing. Shown disabled with the
-            // reason rather than deleted: the value on the camera is real, and
-            // the fix is to make a service read it -- see alertEngine.js.
-            if (f.notEnforced) {
-              return (
-                <FeatureLine child={Boolean(f.parent)} key={f.key} feature={f} note={f.notEnforced}>
-                  <fieldset className="m-0 flex shrink-0 items-center gap-2 border-0 p-0" disabled title={f.notEnforced}>
-                    <span className="rounded border border-line bg-surface-sunken px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">
-                      Not enforced
-                    </span>
-                    <span className="pointer-events-none opacity-55">
-                      <Switch label={f.label} value={draft[f.flag] === true} onChange={() => {}} />
-                    </span>
-                  </fieldset>
-                </FeatureLine>
-              );
-            }
             if (f.kind === 'flag') {
               // Forced on, with the reason shown. Not merely pre-ticked: an
               // anonymous camera with a zone and no detector is a zone that

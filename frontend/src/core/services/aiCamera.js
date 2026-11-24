@@ -39,23 +39,16 @@ export const AI_FEATURES = [
   // (PIPELINE_PERSON_DETECTION_ENABLED), off by default and off here, not
   // something this toggle turns on.
   { key: 'face', kind: 'flag', flag: 'faceRecognition', label: 'Face recognition', short: 'Face', note: 'Detects faces and matches them against enrolled people. Counting and zones do not need this — switch it off to count people without identifying them.' },
-  // The two alerts the FACE model produces, shown under it rather than
-  // beside it: an alert is not a model, it is what a model can tell you. Both
-  // are `notEnforced` -- the alerts themselves work end to end (the AI service
-  // emits them, alertEngine raises them), but NOTHING reads these per-camera
-  // flags, so switching one off does not stop the alert. Disabled rather than
-  // deleted, because the stored values are real and the fix is to make a
-  // service read them, not to hide the control.
-  {
-    key: 'unknown_alerts', kind: 'flag', flag: 'unknownAlerts', parent: 'face', needsFace: true,
-    notEnforced: 'Nothing reads this flag yet, so unknown-person alerts are raised whether it is on or off.',
-    label: 'Unknown person alerts', short: 'Unknown', note: 'Alert when someone who is not enrolled is seen.',
-  },
-  {
-    key: 'watchlist_alerts', kind: 'flag', flag: 'watchlistAlerts', parent: 'face', needsFace: true,
-    notEnforced: 'Nothing reads this flag yet, so watchlist alerts are raised whether it is on or off.',
-    label: 'Watchlist alerts', short: 'Watchlist', note: 'High-priority alert when a watchlisted person is seen.',
-  },
+  // The alert rows are deliberately NOT here either, for the same reason as
+  // journey mapping below: this panel lists the MODELS a camera runs, and an
+  // alert is not a model -- it is what a model can tell you. `unknownAlerts`
+  // and `watchlistAlerts` were shown here, disabled, because no service reads
+  // them; a disabled control for something that belongs on another screen is
+  // clutter twice over. Both alerts work end to end (the AI service emits
+  // them, alertEngine raises them); only the per-camera flags are unread, and
+  // they are still carried through every payload so nothing is lost. Alert
+  // categories and severity belong on the Alerts screen, chosen once rather
+  // than per camera.
   // Journey mapping is deliberately NOT here. This panel lists the MODELS a
   // camera runs; journey mapping is a feature built on top of the face model's
   // output, and Person Tracker already sets `journeyMapping` per camera
@@ -232,11 +225,11 @@ export function cameraFeatures(row) {
     // all. `needsZone` is the only such rule today and it is explicit rather
     // than derived from `parent`, so adding a child row cannot accidentally
     // hide itself.
-    // A child row whose parent produces nothing on this camera is hidden: an
-    // alert from a model that is not running is not a choice, it is noise.
-    const faceOn = ai.faceRecognition !== false;
-    const hidden = (f.needsZone === true && !drawn.restricted_zone)
-      || (f.needsFace === true && !faceOn);
+    // A child row whose parent is not set up on this camera does nothing at
+    // all. `needsZone` is the only such rule today and it is explicit rather
+    // than derived from `parent`, so adding a child row cannot accidentally
+    // hide itself.
+    const hidden = f.needsZone === true && !drawn.restricted_zone;
     if (f.kind === 'core') return { ...f, on: aiOn, needsSetup: false, hidden: false };
     if (f.kind === 'flag') {
       // `defaultOff` inverts the absent-means-on reading every other flag
