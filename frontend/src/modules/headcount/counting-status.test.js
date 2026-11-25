@@ -14,6 +14,7 @@ import {
   andList, fixable, zonesPending,
   AI_CONSENT_REQUIRED, needsAiConsent, isConsentRefusal, consentCopy,
   errorText, saveFailureSummary,
+  AT_CAPACITY, atCapacity, detectorCapacity, capacityCopy,
 } from './counting-status.js';
 
 // A camera the way GET /ai/cameras serialises one. `ai.enabled` + mode are the
@@ -359,4 +360,83 @@ test('a camera with no name is still accounted for', () => {
   const note = saveFailureSummary([{ cam: { monitorId: 'cam-9' }, message: 'nope' }]);
   assert.match(note, /cam-9: nope/);
   assert.match(saveFailureSummary([{ cam: null, message: 'nope' }]), /a camera: nope/);
+});
+
+// ── the detector is full ───────────────────────────────────────────────────
+//
+// The service opens a fixed number of streams and SKIPS the rest with a log
+// line nobody reads. From the page's side that was indistinguishable from
+// "not started yet", so a camera ticked ten minutes ago reported "the detector
+// has not started it yet" — true, and useless. /health now reports the cap.
+
+const DET = { max: 8, perHost: 4, counting: 8 };
+
+test('atCapacity needs a known cap — absent means unknown, not unlimited', () => {
+  assert.equal(atCapacity({ max: 8, counting: 8 }), true);
+  assert.equal(atCapacity({ max: 8, counting: 9 }), true);
+  assert.equal(atCapacity({ max: 8, counting: 7 }), false);
+  // An older detector sends no caps. Reporting "no limit" would be worse than
+  // reporting nothing.
+  assert.equal(atCapacity({ counting: 99 }), false);
+  assert.equal(atCapacity({}), false);
+  assert.equal(atCapacity(), false);
+});
+
+test('detectorCapacity reads the health payload the page already polls', () => {
+  assert.deepEqual(
+    detectorCapacity({ max_streams: 8, max_streams_per_host: 4 }, 5),
+    { max: 8, perHost: 4, counting: 5 },
+  );
+  assert.deepEqual(detectorCapacity(null, 0), { max: 0, perHost: 0, counting: 0 });
+});
+
+test('a ticked camera the FULL detector cannot open says exactly that', () => {
+  const r = notCountingReason(cam({ monitorId: '9' }), false, DET);
+  assert.equal(r.code, AT_CAPACITY);
+  assert.match(r.line, /already counting 8 cameras/);
+  // Not fixable from this page: the limit is a server setting.
+  assert.equal(r.fixable, false);
+});
+
+test('with room to spare the same camera is just early, not blocked', () => {
+  const r = notCountingReason(cam({ monitorId: '9' }), false, { max: 8, counting: 3 });
+  assert.equal(r.code, WAITING);
+});
+
+test('AI off still outranks a full detector — it is the blocking problem', () => {
+  const r = notCountingReason(cam({ ai: { enabled: false } }), false, DET);
+  assert.equal(r.code, AI_OFF);
+});
+
+test('a camera the detector IS counting reports nothing, full or not', () => {
+  assert.equal(notCountingReason(cam(), true, DET), null);
+});
+
+test('the full-detector note names the limit, the count, and who to ask', () => {
+  const copy = capacityCopy(cam({ name: 'Dock 9' }), DET);
+  assert.match(copy.title, /already full/);
+  assert.match(copy.body, /counts up to 8 cameras/);
+  assert.match(copy.body, /is counting 8/);
+  assert.match(copy.body, /Dock 9/);
+  // It must say the tick is NOT lost — that is why warning beats refusing.
+  assert.match(copy.body, /until one of the others is turned off/);
+  // The per-recorder cap is protective, so it is explained, not offered.
+  assert.match(copy.body, /single recorder is limited to 4/);
+  assert.doesNotMatch(copy.body, /raise it here|increase the limit here/i);
+  assert.match(copy.body, /ask whoever runs this deployment/);
+});
+
+test('the button says the tick still happens', () => {
+  assert.equal(capacityCopy(cam(), DET).confirmLabel, 'Tick it anyway');
+});
+
+test('notCounting threads the cap through to every row', () => {
+  const list = [cam({ monitorId: '1' }), cam({ monitorId: '9' })];
+  const got = notCounting(list, new Set(['1']), DET);
+  assert.deepEqual(got.map(({ reason }) => reason.code), [AT_CAPACITY]);
+});
+
+test('and with no cap known it still reports the rows, just not the reason', () => {
+  const got = notCounting([cam({ monitorId: '9' })], new Set(), {});
+  assert.deepEqual(got.map(({ reason }) => reason.code), [WAITING]);
 });

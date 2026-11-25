@@ -41,6 +41,8 @@ export const AI_OFF = 'ai-off';
 export const OFFLINE = 'offline';
 /** Nothing is visibly wrong; the detector has not started it yet. */
 export const WAITING = 'waiting';
+/** The detector is already counting as many cameras as it will open. */
+export const AT_CAPACITY = 'at-capacity';
 
 /**
  * Is this camera's AI master switch on?
@@ -63,9 +65,14 @@ export const wanted = (cam) => cam?.headcount?.enabled === true;
  *
  * @param cam      a `GET /ai/cameras` row
  * @param running  is the detector serving a stream for it right now?
+ * @param detector `{ max, counting }` from GET /health -- how many cameras the
+ *                 service will open, and how many it has open. Optional: with
+ *                 no numbers the capacity case simply is not reported, which
+ *                 is what happens while /health is still loading or when an
+ *                 older detector does not send the caps.
  * @returns {{ code, line, fix, fixable }|null}
  */
-export function notCountingReason(cam, running = false) {
+export function notCountingReason(cam, running = false, detector = {}) {
   if (!wanted(cam)) return null;
   if (running) return null;
 
@@ -88,15 +95,77 @@ export function notCountingReason(cam, running = false) {
     };
   }
 
+  // The detector is full. This used to be indistinguishable from "not yet"
+  // from the page's side, so both came out as "not started it yet" -- true,
+  // and useless to somebody who had been waiting ten minutes. /health now
+  // reports the cap, so the real answer can be given.
+  if (atCapacity(detector)) {
+    return {
+      code: AT_CAPACITY,
+      line: `the detector is already counting ${detector.max} cameras, which is all it will open`,
+      fix: '',
+      fixable: false,
+    };
+  }
+
   return {
     code: WAITING,
-    // Deliberately not an error. The detector polls the registry every ~15s,
-    // and it caps how many streams it will open at once, so "not yet" and
-    // "never, because the service is full" look identical from here. Saying
-    // which would be a guess.
+    // Still deliberately not an error: the detector polls the registry every
+    // ~15s, so a camera ticked seconds ago is simply early.
     line: 'the detector has not started it yet',
     fix: '',
     fixable: false,
+  };
+}
+
+/** Is the detector already serving every stream it will open? */
+export function atCapacity({ max = 0, counting = 0 } = {}) {
+  return Number(max) > 0 && Number(counting) >= Number(max);
+}
+
+/**
+ * The cap, read from GET /health.
+ *
+ * Absent means unknown, not unlimited: an older detector sends no caps, and
+ * reporting "no limit" for one would be a worse answer than reporting none.
+ */
+export function detectorCapacity(health, countingNow = 0) {
+  return {
+    max: Number(health?.max_streams) || 0,
+    perHost: Number(health?.max_streams_per_host) || 0,
+    counting: Number(countingNow) || 0,
+  };
+}
+
+/**
+ * What to say before ticking a camera the detector has no room for, or null
+ * when there is room.
+ *
+ * WARNS, it does not block. The tick is still meaningful: it is a standing
+ * instruction, and the camera starts the moment another is turned off. Refusing
+ * it would make the operator remember to come back.
+ *
+ * It says who to ask rather than offering a control, because the limit is a
+ * server setting and the per-recorder half of it is PROTECTIVE -- entry NVRs
+ * stop answering past a few concurrent RTSP sessions and take every camera
+ * offline with them. A UI that offered to raise that would be offering to
+ * break the site.
+ */
+export function capacityCopy(cam, detector = {}) {
+  const { max, perHost, counting } = detectorCapacity(
+    { max_streams: detector.max, max_streams_per_host: detector.perHost },
+    detector.counting,
+  );
+  const name = cam?.name || cam?.monitorId || 'This camera';
+  return {
+    title: 'The detector is already full',
+    body: `It counts up to ${max} cameras at once and is counting ${counting}. `
+      + `${name} will be saved as "should be counted", but nothing will count it `
+      + `until one of the others is turned off.`
+      + (perHost ? ` (A single recorder is limited to ${perHost} at once, separately, `
+        + 'to stop it dropping every camera on it.)' : '')
+      + ' Raising the limit is a server setting — ask whoever runs this deployment.',
+    confirmLabel: 'Tick it anyway',
   };
 }
 
@@ -108,10 +177,12 @@ export function notCountingReason(cam, running = false) {
  * @param camList    `GET /ai/cameras` rows
  * @param runningIds Set of monitorIds the detector is serving
  */
-export function notCounting(camList = [], runningIds = new Set()) {
+export function notCounting(camList = [], runningIds = new Set(), detector = {}) {
   const out = [];
   for (const cam of camList || []) {
-    const reason = notCountingReason(cam, runningIds.has?.(cam?.monitorId) === true);
+    const reason = notCountingReason(
+      cam, runningIds.has?.(cam?.monitorId) === true, detector,
+    );
     if (reason) out.push({ cam, reason });
   }
   return out;

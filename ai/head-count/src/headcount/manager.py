@@ -129,5 +129,20 @@ class StreamManager:
             "detectors": [{"id": d.id, "label": d.label} for d in self.detectors],
             "streams_online": online,
             "streams_total": len(snaps),
+            # HOW MANY CAMERAS THIS SERVICE WILL OPEN, reported so the VMS can
+            # say so BEFORE an operator ticks a camera that would be deferred.
+            # The caps existed only here and in a log line nobody reads: a
+            # camera over the limit was skipped with a warning, and the Head
+            # Count page could only report "the detector has not started it
+            # yet", which is true and useless. See source.py `_to_streams`.
+            #
+            # `max_streams_per_host` is the one that matters most and is NOT a
+            # performance knob: entry NVRs stop answering past a handful of
+            # concurrent RTSP sessions and take EVERY camera offline with them
+            # (observed twice). It is a protective limit, which is why the UI
+            # reports it rather than offering to raise it.
+            "max_streams": int(getattr(self.config.source, "max_streams", 8)),
+            "max_streams_per_host": int(
+                getattr(self.config.source, "max_streams_per_host", 4)),
             "version": __import__("headcount").__version__,
         }

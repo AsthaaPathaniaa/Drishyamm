@@ -65,6 +65,7 @@ import {
   zonesPending, ZONE_PENDING_LABEL,
   needsAiConsent, isConsentRefusal, consentCopy,
   errorText, saveFailureSummary,
+  detectorCapacity, atCapacity, capacityCopy,
 } from './counting-status';
 
 const PAGE_DESCRIPTION =
@@ -118,6 +119,8 @@ export default function HeadCount() {
   // the operator can act on -- an exhausted licence, a deleted camera -- is
   // never swallowed. Cleared by the next save.
   const [failures, setFailures] = useState([]);
+  // The camera waiting on an answer to "the detector is full, tick it anyway?".
+  const [askingFull, setAskingFull] = useState(null);
 
   const poll = useCallback(async () => {
     try {
@@ -206,8 +209,17 @@ export default function HeadCount() {
    * the check here just means the operator is asked BEFORE a failed save
    * rather than after one.
    */
-  const toggleHeadcount = useCallback(async (cam, next, consented = false) => {
+  const toggleHeadcount = useCallback(async (cam, next, consented = false, roomChecked = false) => {
     if (next && !consented && needsAiConsent(cam)) { setAskingAi([cam]); return null; }
+    // Asked AFTER consent, and only once: AI being off stops the camera
+    // counting at all, while the detector being full only delays it. Two
+    // dialogs back to back would be a worse answer than either alone, so this
+    // one is skipped for a camera that has just come through the AI question
+    // -- `consented` means the operator has already said yes to this camera.
+    if (next && !roomChecked && !consented && atCapacity(detector)) {
+      setAskingFull(cam);
+      return null;
+    }
     setSavingId(cam.id);
     setFailures([]);
     setCamList((list) => list.map((c) => (c.id === cam.id
@@ -243,7 +255,7 @@ export default function HeadCount() {
       setFailures([failure]);
       return failure;
     } finally { setSavingId(null); }
-  }, [loadCams]);
+  }, [loadCams, detector]);
 
   // Detail level = how much of the picture the detector examines. Measured on
   // identical footage: 640 -> 1280 found 71% more people, all of them distant.
@@ -268,7 +280,15 @@ export default function HeadCount() {
   // wall is built from the detector, so without this those cameras have no
   // tile and no mention: the header reads "6/20" and four tiles are on screen.
   // See counting-status.js for why the gap exists at all.
-  const stranded = useMemo(() => notCounting(camList, runningIds), [camList, runningIds]);
+  // How many cameras this detector will open, and how many it has open. Comes
+  // from GET /health, so an older detector that does not send the caps simply
+  // reports no capacity problem rather than a guessed one.
+  const detector = useMemo(
+    () => detectorCapacity(health, runningIds.size), [health, runningIds],
+  );
+  const stranded = useMemo(
+    () => notCounting(camList, runningIds, detector), [camList, runningIds, detector],
+  );
   const strandedNote = useMemo(
     () => notCountingSummary(stranded, (c) => c?.name || c?.monitorId),
     [stranded],
@@ -472,6 +492,25 @@ export default function HeadCount() {
           )}
         </PageContent>
       </OperationsPage>
+
+      {/* The detector has no room for another camera. A WARNING, not a
+          refusal: the tick is a standing instruction and the camera starts the
+          moment another is switched off, so refusing it would only make the
+          operator remember to come back. */}
+      <ConfirmDialog
+        cancelLabel="Cancel"
+        confirmLabel={askingFull ? capacityCopy(askingFull, detector).confirmLabel : 'Tick it anyway'}
+        description={askingFull ? capacityCopy(askingFull, detector).body : null}
+        onConfirm={async () => {
+          const cam = askingFull;
+          setAskingFull(null);
+          if (cam) await toggleHeadcount(cam, true, false, true);
+        }}
+        onOpenChange={(open) => { if (!open) setAskingFull(null); }}
+        open={Boolean(askingFull)}
+        title={askingFull ? capacityCopy(askingFull, detector).title : ''}
+        tone="warning"
+      />
 
       {/* Asked before anything is sent, and again if a save is ever refused
           for want of an answer. One question, one place. */}

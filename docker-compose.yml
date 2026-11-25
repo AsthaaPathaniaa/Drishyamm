@@ -502,6 +502,25 @@ services:
       SERVICE_TOKEN: ${SERVICE_TOKEN}
       OPENCV_FFMPEG_CAPTURE_OPTIONS: rtsp_transport;tcp
       HEADCOUNT_FORWARD__ENABLED: 'true'
+      # HOW MANY CAMERAS THIS SERVICE WILL COUNT AT ONCE.
+      #
+      # Both were already overridable through the generic HEADCOUNT_ env
+      # mechanism (config.py `_apply_env_overrides`) and were set nowhere, so
+      # they looked hardcoded: raising the limit appeared to need a code edit.
+      # Stated here so the limit is a deployment decision that is visible,
+      # and reported by GET /health so the Head Count page can tell an operator
+      # the detector is full instead of leaving a ticked camera unexplained.
+      #
+      # MAX_STREAMS is a capacity knob: each camera is a decode plus a YOLO
+      # worker, so raising it past what the box has costs every camera's frame
+      # rate. Measure before raising it.
+      HEADCOUNT_SOURCE__MAX_STREAMS: ${HEADCOUNT_MAX_CAMERAS:-8}
+      # PER_HOST is NOT a performance knob -- it is PROTECTIVE. Entry NVRs stop
+      # answering past a handful of concurrent RTSP sessions and take EVERY
+      # camera on them offline (observed twice on the lab recorder). Raise it
+      # only for a recorder known to take the load, and never to make a UI
+      # limit go away.
+      HEADCOUNT_SOURCE__MAX_STREAMS_PER_HOST: ${HEADCOUNT_MAX_PER_RECORDER:-4}
     volumes:
     - ./ai/head-count/config:/srv/head-count/config
     - ./ai/head-count/models:/srv/head-count/models
