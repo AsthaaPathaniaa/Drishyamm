@@ -189,7 +189,7 @@ const remove = asyncHandler(async (req, res) => {
     await ai.delete(`/investigate/imports/${row.id}`, { headers: aiAuthHeader(req.user) });
   } catch (e) {
     logger.warn('imports: AI delete failed', { id: row.id, error: e.message });
-    throw new AppError('Could not remove the indexed people for this video. Try again.', 502);
+    throw AppError.public('Could not remove the indexed people for this video. Try again.', 502);
   }
   fs.rmSync(path.dirname(row.path), { recursive: true, force: true });
   audit('investigate.import_delete', { req, targetType: 'import', targetId: row.id, meta: { sha256: row.sha256, name: row.originalName } });

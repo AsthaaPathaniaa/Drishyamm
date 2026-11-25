@@ -36,9 +36,16 @@ export default function TrackJourney() {
 function PickSomeone() {
   const [people, setPeople] = useState(null);
   const [error, setError] = useState(null);
+  const [indexOff, setIndexOff] = useState(false);
   useEffect(() => {
-    investigateService.search({ q: 'a person', topK: 60 })
-      .then((d) => setPeople([...d.results].sort((a, b) => new Date(b.first_seen) - new Date(a.first_seen)).slice(0, 30)))
+    // Same check as Smart Search: with the index switched off there is nobody to
+    // pick, so say that instead of showing a failed search.
+    investigateService.status()
+      .then((st) => {
+        if (!st?.enabled) { setIndexOff(true); return null; }
+        return investigateService.search({ q: 'a person', topK: 60 })
+          .then((d) => setPeople([...d.results].sort((a, b) => new Date(b.first_seen) - new Date(a.first_seen)).slice(0, 30)));
+      })
       .catch((e) => setError(errText(e)));
   }, []);
   return (
@@ -52,8 +59,14 @@ function PickSomeone() {
           <Link to="/investigate" className="font-semibold text-brand hover:underline">Smart Search</Link>
           <Link to="/playback" className="font-semibold text-brand hover:underline">Recordings</Link>
         </PageCard>
+        {indexOff ? (
+          <PageCard className="p-4">
+            <p className="text-small font-semibold text-fg">Click to track isn’t running on this server yet</p>
+            <p className="mt-1 text-small text-fg-muted">The search index is switched off. Ask Drishyam support to turn it on; people are indexed from then on.</p>
+          </PageCard>
+        ) : null}
         {error ? <p className="text-small text-danger">{error}</p> : null}
-        {!people && !error ? <p className="flex items-center gap-2 text-small text-fg-muted"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</p> : null}
+        {!people && !error && !indexOff ? <p className="flex items-center gap-2 text-small text-fg-muted"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</p> : null}
         {people?.length === 0 ? <p className="text-small text-fg-muted">Nobody has been indexed yet.</p> : null}
         {people?.length ? <h2 className="text-body font-bold text-fg">Seen most recently</h2> : null}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6 2xl:grid-cols-8">

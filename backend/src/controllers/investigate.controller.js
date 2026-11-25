@@ -55,15 +55,22 @@ function decorate(results, cameras) {
   }));
 }
 
+const INDEX_OFF = 'The investigation tools aren’t running on this server yet: the search index is switched off. '
+  + 'Ask Drishyam support to turn it on; people are indexed from then on.';
+
 function mapUpstreamError(err, where) {
   const status = err.response?.status || 502;
   const detail = err.response?.data?.detail || err.response?.data?.error || err.message;
   logger.warn('investigate proxy failed', { where, status, detail: typeof detail === 'string' ? detail : JSON.stringify(detail) });
-  if (status === 404 && where.startsWith('search')) {
-    return new AppError('Smart Search is not switched on for this server yet.', 503);
+  // The AI answers 404 "investigation index is not enabled" on every
+  // /investigate route while INVESTIGATE_INDEX_ENABLED is off: say so plainly,
+  // whichever page asked (search, track, ask, summary, journey, synopsis…).
+  const indexOff = status === 404 && /investigation index is not enabled/i.test(String(detail || ''));
+  if (indexOff || (status === 404 && where.startsWith('search'))) {
+    return AppError.public(INDEX_OFF, 503);
   }
   if (err.code === 'ECONNABORTED' || /timeout/i.test(err.message || '')) {
-    return new AppError('Smart Search is still starting up. Try again in a minute.', 503);
+    return AppError.public('Smart Search is still starting up. Try again in a minute.', 503);
   }
   return new AppError(`Smart Search ${where} failed: ${typeof detail === 'string' ? detail : 'upstream error'}`,
     status >= 400 && status < 600 ? status : 502);
