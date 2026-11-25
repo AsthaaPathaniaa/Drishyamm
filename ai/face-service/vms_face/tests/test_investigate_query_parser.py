@@ -34,7 +34,9 @@ class EnglishTest(unittest.TestCase):
         self.assertIn("red top", r.text)
         self.assertNotIn("gate", r.text.lower())
         self.assertNotIn("pm", r.text.lower())
-        self.assertEqual({c.kind for c in r.chips}, {"object_class", "top_colour", "camera", "time"})
+        # "man" is a gender wish too: a chip, applied only where the account allows it.
+        self.assertEqual({c.kind for c in r.chips}, {"object_class", "top_colour", "camera", "time", "gender"})
+        self.assertEqual(r.gender, "male")
 
     def test_bottom_colour_and_garment_words(self):
         r = p("woman in yellow kurta and blue jeans")

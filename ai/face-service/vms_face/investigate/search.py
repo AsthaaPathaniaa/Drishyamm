@@ -15,7 +15,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from qdrant_client.http.models import Filter
+import numpy as np
+from qdrant_client.http.models import (
+    FieldCondition, Filter, IsEmptyCondition, MatchValue, OrderBy, PayloadField,
+)
 
 from vms_face.investigate import index_schema as ix
 
@@ -40,15 +43,37 @@ class SearchFilters:
     object_classes: list[str] = field(default_factory=list)
     since: dt.datetime | None = None
     until: dt.datetime | None = None
-    top_colour: str | None = None                             # soft
-    bottom_colour: str | None = None                          # soft
-    vehicle_type: str | None = None                           # soft
-    vehicle_colour: str | None = None                         # soft
+    # Asked-for colours and vehicle type are FILTERS: someone whose top was read
+    # as blue never answers "red top". Tracks whose colour couldn't be read
+    # (night/IR, unclear) are left out unless include_unknown_colour.
+    top_colour: str | None = None
+    bottom_colour: str | None = None
+    vehicle_type: str | None = None
+    vehicle_colour: str | None = None
+    include_unknown_colour: bool = False
+    # "male" / "female": applied only when the account allows the man/woman
+    # filter (sensitive attribute, rule 8); see gender_filter.
+    gender: str | None = None
+
+    def attribute_chips(self) -> dict[str, str]:
+        return {k: v for k, v in (("top_colour", self.top_colour), ("bottom_colour", self.bottom_colour),
+                                  ("vehicle_type", self.vehicle_type), ("vehicle_colour", self.vehicle_colour)) if v}
 
 
-def build_filter(tenant_id: uuid.UUID, f: SearchFilters) -> Filter:
-    return ix.track_filter(tenant_id, camera_ids=f.camera_ids or None, object_classes=f.object_classes or None,
-                           since=f.since, until=f.until)
+def build_filter(tenant_id: uuid.UUID, f: SearchFilters, *, unknown_colour: bool | None = None) -> Filter:
+    """Hard filters. Each asked-for attribute must match; with ``unknown_colour``
+    an attribute that was never read (missing) is accepted too."""
+    flt = ix.track_filter(tenant_id, camera_ids=f.camera_ids or None, object_classes=f.object_classes or None,
+                          since=f.since, until=f.until)
+    lenient = f.include_unknown_colour if unknown_colour is None else unknown_colour
+    for name, value in f.attribute_chips().items():
+        key = f"attr_{name}"
+        exact = FieldCondition(key=key, match=MatchValue(value=value.lower()))
+        if lenient:
+            flt.must.append(Filter(should=[exact, IsEmptyCondition(is_empty=PayloadField(key=key))]))
+        else:
+            flt.must.append(exact)
+    return flt
 
 
 def assert_tenant_scoped(flt: Filter, tenant_id: uuid.UUID) -> None:
@@ -60,16 +85,71 @@ def assert_tenant_scoped(flt: Filter, tenant_id: uuid.UUID) -> None:
 
 
 async def query_tracks(client: Any, collection: str, *, tenant_id: uuid.UUID, vector: Sequence[float],
-                       filters: SearchFilters, limit: int) -> list[dict]:
+                       filters: SearchFilters, limit: int, with_vectors: bool = False) -> list[dict]:
     flt = build_filter(tenant_id, filters)
     assert_tenant_scoped(flt, tenant_id)
     resp = await client.query_points(collection_name=collection, query=list(map(float, vector)), query_filter=flt,
-                                     limit=limit, with_payload=True)
-    return [{"id": str(p.id), "cosine": float(p.score), "payload": dict(p.payload or {})}
+                                     limit=limit, with_payload=True, with_vectors=with_vectors)
+    return [{"id": str(p.id), "cosine": float(p.score), "payload": dict(p.payload or {}),
+             **({"vector": p.vector} if with_vectors else {})}
             for p in getattr(resp, "points", resp)]
 
 
-def rerank(hits: list[dict], filters: SearchFilters, *, to_score: Callable[[float], float], top_k: int) -> list[dict]:
+async def browse_tracks(client: Any, collection: str, *, tenant_id: uuid.UUID, filters: SearchFilters,
+                        limit: int, with_vectors: bool = False) -> list[dict]:
+    """Everyone matching the filters, newest first: for searches that describe
+    no one ("movement at gate 2"). No similarity, so no score."""
+    flt = build_filter(tenant_id, filters)
+    assert_tenant_scoped(flt, tenant_id)
+    points, _ = await client.scroll(collection_name=collection, scroll_filter=flt, limit=limit, with_payload=True,
+                                    with_vectors=with_vectors, order_by=OrderBy(key="first_seen_ts", direction="desc"))
+    return [{"id": str(p.id), "cosine": None, "payload": dict(p.payload or {}),
+             **({"vector": p.vector} if with_vectors else {})} for p in points]
+
+
+async def count_unknown_colour(client: Any, collection: str, *, tenant_id: uuid.UUID, filters: SearchFilters) -> int:
+    """How many tracks a colour/type filter left out only because theirs was
+    never read (night, unclear): the page offers to show them."""
+    if not filters.attribute_chips() or filters.include_unknown_colour:
+        return 0
+    lenient, strict = build_filter(tenant_id, filters, unknown_colour=True), build_filter(tenant_id, filters, unknown_colour=False)
+    assert_tenant_scoped(lenient, tenant_id)
+    assert_tenant_scoped(strict, tenant_id)
+    a = await client.count(collection_name=collection, count_filter=lenient, exact=True)
+    b = await client.count(collection_name=collection, count_filter=strict, exact=True)
+    return max(0, int(a.count) - int(b.count))
+
+
+# Man/woman from the track's own picture vector, at query time: nothing about
+# gender is stored. Only confident readings count; measured on lab crops
+# (2026-11-25), the unclear ones (seen from above, no face) sit at 0.3–0.7.
+GENDER_PROMPTS = ("a photo of a man", "a photo of a woman")
+GENDER_SURE = 0.8
+
+
+def gender_filter(hits: list[dict], gender: str, text_vectors: np.ndarray, scale: float) -> tuple[list[dict], int]:
+    """Keep the hits confidently of ``gender``; return (kept, how many were unsure)."""
+    if not hits:
+        return [], 0
+    vecs = np.asarray([h["vector"] for h in hits], dtype=np.float32)
+    logits = (vecs @ np.asarray(text_vectors, dtype=np.float32).T) * scale
+    p_man = 1.0 / (1.0 + np.exp(-(logits[:, 0] - logits[:, 1])))
+    kept, unsure = [], 0
+    for h, pm in zip(hits, p_man):
+        p = float(pm) if gender == "male" else 1.0 - float(pm)
+        if p >= GENDER_SURE:
+            kept.append({**h, "gender_p": round(p, 3)})
+        elif p > 1.0 - GENDER_SURE:
+            unsure += 1
+    return kept, unsure
+
+
+def rerank(hits: list[dict], filters: SearchFilters, *, to_score: Callable[[float], float], top_k: int,
+           min_score: float = 0.0) -> list[dict]:
+    """Score, nudge by matching chips, drop what scores ``min_score`` or less
+    (unrelated), best first. Browse hits (no cosine) keep their order, unscored."""
+    if hits and all(h.get("cosine") is None for h in hits):
+        return [{**h, "score": None, "boosts": []} for h in hits[:top_k]]
     out = []
     for h in hits:
         pl = h["payload"]
@@ -85,6 +165,8 @@ def rerank(hits: list[dict], filters: SearchFilters, *, to_score: Callable[[floa
                 boosts.append(f"{key[5:]}={chip}")
             elif seen:
                 score -= COLOUR_MISMATCH_PENALTY
+        if to_score(h["cosine"]) <= min_score:
+            continue                       # unrelated to the description, whatever the chips say
         out.append({**h, "score": round(max(0.0, min(1.0, score)), 4), "boosts": boosts})
     out.sort(key=lambda r: r["score"], reverse=True)
     return out[:top_k]
@@ -103,7 +185,7 @@ def result_row(hit: dict, *, camera_codes: dict[str, str]) -> dict:
         "first_seen": first.isoformat(),
         "last_seen": last.isoformat(),
         "score": hit["score"],
-        "cosine": round(hit["cosine"], 4),
+        "cosine": round(hit["cosine"], 4) if hit.get("cosine") is not None else None,
         "matched": hit.get("boosts", []),
         "attributes": attrs,
         "ir": bool(pl.get("ir")),

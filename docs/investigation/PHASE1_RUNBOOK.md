@@ -107,6 +107,15 @@ What it sends to Anthropic: the question and the tools' text results (camera nam
 
 Every answer's `[n]` citations are checked against what the tools returned; a citation no tool produced is removed.
 
+## Smart Search: how a search is understood (2026-11-25)
+
+- **Colours and vehicle type you ask for are filters.** "red top" shows only people whose top was read as red. People whose colour couldn't be read (night/IR, unclear) are left out, and the page offers **Show them too**.
+- **Man / woman** is a separate opt-in switch per account: Licences & features → **Smart Search: man / woman filter** (`investigate_gender`). Gender is a sensitive attribute, so it's off by default; until it's on, "man" still searches but the page says it isn't filtering by gender. When it's on, it's judged from each person's picture at search time and only confident readings count. Nothing about gender is stored.
+- **Places:** "gate 2", "gate no. 2", "गेट 2" and part of a longer camera name ("Main Gate 2 Entry") all match. A place that matches no camera is reported with suggestions and nothing is searched. A camera whose AI is off is named as such.
+- **"movement", "anyone", "हलचल"** with no description lists everyone in that time and place, newest first, with no match score.
+- **Re-read colours of people indexed before this change** (top colour now comes from the upper body). Run it once per server; it's safe to run again:
+  `docker exec drishyam-ai sh -c 'cd /srv/app/face_detection && python -m vms_face.investigate.tools.recolour'` (add `--dry-run` to only report).
+
 ## Phase 4: Later
 
 - **Seen with (associations):** on a person's journey, "Seen with" lists who stayed within about 1.5 body heights of them for at least 3 s, here and at each confirmed stop. "Follow them" opens that person's journey. It is a lead, not proof they know each other.

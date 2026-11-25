@@ -2,30 +2,50 @@
 // you can share or come back to), chip removal, and how a result is labelled
 // and opened in Recordings. No React, no network: tested in search-model.test.js.
 
-export const CHIP_KINDS = ['object_class', 'camera', 'time', 'top_colour', 'bottom_colour', 'vehicle_type', 'vehicle_colour'];
+export const CHIP_KINDS = ['object_class', 'camera', 'time', 'top_colour', 'bottom_colour', 'vehicle_type', 'vehicle_colour', 'gender'];
 const PRE_ROLL_MS = 10_000;
 const POST_ROLL_MS = 10_000;
 
-/** URLSearchParams → { q, clear } */
+/**
+ * URLSearchParams → { q, clear, cams, unknown }.
+ * `cams`: cameras picked by hand (a "did you mean" suggestion), replacing the
+ * ones read from the text. `unknown`: also show people whose colour couldn't be read.
+ */
 export function readSearchState(params) {
   const q = (params.get('q') || '').slice(0, 300);
   const clear = (params.get('clear') || '').split(',').filter((k) => CHIP_KINDS.includes(k));
-  return { q, clear };
+  const cams = (params.get('cams') || '').split(',').filter((c) => /^[\w:.-]{1,64}$/.test(c)).slice(0, 50);
+  const unknown = params.get('unknown') === '1';
+  return { q, clear, cams, unknown };
 }
 
-/** { q, clear } → URLSearchParams (empty values left out). */
-export function writeSearchState({ q, clear = [] }) {
+/** { q, clear, cams, unknown } → URLSearchParams (empty values left out). */
+export function writeSearchState({ q, clear = [], cams = [], unknown = false }) {
   const p = new URLSearchParams();
   if (q) p.set('q', q);
   const kinds = [...new Set(clear)].filter((k) => CHIP_KINDS.includes(k));
   if (kinds.length) p.set('clear', kinds.join(','));
+  if (cams.length) p.set('cams', [...new Set(cams)].join(','));
+  if (unknown) p.set('unknown', '1');
   return p;
 }
 
-/** Removing a chip adds its kind to `clear`; a new query starts clean. */
+/** Removing a chip adds its kind to `clear` (a camera chip also drops hand-picked cameras). */
 export function removeChip(state, kind) {
-  return { ...state, clear: [...new Set([...(state.clear || []), kind])] };
+  return { ...state, clear: [...new Set([...(state.clear || []), kind])], ...(kind === 'camera' ? { cams: [] } : {}) };
 }
+
+/** The overrides a search sends for this URL state. */
+export function searchOverrides({ clear = [], cams = [], unknown = false } = {}) {
+  return {
+    clear,
+    ...(cams.length ? { camera_codes: cams } : {}),
+    ...(unknown ? { include_unknown_colour: true } : {}),
+  };
+}
+
+/** "Everyone, newest first" results (nothing described): no match score to show. */
+export const isBrowse = (data) => !!data?.parsed?.browse || (data?.results?.length > 0 && data.results.every((r) => r.score == null));
 
 /** The chips to show: the parse minus what the user removed. */
 export function visibleChips(parsed, clear = []) {

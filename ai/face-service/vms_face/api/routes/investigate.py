@@ -78,6 +78,8 @@ class Overrides(BaseModel):
     bottom_colour: str | None = None
     vehicle_type: str | None = None
     vehicle_colour: str | None = None
+    gender: str | None = Field(None, pattern="^(male|female|)$")
+    include_unknown_colour: bool | None = None       # also show people whose colour couldn't be read
     clear: list[str] = Field(default_factory=list)   # chip kinds the user removed
 
 
@@ -90,6 +92,10 @@ class SearchRequest(BaseModel):
     # outside them, whatever the query or chips say.
     scope_codes: list[str] | None = None
     top_k: int = Field(50, ge=1, le=MAX_TOP_K)
+    # Set by the backend from the account's `investigate_gender` switch (opt-in,
+    # sensitive attribute, rule 8). Never trusted from a browser: the backend
+    # builds this body itself.
+    allow_gender: bool = False
 
 
 async def _tenant_cameras(session: AsyncSession, tenant_id: uuid.UUID) -> dict[str, str]:
@@ -99,6 +105,7 @@ async def _tenant_cameras(session: AsyncSession, tenant_id: uuid.UUID) -> dict[s
 
 
 NO_CAMERA = "00000000-0000-0000-0000-000000000000"   # matches nothing
+UNWATCHED = "unwatched:"                               # a camera of theirs the AI has no row for
 
 
 def _filters(parsed: query_parser.ParsedQuery | None, ov: Overrides, code_to_id: dict[str, str],
@@ -110,6 +117,7 @@ def _filters(parsed: query_parser.ParsedQuery | None, ov: Overrides, code_to_id:
         f.since, f.until = parsed.since, parsed.until
         f.top_colour, f.bottom_colour = parsed.top_colour, parsed.bottom_colour
         f.vehicle_type, f.vehicle_colour = parsed.vehicle_type, parsed.vehicle_colour
+        f.gender = parsed.gender
     if ov.camera_codes is not None:
         f.camera_ids = [code_to_id[c] for c in ov.camera_codes if c in code_to_id]
         if ov.camera_codes and not f.camera_ids:
@@ -128,6 +136,10 @@ def _filters(parsed: query_parser.ParsedQuery | None, ov: Overrides, code_to_id:
         f.vehicle_type = ov.vehicle_type or None
     if ov.vehicle_colour is not None:
         f.vehicle_colour = ov.vehicle_colour or None
+    if ov.gender is not None:
+        f.gender = ov.gender or None
+    if ov.include_unknown_colour is not None:
+        f.include_unknown_colour = ov.include_unknown_colour
     for kind in ov.clear:
         if kind == "camera":
             f.camera_ids = []
@@ -135,7 +147,7 @@ def _filters(parsed: query_parser.ParsedQuery | None, ov: Overrides, code_to_id:
             f.object_classes = []
         elif kind == "time":
             f.since = f.until = None
-        elif kind in ("top_colour", "bottom_colour", "vehicle_type", "vehicle_colour"):
+        elif kind in ("top_colour", "bottom_colour", "vehicle_type", "vehicle_colour", "gender"):
             setattr(f, kind, None)
     if scope_codes is not None:
         allowed = {code_to_id[c] for c in scope_codes if c in code_to_id}
@@ -151,17 +163,46 @@ def _filters_meta(f: SearchFilters) -> dict:
         "since": f.since.isoformat() if f.since else None, "until": f.until.isoformat() if f.until else None,
         "top_colour": f.top_colour, "bottom_colour": f.bottom_colour,
         "vehicle_type": f.vehicle_type, "vehicle_colour": f.vehicle_colour,
+        "gender": f.gender, "include_unknown_colour": f.include_unknown_colour,
     }
 
 
-async def _run(tenant_id, vector, filters, top_k, to_score, cam_codes) -> list[dict]:
+async def _run(tenant_id, vector, filters, top_k, to_score, cam_codes, *, gender_ok: bool = False,
+               embedder=None, browse: bool = False) -> tuple[list[dict], list[dict]]:
+    """Run a search → (result rows, notices for the page)."""
+    from vms_face.investigate.search import GENDER_PROMPTS, browse_tracks, count_unknown_colour, gender_filter
+
     store = get_qdrant_tracks()
+    notices: list[dict] = []
+    use_gender = bool(filters.gender and gender_ok and embedder is not None)
+    if filters.gender and not gender_ok:
+        notices.append({"kind": "gender_off", "message": "Man/woman filtering is switched off for this account, "
+                        "so this shows everyone who fits the rest of the description."})
+    limit = min(top_k * (8 if use_gender else 3), 600)
     try:
-        hits = await query_tracks(store.client, store.collection, tenant_id=tenant_id, vector=vector,
-                                  filters=filters, limit=top_k * 3)
+        if browse or vector is None:
+            hits = await browse_tracks(store.client, store.collection, tenant_id=tenant_id, filters=filters,
+                                       limit=limit, with_vectors=use_gender)
+        else:
+            hits = await query_tracks(store.client, store.collection, tenant_id=tenant_id, vector=vector,
+                                      filters=filters, limit=limit, with_vectors=use_gender)
+        unknown = await count_unknown_colour(store.client, store.collection, tenant_id=tenant_id, filters=filters)
     except ValueError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
-    return [result_row(h, camera_codes=cam_codes) for h in rerank(hits, filters, to_score=to_score, top_k=top_k)]
+    if use_gender:
+        loop = asyncio.get_running_loop()
+        tv = await loop.run_in_executor(get_gpu_pool(), embedder.embed_texts, list(GENDER_PROMPTS))
+        hits, unsure = gender_filter(hits, filters.gender, tv, embedder._scale)  # noqa: SLF001
+        if unsure:
+            notices.append({"kind": "gender_unsure", "count": unsure,
+                            "message": f"{unsure} more {'person' if unsure == 1 else 'people'} left out: "
+                                       "seen from above or too far to tell man from woman."})
+    if unknown:
+        notices.append({"kind": "colour_unknown", "count": unknown,
+                        "message": f"{unknown} more {'person' if unknown == 1 else 'people'} left out because their "
+                                   "colours couldn't be read (night, or unclear)."})
+    rows = [result_row(h, camera_codes=cam_codes) for h in rerank(hits, filters, to_score=to_score, top_k=top_k)]
+    return rows, notices
 
 
 def _summary(results: list[dict]) -> dict:
@@ -180,21 +221,51 @@ async def search(
 
     cam_codes = await _tenant_cameras(session, tenant_id)
     code_to_id = {code: cid for cid, code in cam_codes.items()}
-    hints = [(code_to_id[c.code], c.code, c.name) for c in body.cameras if c.code in code_to_id]
+    # Every camera of theirs can be named, also ones the AI doesn't watch:
+    # "gate 1" with AI off on Gate 1 must say so, not search every camera.
+    unwatched = {f"{UNWATCHED}{c.code}": (c.name or c.code) for c in body.cameras if c.code not in code_to_id}
+    hints = [(code_to_id[c.code] if c.code in code_to_id else f"{UNWATCHED}{c.code}", c.code, c.name) for c in body.cameras]
     parsed = query_parser.parse(body.q, now=dt.datetime.now(dt.timezone.utc), tz=body.tz, cameras=hints)
+    off_named = list(dict.fromkeys(unwatched[c] for c in parsed.camera_ids if c in unwatched))   # same name twice: once
+    parsed.camera_ids = [c for c in parsed.camera_ids if c not in unwatched]
     filters = _filters(parsed, body.overrides, code_to_id, body.scope_codes)
-
     loop = asyncio.get_running_loop()
     embedder = await loop.run_in_executor(None, SiglipEmbedder.shared)
-    vector = (await loop.run_in_executor(get_gpu_pool(), embedder.embed_texts, [parsed.text]))[0]
-    results = await _run(tenant_id, vector, filters, body.top_k, text_relevance, cam_codes)
+    picked_cameras = body.overrides.camera_codes is not None or "camera" in body.overrides.clear
+    off_notice = [{"kind": "camera_not_indexed", "cameras": off_named,
+                   "message": f"{', '.join(off_named)}: {'isn’t' if len(off_named) == 1 else 'aren’t'} being searched. "
+                              "Smart features (AI) are switched off on "
+                              f"{'that camera' if len(off_named) == 1 else 'those cameras'}, so nobody there is indexed."}] \
+        if off_named and not picked_cameras else []
+
+    # A place they named that is none of their cameras: say so (with close
+    # names) instead of quietly searching every camera. Same when every camera
+    # they named is one the AI doesn't watch.
+    if off_notice and not parsed.camera_ids:
+        notices, results = off_notice, []
+    elif parsed.unknown_places and not picked_cameras:
+        name_to_code = {c.name: c.code for c in body.cameras if c.name}
+        notices = [{"kind": "unknown_place", "place": place,
+                    "message": f"No camera called “{place}”.",
+                    "suggestions": [{"name": n, "code": name_to_code.get(n)} for n in parsed.suggestions.get(place, [])]}
+                   for place in parsed.unknown_places]
+        results: list[dict] = []
+    else:
+        vector = None if parsed.browse else \
+            (await loop.run_in_executor(get_gpu_pool(), embedder.embed_texts, [parsed.text]))[0]
+        results, notices = await _run(tenant_id, vector, filters, body.top_k, text_relevance, cam_codes,
+                                      gender_ok=body.allow_gender, embedder=embedder, browse=parsed.browse)
+        if parsed.browse:
+            notices.insert(0, {"kind": "browse", "message": "Everyone in this time and place, newest first."})
+        notices = off_notice + notices
 
     await audit_log.record(
         actor=f"user:{actor}", actor_kind="user", action="investigate_search", tenant_id=tenant_id,
         target_type="tracks", target_id=None, reason="smart search",
-        metadata={"q": body.q, "embedded_text": parsed.text, "filters": _filters_meta(filters),
-                  "count": len(results), "model": embedder.model_tag})
-    return {"parsed": parsed.to_dict(), "filters": _filters_meta(filters), "results": results,
+        metadata={"q": body.q, "embedded_text": None if parsed.browse else parsed.text, "filters": _filters_meta(filters),
+                  "gender_applied": bool(filters.gender and body.allow_gender), "browse": parsed.browse,
+                  "unknown_places": parsed.unknown_places, "count": len(results), "model": embedder.model_tag})
+    return {"parsed": parsed.to_dict(), "filters": _filters_meta(filters), "results": results, "notices": notices,
             "summary": _summary(results), "model": embedder.model_tag}
 
 
@@ -254,14 +325,14 @@ async def search_photo(
     loop = asyncio.get_running_loop()
     embedder = await loop.run_in_executor(None, SiglipEmbedder.shared)
     vector = (await loop.run_in_executor(get_gpu_pool(), embedder.embed_images, [img]))[0]
-    results = await _run(tenant_id, vector, filters, top_k, lambda c: max(0.0, c), cam_codes)
+    results, notices = await _run(tenant_id, vector, filters, top_k, lambda c: max(0.0, c), cam_codes)
 
     await audit_log.record(
         actor=f"user:{actor}", actor_kind="user", action="investigate_search_photo", tenant_id=tenant_id,
         target_type="tracks", target_id=None, reason="smart search by photo",
         metadata={"filters": _filters_meta(filters), "count": len(results), "model": embedder.model_tag,
                   "photo_bytes": len(data)})
-    return {"filters": _filters_meta(filters), "results": results, "summary": _summary(results),
+    return {"filters": _filters_meta(filters), "results": results, "notices": notices, "summary": _summary(results),
             "model": embedder.model_tag}
 
 
