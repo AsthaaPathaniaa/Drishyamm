@@ -221,3 +221,49 @@ describe('consent before the master switch is touched', () => {
     expect(aiConsentQuestion('counted')).toMatch(/^this camera has AI switched off/);
   });
 });
+
+/**
+ * The promise, honoured. The other end of contracts/headcount-camera-row.json
+ * `countingOnlyPromise`: the dialog SAYS this, and this asserts the code DOES
+ * it. Weaken masterOnForFeature and this fails; drop the sentence from the
+ * dialog and the frontend's test fails.
+ */
+describe('the counting-only promise, as written down', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const PROMISE = JSON.parse(fs.readFileSync(
+    path.join(__dirname, '..', '..', 'contracts', 'headcount-camera-row.json'), 'utf8',
+  )).countingOnlyPromise;
+
+  test('the contract states a promise for both ends to hold to', () => {
+    expect(PROMISE).toBeDefined();
+    expect(PROMISE.saidToTheOperator).toBe('faces are not matched');
+  });
+
+  test('every flag the promise names is set exactly as promised', () => {
+    const ai = masterOnForFeature({}, 'NOW');
+    for (const [flag, want] of Object.entries(PROMISE.ai)) {
+      expect(ai[flag]).toBe(want);
+    }
+  });
+
+  test('and nothing the promise says is NOT started comes out started', () => {
+    const ai = masterOnForFeature({}, 'NOW');
+    for (const flag of PROMISE.notStarted) {
+      // `=== true` is how each of these is read by its own selector, so that
+      // is the test: absent and false are both "not started".
+      expect(ai[flag] === true).toBe(false);
+    }
+  });
+
+  test('it holds for a camera that had those flags left over from before', () => {
+    // A camera previously configured and switched off must not have the
+    // promise broken for it either -- except where it had explicitly asked for
+    // a detector, which is its own choice and is kept.
+    const ai = masterOnForFeature({
+      enabled: false, mode: 'off', faceRecognition: true, activityMonitoring: false,
+    }, 'NOW');
+    expect(ai.faceRecognition).toBe(false);
+    expect(ai.activityMonitoring === true).toBe(false);
+  });
+});

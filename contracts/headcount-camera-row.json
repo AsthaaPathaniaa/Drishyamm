@@ -72,6 +72,36 @@
     }
   },
 
+  "countingOnlyPromise": {
+    "_README": [
+      "WHAT WE PROMISE AN OPERATOR WHEN WE SWITCH A CAMERA'S AI ON FOR COUNTING.",
+      "",
+      "This is here because the worst defect in this feature was a BROKEN PROMISE,",
+      "not a wrong value. The consent dialog said, in these words, that faces are",
+      "not matched -- while the repair button two inches away went through a route",
+      "that started face recognition and spent a face licence. Both call sites were",
+      "individually correct. Nothing tested that the promise and the code agreed,",
+      "because the promise was English in a React file and the code was a function",
+      "in a Node service.",
+      "",
+      "So the promise is written down once, and both ends assert against it:",
+      "",
+      "  backend/test/headcountTurnsAiOn.js   masterOnForFeature HONOURS it",
+      "  frontend .../counting-status.test.js the dialog SAYS it",
+      "",
+      "Weaken the code and the backend test fails. Quietly drop the sentence from",
+      "the dialog and the frontend test fails. Change your mind about the promise",
+      "and you have to change it here, which makes both ends move together and",
+      "leaves a diff that says what was decided."
+    ],
+    "ai": {
+      "enabled": true,
+      "faceRecognition": false
+    },
+    "notStarted": ["activityMonitoring", "zoneBodyDetection"],
+    "saidToTheOperator": "faces are not matched"
+  },
+
   "expect": {
     "rowKeys": ["id", "userId", "monitorId", "name", "status", "settings", "rtsp", "rtspSub"],
     "zoneNames": ["Reception", "Waiting area"],

@@ -264,13 +264,23 @@ export default function HeadCount() {
   const saveDetail = useCallback(async (cam, imgsz) => {
     setCamList((list) => list.map((c) => (c.id === cam.id
       ? { ...c, headcount: { ...(c.headcount || {}), imgsz } } : c)));
+    setFailures([]);
     try {
       await aiService.setHeadcount(cam.id, {
         enabled: cam.headcount?.enabled === true,
         threshold: cam.headcount?.threshold || 0,
         imgsz,
       });
-    } catch { /* next poll corrects */ }
+    } catch (err) {
+      // `/* next poll corrects */` is what this used to be, and it is the same
+      // silence as a tick springing back: the new level shows, the save is
+      // refused, and ten seconds later the registry poll quietly puts the old
+      // one back. An operator sees their choice undo itself for no reason.
+      // Correct it now rather than waiting for the poll, and say why.
+      setCamList((list) => list.map((c) => (c.id === cam.id
+        ? { ...c, headcount: { ...(c.headcount || {}), imgsz: cam.headcount?.imgsz || 640 } } : c)));
+      setFailures([{ cam, message: errorText(err) }]);
+    }
   }, []);
 
   const enabledCount = camList.filter((c) => c.headcount?.enabled === true).length;

@@ -440,3 +440,30 @@ test('and with no cap known it still reports the rows, just not the reason', () 
   const got = notCounting([cam({ monitorId: '9' })], new Set(), {});
   assert.deepEqual(got.map(({ reason }) => reason.code), [WAITING]);
 });
+
+// ── the promise, said ──────────────────────────────────────────────────────
+//
+// The other end of contracts/headcount-camera-row.json `countingOnlyPromise`.
+// The backend test asserts masterOnForFeature HONOURS it; this asserts the
+// dialog SAYS it. The worst defect in this feature was these two drifting
+// apart: the dialog promised faces were not matched while a button two inches
+// away started face recognition.
+import { readFileSync } from 'node:fs';
+
+const PROMISE = JSON.parse(readFileSync(
+  new URL('../../../../contracts/headcount-camera-row.json', import.meta.url), 'utf8',
+)).countingOnlyPromise;
+
+test('the dialog says, in the contract\'s own words, what will not happen', () => {
+  assert.ok(PROMISE?.saidToTheOperator, 'the contract states no promise to check');
+  assert.ok(
+    consentCopy(cam()).body.includes(PROMISE.saidToTheOperator),
+    `the consent dialog no longer says "${PROMISE.saidToTheOperator}", which the `
+    + 'backend is still being held to by headcountTurnsAiOn.test.js',
+  );
+});
+
+test('the bulk wording keeps the promise too — it is the same switch', () => {
+  const many = consentCopy([cam(), cam({ monitorId: '2' })]).body;
+  assert.ok(many.includes(PROMISE.saidToTheOperator));
+});
