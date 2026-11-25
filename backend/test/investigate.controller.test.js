@@ -85,7 +85,25 @@ describe('POST /api/investigate/search', () => {
 
   test('AI index switched off reads as "not switched on yet"', async () => {
     mockAi.post.mockRejectedValue({ response: { status: 404, data: { detail: 'investigation index is not enabled' } } });
-    await expect(run(ctrl.search, { user: { id: 'u1' }, body: { q: 'red' } })).rejects.toMatchObject({ statusCode: 503 });
+    await expect(run(ctrl.search, { user: { id: 'u1' }, body: { q: 'red' } })).rejects.toMatchObject({ statusCode: 503, expose: true });
+  });
+
+  test('index switched off reads the same on every page, not as a crash (Ask summary)', async () => {
+    const askSvc = require('../src/services/ask');
+    const spy = jest.spyOn(askSvc, 'summary').mockRejectedValue(
+      { response: { status: 404, data: { detail: 'investigation index is not enabled' } } });
+    const err = await run(ctrl.summary, { user: { id: 'u1' }, query: { period: 'last_night' } }).catch((e) => e);
+    expect(err).toMatchObject({ statusCode: 503, expose: true });
+    expect(err.message).toMatch(/switched off/);
+    expect(err.message).not.toMatch(/summary failed/);
+    spy.mockRestore();
+  });
+
+  test('other upstream failures keep their detail out of the browser', async () => {
+    mockAi.post.mockRejectedValue({ response: { status: 500, data: { detail: 'psycopg OperationalError at 10.0.0.5' } } });
+    const err = await run(ctrl.search, { user: { id: 'u1' }, body: { q: 'red' } }).catch((e) => e);
+    expect(err.statusCode).toBe(500);
+    expect(err.expose).not.toBe(true);       // errorHandler answers "Internal Server Error"
   });
 });
 
