@@ -133,6 +133,33 @@ function aiTurnedOnFor(what) {
 const AI_TURNED_ON_FOR_COUNTING = aiTurnedOnFor('counted');
 const AI_TURNED_ON_FOR_ACTIVITY = aiTurnedOnFor('monitored for activity');
 
+/**
+ * The code a refusal carries when a feature cannot start until someone agrees
+ * to switch the camera's AI on.
+ *
+ * ASKED, NOT REPORTED. An earlier version of this switched the master on by
+ * itself and said so afterwards, which made the feature work but took a
+ * decision that is not the endpoint's to take: using a camera for AI at all is
+ * a privacy and a cost decision, and "I ticked counting" is not the same
+ * sentence as "yes, run AI on this camera". Reporting it after the fact leaves
+ * an operator reading about a change they did not choose -- the same class of
+ * fault as doing it silently, one step quieter.
+ *
+ * So the server refuses, names what it would do, and waits. `enableAi: true`
+ * on the retry is the consent. The UI asks in a dialog before it ever sends;
+ * this is what makes it impossible for ANY caller -- that dialog, Zone Setup,
+ * a script, a future page -- to turn a camera's AI on without someone saying
+ * so.
+ */
+const AI_CONSENT_REQUIRED = 'AI_CONSENT_REQUIRED';
+
+/** What to ask, when a feature needs the master switch on first. */
+function aiConsentQuestion(what, cameraName = 'this camera') {
+  return `${cameraName} has AI switched off, so it cannot be ${what} yet. `
+    + 'Switch AI on for it? It will detect people only — faces are not matched, '
+    + 'and no other AI feature is started.';
+}
+
 async function getRuntime() {
   try {
     const sentAt = Date.now();
@@ -319,5 +346,8 @@ module.exports = {
   aiTurnedOnFor,
   AI_TURNED_ON_FOR_COUNTING,
   AI_TURNED_ON_FOR_ACTIVITY,
+  // Switching the master on is ASKED FOR, not reported afterwards.
+  AI_CONSENT_REQUIRED,
+  aiConsentQuestion,
   _internals: { yieldsToPlayback, paused: _paused },
 };

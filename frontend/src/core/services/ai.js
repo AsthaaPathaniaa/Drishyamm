@@ -305,13 +305,18 @@ export const aiService = {
    * head-count model on for this camera; threshold (>0) arms an occupancy alert
    * when that many people are counted (with hysteresis, so it doesn't flap).
    */
-  setHeadcount(cameraId, { enabled, threshold, zones, imgsz } = {}) {
+  setHeadcount(cameraId, { enabled, threshold, zones, imgsz, enableAi } = {}) {
     // `zones` is only sent when supplied — the backend preserves the existing
     // ones otherwise, so toggling a camera on/off never wipes the counting area
     // an operator drew.
     const body = { enabled, threshold };
     if (zones !== undefined) body.zones = zones;
     if (imgsz !== undefined) body.imgsz = imgsz;
+    // `enableAi` is CONSENT, and is only ever sent after somebody has been
+    // asked. Counting needs the camera's master AI switch on; without this the
+    // backend refuses with 409 AI_CONSENT_REQUIRED rather than switching it on
+    // by itself, so no caller can turn a camera's AI on unasked.
+    if (enableAi !== undefined) body.enableAi = enableAi;
     return api.put(`/ai/cameras/${cameraId}/headcount`, body).then((r) => r.data);
   },
 };

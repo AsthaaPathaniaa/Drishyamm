@@ -184,3 +184,63 @@ export function zonesPending(stream) {
 
 /** What the tile should say it is counting. */
 export const ZONE_PENDING_LABEL = 'Zone drawn, not yet applied · counting the whole view';
+
+/* ── consent to switch the camera's AI on ───────────────────────────────────
+ *
+ * Counting cannot start while the camera's master AI switch is off. The switch
+ * an operator is given here only asks for counting, so something has to turn
+ * the master on -- and that something must ASK, not decide.
+ *
+ * Using a camera for AI at all is a privacy and a cost choice. "I ticked
+ * counting" is not the same sentence as "yes, run AI on this camera", and
+ * telling somebody afterwards that it happened is the same fault one step
+ * quieter: a change they did not choose. So the page asks first, and the
+ * backend refuses (409 AI_CONSENT_REQUIRED) if anything ever sends without
+ * having asked.
+ */
+
+/** The server's machine-readable "ask first". Matched on the code, never prose. */
+export const AI_CONSENT_REQUIRED = 'AI_CONSENT_REQUIRED';
+
+/** Will ticking this camera for counting need the master switch turned on? */
+export function needsAiConsent(cam) {
+  return !aiOn(cam);
+}
+
+/** Is this the server telling us to ask? Read from the code, not the message. */
+export function isConsentRefusal(err) {
+  const body = err?.response?.data;
+  return err?.response?.status === 409 && body?.code === AI_CONSENT_REQUIRED;
+}
+
+/**
+ * What the dialog says, as `{ title, body, confirmLabel, cameras }`.
+ *
+ * The body names all three things an operator needs to decide: what is off,
+ * what will be switched on, and what will NOT be — because the obvious worry
+ * about "turn AI on" is face recognition, and the answer is no.
+ *
+ * Takes one camera or a LIST, because "Turn all on" in the picker can need
+ * consent for several at once and asking once per camera would be a queue of
+ * identical dialogs. Few enough to read are NAMED; past four it is a count,
+ * the same rule the not-counting sentence uses.
+ */
+export function consentCopy(input) {
+  const cameras = (Array.isArray(input) ? input : [input]).filter(Boolean);
+  const names = cameras.map((c) => c?.name || c?.monitorId).filter(Boolean);
+  const many = cameras.length > 1;
+  const who = !cameras.length ? 'this camera'
+    : names.length > 4 ? `${cameras.length} cameras`
+      : andList(names);
+  return {
+    cameras,
+    title: many
+      ? `Switch AI on for ${cameras.length} cameras?`
+      : 'Switch AI on for this camera?',
+    body: `${who} ${many ? 'have' : 'has'} AI switched off, so ${many ? 'they cannot' : 'it cannot'} `
+      + `count people yet. Switching AI on lets the detector count them. ${many ? 'They count' : 'It counts'} `
+      + 'only — faces are not matched, and no other AI feature is started. You can switch '
+      + 'it off again in Camera Setup.',
+    confirmLabel: many ? `Switch AI on for ${cameras.length} and count` : 'Switch AI on and count',
+  };
+}

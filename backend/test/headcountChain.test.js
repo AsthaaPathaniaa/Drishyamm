@@ -72,12 +72,21 @@ const untouched = () => ({
  * Step 1+2, as the endpoint does it. This is the RULE from
  * setCameraHeadcount, applied through the real services, so a change to
  * either one fails here.
+ *
+ * `enableAi` is CONSENT. A tick that would have to switch the camera's master
+ * AI on is refused without it, and the refusal writes NOTHING -- storing the
+ * counting flag and then refusing would leave the camera ticked and still not
+ * counting, which is the exact state this whole path exists to prevent.
+ * Returns the string 'refused' for that case, so a test can assert on it.
  */
-function operatorTicksHeadcount(camera, { enabled = true, threshold = 0, zones } = {}) {
+function operatorTicksHeadcount(
+  camera, { enabled = true, threshold = 0, zones, enableAi } = {},
+) {
   const current = camera.settings || {};
   const prev = current.headcount || {};
   const now = '2026-11-24T10:00:00.000Z';
   const startAi = enabled && !isAiEnabled(camera);
+  if (startAi && enableAi !== true) return 'refused';
   return {
     ...camera,
     settings: {
@@ -113,8 +122,17 @@ describe('the whole path, one camera', () => {
     // back by someone "simplifying" the tick.
   });
 
-  test('THE FIX: the tick turns the master on, and the camera reaches the detector', async () => {
-    const after = operatorTicksHeadcount(untouched());
+  test('without consent nothing is written and nothing starts', async () => {
+    // Asked, not assumed. The operator sees a dialog; the chain stays as it was
+    // until they answer, so there is no half-landed state to recover from.
+    expect(operatorTicksHeadcount(untouched())).toBe('refused');
+
+    servesCameras([untouched()]);
+    expect(await headcountCameras()).toEqual([]);
+  });
+
+  test('THE FIX: consent turns the master on, and the camera reaches the detector', async () => {
+    const after = operatorTicksHeadcount(untouched(), { enableAi: true });
 
     expect(isAiEnabled(after)).toBe(true);
     servesCameras([after]);
@@ -125,7 +143,7 @@ describe('the whole path, one camera', () => {
   });
 
   test('and it starts ONLY counting — no face, no activity, no zone-guard', async () => {
-    const after = operatorTicksHeadcount(untouched());
+    const after = operatorTicksHeadcount(untouched(), { enableAi: true });
     const ai = after.settings.ai;
 
     expect(ai.faceRecognition).toBe(false);        // no licence spent, no matching
@@ -135,7 +153,7 @@ describe('the whole path, one camera', () => {
   });
 
   test('un-ticking stops counting and leaves the master alone', async () => {
-    const on = operatorTicksHeadcount(untouched());
+    const on = operatorTicksHeadcount(untouched(), { enableAi: true });
     const off = operatorTicksHeadcount(on, { enabled: false });
 
     expect(off.settings.headcount.enabled).toBe(false);
@@ -148,7 +166,7 @@ describe('the whole path, one camera', () => {
   test('a camera already running face recognition is not quietly anonymised', async () => {
     const withFace = untouched();
     withFace.settings = { ai: { enabled: true, mode: 'continuous', faceRecognition: true } };
-    const after = operatorTicksHeadcount(withFace);
+    const after = operatorTicksHeadcount(withFace);   // master already on: no question
 
     expect(after.settings.ai.faceRecognition).toBe(true);
     servesCameras([after]);
@@ -156,7 +174,7 @@ describe('the whole path, one camera', () => {
   });
 
   test('the master switch still wins: AI off by hand afterwards stops counting', async () => {
-    const after = operatorTicksHeadcount(untouched());
+    const after = operatorTicksHeadcount(untouched(), { enableAi: true });
     after.settings.ai = { ...after.settings.ai, enabled: false, mode: 'off' };
 
     servesCameras([after]);
@@ -166,7 +184,7 @@ describe('the whole path, one camera', () => {
 
   test('the plan still wins: a lapsed account counts nothing', async () => {
     getAiEntitledUserIds.mockResolvedValue(new Set());
-    servesCameras([operatorTicksHeadcount(untouched())]);
+    servesCameras([operatorTicksHeadcount(untouched(), { enableAi: true })]);
     expect(await headcountCameras()).toEqual([]);
   });
 });
@@ -203,7 +221,7 @@ describe('the zones an operator draws reach the detector', () => {
 
   test('the zones ride all the way to the registry row', async () => {
     const after = operatorTicksHeadcount(untouched(), {
-      threshold: CONTRACT.expect.threshold, zones: DRAWN,
+      threshold: CONTRACT.expect.threshold, zones: DRAWN, enableAi: true,
     });
     servesCameras([after]);
 
@@ -217,7 +235,7 @@ describe('the zones an operator draws reach the detector', () => {
 describe('the shape the detector parses — the cross-language boundary', () => {
   test('the row carries exactly the keys the contract declares', async () => {
     const after = operatorTicksHeadcount(untouched(), {
-      threshold: CONTRACT.expect.threshold,
+      threshold: CONTRACT.expect.threshold, enableAi: true,
     });
     servesCameras([after]);
 
@@ -226,7 +244,7 @@ describe('the shape the detector parses — the cross-language boundary', () => 
   });
 
   test('both stream URLs are offered, so the service can prefer the sub-stream', async () => {
-    const after = operatorTicksHeadcount(untouched());
+    const after = operatorTicksHeadcount(untouched(), { enableAi: true });
     servesCameras([after]);
 
     const [row] = await headcountCameras();
@@ -242,7 +260,7 @@ describe('the shape the detector parses — the cross-language boundary', () => 
       deriveSubPath: () => null,
     }));
     jest.doMock('../src/models', () => ({
-      Camera: { findAll: jest.fn().mockResolvedValue([operatorTicksHeadcount(untouched())]) },
+      Camera: { findAll: jest.fn().mockResolvedValue([operatorTicksHeadcount(untouched(), { enableAi: true })]) },
       RestrictedZone: { findAll: jest.fn() },
     }));
     jest.doMock('../src/services/entitlements.service', () => ({
@@ -263,6 +281,7 @@ describe('the shape the detector parses — the cross-language boundary', () => 
     const after = operatorTicksHeadcount(untouched(), {
       threshold: CONTRACT.camera.settings.headcount.threshold,
       zones: CONTRACT.camera.settings.headcount.zones,
+      enableAi: true,
     });
     servesCameras([after]);
 
@@ -279,7 +298,7 @@ describe('the shape the detector parses — the cross-language boundary', () => 
   });
 
   test('once the flags are explicit the row says what is on, with nothing absent', () => {
-    const after = operatorTicksHeadcount(untouched());
+    const after = operatorTicksHeadcount(untouched(), { enableAi: true });
     const settled = {
       ...after.settings,
       ai: explicitAi(after.settings.ai),

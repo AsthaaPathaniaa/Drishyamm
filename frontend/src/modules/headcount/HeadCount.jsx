@@ -60,9 +60,11 @@ import { Button } from '@/core/ui/button';
 import { CameraEmptyState } from '@/core/components/CameraEmptyState';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/core/ui/tooltip';
 import { pointsToSvg } from './zone-geometry';
+import { ConfirmDialog } from '@/core/ui/confirm-dialog';
 import {
   notCounting, notCountingReason, notCountingSummary, fixable,
   zonesPending, ZONE_PENDING_LABEL,
+  needsAiConsent, isConsentRefusal, consentCopy,
 } from './counting-status';
 
 const PAGE_DESCRIPTION =
@@ -107,6 +109,10 @@ export default function HeadCount() {
   // What a save did beyond what was asked. Cleared by the next save, and by
   // the operator, so it never becomes furniture.
   const [notices, setNotices] = useState([]);
+  // The cameras waiting on an answer to "switch AI on?" — a LIST, because
+  // "Turn all on" can need consent for several and a queue of identical
+  // dialogs is not a question, it is an obstacle. null = nothing asked.
+  const [askingAi, setAskingAi] = useState(null);
 
   const poll = useCallback(async () => {
     try {
@@ -183,13 +189,28 @@ export default function HeadCount() {
     return true;
   }), [enriched, filter]);
 
-  const toggleHeadcount = useCallback(async (cam, next) => {
+  /**
+   * Tick or untick one camera.
+   *
+   * `consented` is an answer to the dialog, and is only ever true on the path
+   * that comes back from it. Ticking a camera whose AI is off opens the dialog
+   * instead of saving: counting cannot start without the master switch, and
+   * switching that on is a privacy and a cost decision that belongs to the
+   * operator, not to this handler. The backend refuses too (409
+   * AI_CONSENT_REQUIRED), so the question cannot be skipped by any caller --
+   * the check here just means the operator is asked BEFORE a failed save
+   * rather than after one.
+   */
+  const toggleHeadcount = useCallback(async (cam, next, consented = false) => {
+    if (next && !consented && needsAiConsent(cam)) { setAskingAi([cam]); return; }
     setSavingId(cam.id);
     setCamList((list) => list.map((c) => (c.id === cam.id
       ? { ...c, headcount: { ...(c.headcount || {}), enabled: next } } : c)));
     try {
       const res = await aiService.setHeadcount(cam.id, {
-        enabled: next, threshold: cam.headcount?.threshold || 0,
+        enabled: next,
+        threshold: cam.headcount?.threshold || 0,
+        ...(consented ? { enableAi: true } : {}),
       });
       // The tick can do more than it says: on a camera whose AI was off, the
       // backend switches the master on so counting can actually start (see
@@ -200,9 +221,13 @@ export default function HeadCount() {
       // waiting up to 10s for the poll: the "not counting" note and this
       // camera's own card are both derived from it.
       if (res?.notices?.length) loadCams();
-    } catch {
+    } catch (err) {
       setCamList((list) => list.map((c) => (c.id === cam.id
         ? { ...c, headcount: { ...(c.headcount || {}), enabled: !next } } : c)));
+      // The server asking rather than failing: anything that reached a save
+      // without asking (a stale registry row, another tab, a future caller)
+      // still ends up at the same question instead of a silent no-op.
+      if (isConsentRefusal(err)) setAskingAi([cam]);
     } finally { setSavingId(null); }
   }, [loadCams]);
 
@@ -410,10 +435,31 @@ export default function HeadCount() {
         </PageContent>
       </OperationsPage>
 
+      {/* Asked before anything is sent, and again if a save is ever refused
+          for want of an answer. One question, one place. */}
+      <ConfirmDialog
+        cancelLabel="Leave AI off"
+        confirmLabel={askingAi ? consentCopy(askingAi).confirmLabel : 'Switch AI on'}
+        description={askingAi ? consentCopy(askingAi).body : null}
+        onConfirm={async () => {
+          const cams = askingAi || [];
+          setAskingAi(null);
+          // Sequential, not Promise.all: each one is a camera licence check
+          // and a settings write, and a burst of twenty is how a batch
+          // half-lands. The dialog stays busy until they are all done.
+          for (const cam of cams) await toggleHeadcount(cam, true, true);
+        }}
+        onOpenChange={(open) => { if (!open) setAskingAi(null); }}
+        open={Boolean(askingAi?.length)}
+        title={askingAi ? consentCopy(askingAi).title : ''}
+        tone="warning"
+      />
+
       {pickerOpen && (
         <CameraPicker
           camList={camList} query={query} setQuery={setQuery}
           savingId={savingId} onToggle={toggleHeadcount}
+          onAskAi={setAskingAi}
           onDetail={saveDetail}
           runningIds={runningIds} enabledCount={enabledCount}
           onClose={() => setPickerOpen(false)}
@@ -640,7 +686,7 @@ function DetailPicker({ value, onChange }) {
   );
 }
 
-function CameraPicker({ camList, query, setQuery, savingId, onToggle,
+function CameraPicker({ camList, query, setQuery, savingId, onToggle, onAskAi,
                         onDetail, runningIds, enabledCount, onClose }) {
   const [group, setGroup] = useState('all');
 
@@ -708,9 +754,21 @@ function CameraPicker({ camList, query, setQuery, savingId, onToggle,
           </div>
         )}
         <button
-          onClick={() => filtered.forEach((c) => {
-            if ((c.headcount?.enabled === true) !== !allOn) onToggle(c, !allOn);
-          })}
+          onClick={() => {
+            const changing = filtered.filter((c) => (c.headcount?.enabled === true) !== !allOn);
+            if (!allOn) {
+              // Turning on: the cameras whose AI is already on just start. The
+              // rest are ONE question rather than a dialog each -- see
+              // consentCopy. Asked here rather than inside the per-camera
+              // handler, which would otherwise ask about the last one only.
+              const ready = changing.filter((c) => !needsAiConsent(c));
+              const ask = changing.filter((c) => needsAiConsent(c));
+              ready.forEach((c) => onToggle(c, true));
+              if (ask.length) onAskAi(ask);
+              return;
+            }
+            changing.forEach((c) => onToggle(c, false));
+          }}
           className="cursor-pointer rounded-lg border border-line px-3 py-1.5 text-small font-semibold text-fg-muted
                      transition duration-200 hover:bg-surface-muted hover:text-fg">
           {allOn ? 'Turn all off' : 'Turn all on'}

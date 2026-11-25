@@ -34,6 +34,7 @@ const { assertAiLicence, getAiEntitledUserIds } = require('../services/entitleme
 const {
   isAiEnabled, masterOnForFeature,
   AI_TURNED_ON_FOR_COUNTING, AI_TURNED_ON_FOR_ACTIVITY,
+  AI_CONSENT_REQUIRED, aiConsentQuestion,
 } = require('../services/aiLifecycle.service');
 const { AIEvent, Camera, CameraGroup, RestrictedZone } = require('../models');
 const {
@@ -1415,20 +1416,35 @@ const setCameraHeadcount = asyncHandler(async (req, res) => {
     ? (ALLOWED_DETAIL.includes(Number(req.body.imgsz)) ? Number(req.body.imgsz) : null)
     : (prev.imgsz ?? null);
 
-  // THE TICK IS THE WHOLE SWITCH. Counting is gated on the camera's master AI
-  // switch like every other feature, and this endpoint is the only switch an
-  // operator is given for counting -- the Head Count page's tick, and Zone
-  // Setup's save, both land here. So turning counting on turns the master on
-  // with it, for counting only: see countingOnlyAi for what that does and does
-  // not switch on, and why an explicit face flag is overridden rather than
-  // honoured. Without this a camera sat ticked here and excluded by
-  // aiFeatureCameras.service `eligible`, counting nothing, with no page able to
-  // say why -- and a zone drawn on it saved successfully and never got a number.
+  // THE TICK IS THE WHOLE SWITCH -- ONCE SOMEBODY HAS AGREED TO IT.
   //
-  // Turning counting OFF leaves the master alone. Other features hang off it,
-  // and un-ticking a camera here is not a request to stop them.
+  // Counting is gated on the camera's master AI switch like every other
+  // feature, and this endpoint is the only switch an operator is given for
+  // counting (the Head Count page's tick, and Zone Setup's save, both land
+  // here). So counting cannot start while the master is off, and a camera used
+  // to sit ticked here and excluded by aiFeatureCameras `eligible`, counting
+  // nothing, with no page able to say why.
+  //
+  // But switching the master on is not this endpoint's decision to take on its
+  // own: using a camera for AI at all is a privacy and a cost choice, and "I
+  // ticked counting" is not the same sentence as "yes, run AI on this camera".
+  // So it is REFUSED and named, and `enableAi: true` on the retry is the
+  // consent -- see AI_CONSENT_REQUIRED. The counting flag is not written
+  // either: a save that half-lands here would leave the camera ticked and
+  // still not counting, which is the exact state this whole path exists to
+  // make impossible.
+  //
+  // Turning counting OFF never comes here. Other features hang off the master,
+  // and un-ticking a camera is not a request to stop them.
   const now = new Date().toISOString();
   const startAi = enabled && !isAiEnabled(camera);
+  if (startAi && req.body?.enableAi !== true) {
+    throw new AppError(
+      aiConsentQuestion('counted', camera.name || 'This camera'),
+      409,
+      AI_CONSENT_REQUIRED,
+    );
+  }
 
   const next = {
     ...current,
@@ -2171,16 +2187,32 @@ const setActivityCameras = asyncHandler(async (req, res) => {
     if (!camera) { results.push({ id, ok: false, error: 'not found' }); continue; }
     const current = camera.settings || {};
     const now = new Date().toISOString();
-    // ON MEANS ON. Activity monitoring is gated on the camera's master AI
-    // switch (aiFeatureCameras.service `eligible`), and this toggle is the only
-    // switch an operator is given for it -- so switching it on switches the
-    // master on too. Without this a camera sat ticked for activity and
-    // excluded by the master, analysing nothing, with no page able to say why:
-    // the same fault head count had. For this feature only -- see
-    // masterOnForFeature for what it does and does not start.
+    // ON MEANS ON, once somebody has agreed to it. Activity monitoring is
+    // gated on the camera's master AI switch (aiFeatureCameras `eligible`), and
+    // this toggle is the only switch an operator is given for it -- so a camera
+    // used to sit ticked for activity and excluded by the master, analysing
+    // nothing, with no page able to say why: the same fault head count had.
+    //
+    // Switching the master on needs consent, like head count. This is a BULK
+    // route, so a refusal is per camera and does not fail the batch: the ones
+    // that can start do, and the ones that need AI come back flagged for the
+    // UI to ask about. Failing all twenty because one needs a question would
+    // make the common case hostage to the rare one.
     //
     // Turning activity OFF leaves the master alone: other features hang off it.
-    const startAi = enabled && !isAiEnabled(camera);
+    const needsAi = enabled && !isAiEnabled(camera);
+    const startAi = needsAi && req.body?.enableAi === true;
+    if (needsAi && !startAi) {
+      results.push({
+        id,
+        monitorId: camera.monitorId,
+        ok: false,
+        needsAi: true,
+        name: camera.name,
+        error: aiConsentQuestion('monitored for activity', camera.name || 'This camera'),
+      });
+      continue;
+    }
     if (startAi) turnedAiOn += 1;
     const nextAi = {
       ...(startAi ? masterOnForFeature(current.ai, now) : (current.ai || {})),

@@ -12,6 +12,7 @@ import {
   AI_OFF, OFFLINE, WAITING,
   aiOn, wanted, notCountingReason, notCounting, notCountingSummary,
   andList, fixable, zonesPending,
+  AI_CONSENT_REQUIRED, needsAiConsent, isConsentRefusal, consentCopy,
 } from './counting-status.js';
 
 // A camera the way GET /ai/cameras serialises one. `ai.enabled` + mode are the
@@ -218,4 +219,77 @@ test('a disabled zone does not make the camera look pending for ever', () => {
 
 test('a missing breakdown is the same as an empty one', () => {
   assert.equal(zonesPending({ zones: [{ id: 'z1', name: 'Room', points: SHAPE }] }), true);
+});
+
+// ── consent to switch the camera's AI on ───────────────────────────────────
+//
+// Counting cannot start while the master AI switch is off, and something has
+// to turn it on. These pin that the something ASKS. Telling an operator
+// afterwards that their tick also switched AI on is the same fault as doing it
+// silently, one step quieter: a change they did not choose.
+
+test('a camera whose AI is off needs to be asked about', () => {
+  assert.equal(needsAiConsent(cam({ ai: { enabled: false, mode: 'off' } })), true);
+  assert.equal(needsAiConsent(cam({ ai: { enabled: true, mode: 'off' } })), true);
+  assert.equal(needsAiConsent(cam({ ai: {} })), true);
+});
+
+test('a camera whose AI is already on is not asked about — nothing changes for it', () => {
+  assert.equal(needsAiConsent(cam()), false);
+});
+
+test('the question names what is off, what starts, and what does NOT', () => {
+  const copy = consentCopy(cam({ name: 'Server room', ai: { enabled: false } }));
+  assert.match(copy.title, /Switch AI on for this camera\?/);
+  assert.match(copy.body, /Server room/);
+  assert.match(copy.body, /AI switched off/);
+  // The obvious worry about "turn AI on" is face recognition. Answer it.
+  assert.match(copy.body, /faces are not matched/);
+  assert.match(copy.body, /no other AI feature is started/);
+  // And that it is reversible, which is what makes yes an easy answer.
+  assert.match(copy.body, /switch it off again/i);
+});
+
+test('several cameras are ONE question, not a queue of identical dialogs', () => {
+  const copy = consentCopy([
+    cam({ monitorId: '2', name: 'Dock' }),
+    cam({ monitorId: '3', name: 'Vault' }),
+  ]);
+  assert.match(copy.title, /2 cameras/);
+  assert.match(copy.body, /Dock and Vault/);
+  assert.match(copy.body, /they cannot/);
+  assert.equal(copy.cameras.length, 2);
+});
+
+test('past four cameras the question counts them instead of listing them', () => {
+  const many = Array.from({ length: 5 }, (_, i) => cam({ monitorId: String(i), name: `C${i}` }));
+  const copy = consentCopy(many);
+  assert.match(copy.body, /^5 cameras have AI switched off/);
+  assert.doesNotMatch(copy.body, /C0/);
+});
+
+test('the confirm button says what pressing it does, not "OK"', () => {
+  assert.equal(consentCopy(cam()).confirmLabel, 'Switch AI on and count');
+  assert.match(consentCopy([cam(), cam({ monitorId: '2' })]).confirmLabel, /^Switch AI on for 2 and count$/);
+});
+
+test('consentCopy survives being handed nothing', () => {
+  const copy = consentCopy(null);
+  assert.match(copy.body, /this camera/);
+  assert.deepEqual(copy.cameras, []);
+});
+
+test('the server asking is read from its CODE, never from its prose', () => {
+  // A copy edit to the message must not stop the dialog appearing.
+  assert.equal(isConsentRefusal({
+    response: { status: 409, data: { code: AI_CONSENT_REQUIRED, message: 'anything at all' } },
+  }), true);
+  assert.equal(isConsentRefusal({
+    response: { status: 409, data: { message: 'some other conflict' } },
+  }), false);
+  assert.equal(isConsentRefusal({
+    response: { status: 500, data: { code: AI_CONSENT_REQUIRED } },
+  }), false);
+  assert.equal(isConsentRefusal(new Error('network down')), false);
+  assert.equal(isConsentRefusal(undefined), false);
 });

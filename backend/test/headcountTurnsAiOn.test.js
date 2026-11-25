@@ -142,3 +142,82 @@ describe('the gate the endpoint applies', () => {
     expect(startAi(false, asCamera({ enabled: true, mode: 'continuous' }))).toBe(false);
   });
 });
+
+/**
+ * Consent: switching the master on is ASKED FOR, not reported afterwards.
+ *
+ * An earlier version of this change switched the master on by itself and said
+ * so in the response. That made the feature work and took a decision that is
+ * not the endpoint's to take -- using a camera for AI at all is a privacy and
+ * a cost choice, and "I ticked counting" is not the same sentence as "yes, run
+ * AI on this camera".
+ *
+ * These pin the ENDPOINT'S rule, so the question cannot be skipped by any
+ * caller: the dialog, Zone Setup, a script, or a page written next year.
+ */
+describe('consent before the master switch is touched', () => {
+  const { AI_CONSENT_REQUIRED, aiConsentQuestion } = require('../src/services/aiLifecycle.service');
+
+  // The exact condition the endpoint applies, as a pure function of the
+  // request. `refuse` means: do not write ANYTHING and ask instead.
+  const decide = (camera, body) => {
+    const enabled = body.enabled === true;
+    const startAi = enabled && !isAiEnabled(camera);
+    if (startAi && body.enableAi !== true) return 'refuse';
+    return startAi ? 'turn-master-on' : 'write-as-asked';
+  };
+
+  const off = asCamera({ enabled: false, mode: 'off' });
+  const on = asCamera({ enabled: true, mode: 'continuous' });
+
+  test('ticking a camera whose AI is off is REFUSED, not quietly obeyed', () => {
+    expect(decide(off, { enabled: true })).toBe('refuse');
+  });
+
+  test('the same tick WITH consent turns the master on', () => {
+    expect(decide(off, { enabled: true, enableAi: true })).toBe('turn-master-on');
+  });
+
+  test('consent is `true` and nothing else — no truthy strings', () => {
+    expect(decide(off, { enabled: true, enableAi: 'yes' })).toBe('refuse');
+    expect(decide(off, { enabled: true, enableAi: 1 })).toBe('refuse');
+    expect(decide(off, { enabled: true, enableAi: false })).toBe('refuse');
+  });
+
+  test('a camera whose AI is on never asks — consent is irrelevant there', () => {
+    expect(decide(on, { enabled: true })).toBe('write-as-asked');
+    expect(decide(on, { enabled: true, enableAi: true })).toBe('write-as-asked');
+  });
+
+  test('UN-ticking is never refused, with or without consent', () => {
+    // Turning a feature off cannot need permission to touch a switch it does
+    // not touch.
+    expect(decide(off, { enabled: false })).toBe('write-as-asked');
+    expect(decide(on, { enabled: false })).toBe('write-as-asked');
+  });
+
+  test('a refusal writes NOTHING — a half-landed save is the state this prevents', () => {
+    // The whole point: refusing after storing `headcount.enabled` would leave
+    // the camera ticked and still not counting, which is the exact state this
+    // path exists to make impossible.
+    expect(decide(off, { enabled: true })).toBe('refuse');
+    expect(off.settings.ai.enabled).toBe(false);
+    expect(off.settings.headcount).toBeUndefined();
+  });
+
+  test('the refusal carries a code a client can branch on', () => {
+    expect(AI_CONSENT_REQUIRED).toBe('AI_CONSENT_REQUIRED');
+  });
+
+  test('the question names the camera, what starts, and what does not', () => {
+    const q = aiConsentQuestion('counted', 'Server room');
+    expect(q).toMatch(/^Server room has AI switched off/);
+    expect(q).toMatch(/cannot be counted yet/);
+    expect(q).toMatch(/faces are not matched/);
+    expect(q).toMatch(/no other AI feature is started/);
+  });
+
+  test('with no camera name it still reads as a sentence', () => {
+    expect(aiConsentQuestion('counted')).toMatch(/^this camera has AI switched off/);
+  });
+});
