@@ -213,6 +213,57 @@ export function isConsentRefusal(err) {
   return err?.response?.status === 409 && body?.code === AI_CONSENT_REQUIRED;
 }
 
+/* ── when a save does not land ──────────────────────────────────────────────
+ *
+ * A tick that springs back with no message is this whole file's complaint,
+ * committed by the page that was written to fix it. Every save here can be
+ * refused for reasons the operator can act on and cannot guess:
+ *
+ *   the account's head-count licence is used up
+ *   the camera was deleted in another tab
+ *   the backend is unreachable
+ *
+ * None of those is a consent question, so none of them opened the dialog, and
+ * the catch simply put the tick back. Silent.
+ */
+
+/** The sentence the server sent, or the nearest honest thing. */
+export function errorText(err) {
+  return err?.response?.data?.message
+    || err?.message
+    || 'the request was refused and gave no reason';
+}
+
+/**
+ * One line for the saves that did not land, or null when none failed.
+ *
+ * Grouped by REASON rather than listed per camera: twenty cameras refused for
+ * one exhausted licence is one fact, and twenty copies of it is noise that
+ * hides the second reason underneath.
+ *
+ * @param failures `[{ cam, message }]`
+ */
+export function saveFailureSummary(failures = []) {
+  const real = (failures || []).filter(Boolean);
+  if (!real.length) return null;
+
+  const byReason = new Map();
+  for (const { cam, message } of real) {
+    const key = String(message || errorText());
+    if (!byReason.has(key)) byReason.set(key, []);
+    byReason.get(key).push(cam?.name || cam?.monitorId || 'a camera');
+  }
+
+  const parts = [];
+  for (const [message, names] of byReason.entries()) {
+    const who = names.length > 4 ? `${names.length} cameras` : andList(names);
+    // The server's sentence is already a sentence, so it is not re-punctuated
+    // into the middle of this one.
+    parts.push(`${who}: ${message.replace(/\.$/, '')}`);
+  }
+  return `Not saved — ${parts.join('; ')}.`;
+}
+
 /**
  * What the dialog says, as `{ title, body, confirmLabel, cameras }`.
  *

@@ -52,7 +52,6 @@ import {
   Crop, RefreshCw, Check, X, Download, TriangleAlert, Power,
 } from 'lucide-react';
 import { aiService } from '@/core/services/ai';
-import { buildEnablePayload } from '@/core/services/aiCamera';
 import {
   OperationsPage, PageAction, PageContent, PageHeader,
 } from '@/core/layout/OperationsPage';
@@ -65,6 +64,7 @@ import {
   notCounting, notCountingReason, notCountingSummary, fixable,
   zonesPending, ZONE_PENDING_LABEL,
   needsAiConsent, isConsentRefusal, consentCopy,
+  errorText, saveFailureSummary,
 } from './counting-status';
 
 const PAGE_DESCRIPTION =
@@ -113,6 +113,11 @@ export default function HeadCount() {
   // "Turn all on" can need consent for several and a queue of identical
   // dialogs is not a question, it is an obstacle. null = nothing asked.
   const [askingAi, setAskingAi] = useState(null);
+  // Saves that did not land, as [{cam, message}]. A tick that springs back
+  // with no message is the fault this whole page exists to fix, so a refusal
+  // the operator can act on -- an exhausted licence, a deleted camera -- is
+  // never swallowed. Cleared by the next save.
+  const [failures, setFailures] = useState([]);
 
   const poll = useCallback(async () => {
     try {
@@ -202,8 +207,9 @@ export default function HeadCount() {
    * rather than after one.
    */
   const toggleHeadcount = useCallback(async (cam, next, consented = false) => {
-    if (next && !consented && needsAiConsent(cam)) { setAskingAi([cam]); return; }
+    if (next && !consented && needsAiConsent(cam)) { setAskingAi([cam]); return null; }
     setSavingId(cam.id);
+    setFailures([]);
     setCamList((list) => list.map((c) => (c.id === cam.id
       ? { ...c, headcount: { ...(c.headcount || {}), enabled: next } } : c)));
     try {
@@ -221,13 +227,21 @@ export default function HeadCount() {
       // waiting up to 10s for the poll: the "not counting" note and this
       // camera's own card are both derived from it.
       if (res?.notices?.length) loadCams();
+      return null;
     } catch (err) {
       setCamList((list) => list.map((c) => (c.id === cam.id
         ? { ...c, headcount: { ...(c.headcount || {}), enabled: !next } } : c)));
       // The server asking rather than failing: anything that reached a save
       // without asking (a stale registry row, another tab, a future caller)
       // still ends up at the same question instead of a silent no-op.
-      if (isConsentRefusal(err)) setAskingAi([cam]);
+      if (isConsentRefusal(err)) { setAskingAi([cam]); return null; }
+      // Anything else is a refusal the operator has to be TOLD about -- an
+      // exhausted licence is the common one, and it is not guessable from a
+      // tick that springs back. Returned as well as shown, so a bulk caller
+      // can collect every failure instead of each one overwriting the last.
+      const failure = { cam, message: errorText(err) };
+      setFailures([failure]);
+      return failure;
     } finally { setSavingId(null); }
   }, [loadCams]);
 
@@ -260,6 +274,7 @@ export default function HeadCount() {
     [stranded],
   );
   const canFix = useMemo(() => fixable(stranded), [stranded]);
+  const failureNote = useMemo(() => saveFailureSummary(failures), [failures]);
 
   /**
    * Turn the camera's master AI switch on, for the cameras whose only problem
@@ -276,9 +291,29 @@ export default function HeadCount() {
    */
   const turnAiOn = useCallback(async (cams) => {
     setFixingAi(true);
-    await Promise.all((cams || []).map(async (c) => {
-      try { await aiService.updateCameraAiLifecycle(c.id, buildEnablePayload(c)); } catch { /* next poll */ }
-    }));
+    setFailures([]);
+    const failed = [];
+    // Through the HEAD-COUNT endpoint with consent, not the lifecycle route.
+    //
+    // These cameras are already ticked for counting; what they are missing is
+    // the master switch, and this is the one rule that turns it on for
+    // counting only. The lifecycle route was wrong here: buildEnablePayload
+    // carries `faceRecognition: ai.faceRecognition !== false`, which is TRUE
+    // for a camera that has never been configured -- so this button started
+    // face recognition and spent a face licence, while the dialog two inches
+    // away promised "faces are not matched". One rule, one promise.
+    for (const c of cams || []) {
+      try {
+        await aiService.setHeadcount(c.id, {
+          enabled: true,
+          threshold: c.headcount?.threshold || 0,
+          enableAi: true,
+        });
+      } catch (err) {
+        failed.push({ cam: c, message: errorText(err) });
+      }
+    }
+    setFailures(failed);
     await loadCams();
     setFixingAi(false);
   }, [loadCams]);
@@ -362,6 +397,9 @@ export default function HeadCount() {
               commonest version of this problem is EVERY selected camera
               stranded -- and that renders as "No cameras are being counted
               yet", which is true and tells the operator nothing. */}
+          {failureNote && (
+            <FailureNote note={failureNote} onDismiss={() => setFailures([])} />
+          )}
           {notices.map((n) => (
             <DidMoreNote key={n} note={n} onDismiss={() => setNotices([])} />
           ))}
@@ -447,7 +485,16 @@ export default function HeadCount() {
           // Sequential, not Promise.all: each one is a camera licence check
           // and a settings write, and a burst of twenty is how a batch
           // half-lands. The dialog stays busy until they are all done.
-          for (const cam of cams) await toggleHeadcount(cam, true, true);
+          //
+          // Every failure is collected, because the licence runs out PART WAY
+          // through: two cameras start, ten are refused, and reporting only
+          // the last one would leave ten ticks springing back unexplained.
+          const failed = [];
+          for (const cam of cams) {
+            const f = await toggleHeadcount(cam, true, true);
+            if (f) failed.push(f);
+          }
+          setFailures(failed);
         }}
         onOpenChange={(open) => { if (!open) setAskingAi(null); }}
         open={Boolean(askingAi?.length)}
@@ -492,6 +539,31 @@ function DidMoreNote({ note, onDismiss }) {
       <button
         aria-label="Dismiss"
         className="shrink-0 cursor-pointer rounded p-0.5 text-brand-ink/70 transition hover:text-brand-ink"
+        onClick={onDismiss}
+        type="button"
+      >
+        <X size={14} strokeWidth={2.5} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A save that did not land, and why.
+ *
+ * Danger, not warning: something the operator asked for did not happen. An
+ * exhausted licence is the common case and the only way they can find out --
+ * the tick springs back on its own and a bouncing tick explains nothing.
+ */
+function FailureNote({ note, onDismiss }) {
+  return (
+    <div className="flex shrink-0 items-start gap-2.5 rounded-xl border border-danger-line
+                    bg-danger-soft px-3 py-2">
+      <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-danger-ink" strokeWidth={2.25} />
+      <p className="min-w-0 flex-1 text-caption leading-relaxed text-danger-ink">{note}</p>
+      <button
+        aria-label="Dismiss"
+        className="shrink-0 cursor-pointer rounded p-0.5 text-danger-ink/70 transition hover:text-danger-ink"
         onClick={onDismiss}
         type="button"
       >

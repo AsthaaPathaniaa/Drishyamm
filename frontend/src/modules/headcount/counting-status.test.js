@@ -13,6 +13,7 @@ import {
   aiOn, wanted, notCountingReason, notCounting, notCountingSummary,
   andList, fixable, zonesPending,
   AI_CONSENT_REQUIRED, needsAiConsent, isConsentRefusal, consentCopy,
+  errorText, saveFailureSummary,
 } from './counting-status.js';
 
 // A camera the way GET /ai/cameras serialises one. `ai.enabled` + mode are the
@@ -292,4 +293,70 @@ test('the server asking is read from its CODE, never from its prose', () => {
   }), false);
   assert.equal(isConsentRefusal(new Error('network down')), false);
   assert.equal(isConsentRefusal(undefined), false);
+});
+
+// ── a save that does not land ──────────────────────────────────────────────
+//
+// A tick that springs back with no message is this module's own complaint,
+// committed by the page written to fix it. The licence running out is the
+// common case and is not guessable from a bouncing tick.
+
+test('the server\'s own sentence is what the operator is shown', () => {
+  assert.equal(
+    errorText({ response: { data: { message: 'Your head-count licence covers 10 cameras.' } } }),
+    'Your head-count licence covers 10 cameras.',
+  );
+});
+
+test('a network error still says something true', () => {
+  assert.equal(errorText(new Error('Network Error')), 'Network Error');
+  assert.match(errorText(undefined), /gave no reason/);
+  assert.match(errorText({}), /gave no reason/);
+});
+
+test('nothing failed says nothing at all', () => {
+  assert.equal(saveFailureSummary([]), null);
+  assert.equal(saveFailureSummary(), null);
+  assert.equal(saveFailureSummary([null, undefined]), null);
+});
+
+test('one failure names the camera and the reason', () => {
+  const note = saveFailureSummary([
+    { cam: cam({ name: 'Dock' }), message: 'Your head-count licence covers 10 cameras.' },
+  ]);
+  assert.match(note, /^Not saved — Dock: Your head-count licence covers 10 cameras\.$/);
+});
+
+test('many cameras refused for ONE reason is one fact, not twenty copies', () => {
+  // The licence runs out part way through a bulk turn-on. Twenty copies of the
+  // same sentence would hide a second reason underneath it.
+  const failures = ['Dock', 'Vault', 'Gate'].map((name) => ({
+    cam: cam({ name }), message: 'Licence exhausted.',
+  }));
+  const note = saveFailureSummary(failures);
+  assert.match(note, /Dock, Vault and Gate: Licence exhausted/);
+  assert.equal(note.split(';').length, 1);
+});
+
+test('two different reasons are two clauses, so neither hides the other', () => {
+  const note = saveFailureSummary([
+    { cam: cam({ name: 'Dock' }), message: 'Licence exhausted.' },
+    { cam: cam({ name: 'Gate' }), message: 'Camera not found' },
+  ]);
+  assert.equal(note.split(';').length, 2);
+  assert.match(note, /Dock: Licence exhausted/);
+  assert.match(note, /Gate: Camera not found/);
+});
+
+test('past four cameras on one reason it counts them', () => {
+  const failures = Array.from({ length: 6 }, (_, i) => ({
+    cam: cam({ name: `C${i}` }), message: 'Licence exhausted.',
+  }));
+  assert.match(saveFailureSummary(failures), /6 cameras: Licence exhausted/);
+});
+
+test('a camera with no name is still accounted for', () => {
+  const note = saveFailureSummary([{ cam: { monitorId: 'cam-9' }, message: 'nope' }]);
+  assert.match(note, /cam-9: nope/);
+  assert.match(saveFailureSummary([{ cam: null, message: 'nope' }]), /a camera: nope/);
 });
