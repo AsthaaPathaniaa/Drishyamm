@@ -146,6 +146,61 @@ class UnknownPlacesTest(unittest.TestCase):
             self.assertIn(k, d)
 
 
+class ShortNamesAndRoomsTest(unittest.TestCase):
+    """Reported 2026-11-25: "movement near hr cabin" and "bag theft from hr cabin"
+    searched every camera: "HR" was too short to match and "cabin" was taken as
+    a description."""
+    CAMS = [("c-hr", "m-hr", "Camera HR"), ("c-it", "m-it", "IT"), ("c-acc", "m-acc", "Accounts Cabin"),
+            ("c-caf", "m-caf", "Camera Cafeteria"), ("c-g2", "m-g2", "Camera Gate2")]
+
+    def q(self, text):
+        return p(text, cameras=self.CAMS)
+
+    def test_the_reported_queries(self):
+        r = self.q("movement near hr cabin")
+        self.assertEqual((r.camera_ids, r.browse, r.unknown_places), (["c-hr"], True, []))
+        r = self.q("bag theft from hr cabin")
+        self.assertEqual(r.camera_ids, ["c-hr"])
+        self.assertEqual(r.text, "a photo of a person with a bag")
+
+    def test_short_names_need_a_place_word_or_a_room_word(self):
+        for text in ["anyone at hr", "hr cabin", "near the hr room", "कोई hr के पास", "चोरी hr केबिन में", "hr"]:
+            self.assertEqual(self.q(text).camera_ids, ["c-hr"], text)
+        self.assertEqual(self.q("is it him in a red top").camera_ids, [])          # the English "it"
+        self.assertEqual(self.q("man near it room").camera_ids, ["c-it"])
+
+    def test_room_words_belong_to_the_place(self):
+        for text, cam in [("man in the cafeteria area", "c-caf"), ("red top near gate 2 area", "c-g2"),
+                          ("someone near accounts cabin", "c-acc"), ("person at the accounts", "c-acc")]:
+            r = self.q(text)
+            self.assertEqual(r.camera_ids, [cam], text)
+            self.assertNotRegex(r.text, r"\b(area|cabin|room|in the|near)\b", text)
+
+    def test_a_room_word_alone_never_picks_a_camera(self):
+        r = self.q("movement near finance cabin")
+        self.assertEqual(r.camera_ids, [])                   # not "Accounts Cabin" just for "cabin"
+        self.assertEqual(r.unknown_places, ["finance cabin"])
+
+    def test_description_words_never_pick_a_camera_or_an_imported_video(self):
+        cams = self.CAMS + [("c-imp", "file:imp1", "Phone video from security guard"), ("c-ph", "m-ph", "Phone Booth")]
+        for text in ["person talking on phone", "a security guard with a bag", "man on his phone near hr"]:
+            r = p(text, cameras=cams)
+            self.assertNotIn("c-imp", r.camera_ids, text)
+            self.assertNotIn("c-ph", r.camera_ids, text)
+        self.assertEqual(p("anyone at the phone booth", cameras=cams).camera_ids, ["c-ph"])     # its name still works
+        self.assertEqual(p("man near phone video from security guard", cameras=cams).camera_ids, ["c-imp"])
+
+    def test_event_words_describe_no_one(self):
+        for text in ["theft", "fight at gate 2", "चोरी", "incident near hr"]:
+            r = self.q(text)
+            self.assertTrue(r.browse, text)
+            self.assertNotRegex(r.text, r"theft|fight|incident|चोरी", text)
+
+    def test_question_openers_and_pronouns_are_tidied(self):
+        self.assertEqual(self.q("is it him in a red top").text, "a photo of a person in a red top")
+        self.assertEqual(self.q("show me a woman in yellow").text, "a photo of a woman in yellow")
+
+
 # ── search ───────────────────────────────────────────────────────────────────
 
 def keys(flt):
@@ -253,6 +308,56 @@ class RankingTest(unittest.TestCase):
         self.assertEqual((c.kw["order_by"].key, c.kw["order_by"].direction), ("first_seen_ts", "desc"))
         self.assertEqual(keys(c.kw["scroll_filter"])[0], ("tenant_id", str(TENANT)))
         self.assertIn(("camera_id", None), [(k, None) for k, _ in keys(c.kw["scroll_filter"])])
+
+
+class MatchLabelTest(unittest.TestCase):
+    """Raw cosine shown as "% match" read 100% for everything on the testing
+    server. The label now says how much the description fits beyond "a person"."""
+
+    def hit(self, i, cos, base_cos):
+        # picture vector chosen so picture·base = base_cos (base = [1, 0])
+        return {"id": f"t{i}", "cosine": cos, "payload": {}, "vector": [base_cos, 0.0]}
+
+    def test_labels(self):
+        from vms_face.investigate.search import MATCH_GOOD, MATCH_STRONG, match_label
+        self.assertEqual((MATCH_STRONG, MATCH_GOOD), (0.015, 0.005))
+        self.assertEqual([match_label(m) for m in (0.04, 0.015, 0.01, 0.005, 0.001, 0.0, None)],
+                         ["strong", "strong", "good", "good", "possible", "possible", None])
+
+    def test_unrelated_hits_are_dropped_and_the_rest_ordered_by_margin(self):
+        from vms_face.investigate.search import apply_margins
+        hits = [self.hit(1, 0.14, 0.13), self.hit(2, 0.12, 0.08), self.hit(3, 0.13, 0.15)]
+        out = apply_margins(hits, [1.0, 0.0], keep_below_zero=False)
+        self.assertEqual([(h["id"], h["margin"]) for h in out], [("t2", 0.04), ("t1", 0.01)])     # t3 fits "a person" better
+
+    def test_filters_that_vouch_for_a_hit_keep_it(self):
+        from vms_face.investigate.search import apply_margins
+        out = apply_margins([self.hit(3, 0.13, 0.15)], [1.0, 0.0], keep_below_zero=True)
+        self.assertEqual(out[0]["margin"], -0.02)
+
+    def test_hits_without_vectors_pass_unchanged(self):
+        from vms_face.investigate.search import apply_margins
+        out = apply_margins([{"id": "b", "cosine": None, "payload": {}}], [1.0, 0.0], keep_below_zero=False)
+        self.assertEqual(out, [{"id": "b", "cosine": None, "payload": {}}])
+
+    def test_rerank_keeps_the_margin_order_and_result_rows_carry_the_label(self):
+        from vms_face.investigate.search import result_row
+        hits = [{"id": "a", "cosine": 0.20, "margin": 0.004, "payload": {"first_seen_ts": 1}},
+                {"id": "b", "cosine": 0.12, "margin": 0.03, "payload": {"first_seen_ts": 1}}]
+        out = rerank(hits, SearchFilters(), to_score=lambda c: c, top_k=5)
+        self.assertEqual([h["id"] for h in out], ["a", "b"][::-1])
+        self.assertEqual([result_row(h, camera_codes={})["match"] for h in out], ["strong", "possible"])
+
+    def test_baselines(self):
+        from vms_face.investigate.search import baseline_text
+        self.assertEqual(baseline_text("vehicle"), "a photo of a vehicle")
+        self.assertEqual(baseline_text("person"), "a photo of a person")
+        self.assertEqual(baseline_text(None), "a photo of a person")
+
+    def test_describes_only_when_there_is_more_than_who(self):
+        for q, want in [("man", False), ("woman", False), ("people", False), ("car", False), ("movement", False),
+                        ("man with a bag", True), ("red top", True), ("white car", True), ("person on phone", True)]:
+            self.assertEqual(p(q).describes, want, q)
 
 
 class UpperBodyColourTest(unittest.TestCase):
@@ -396,6 +501,22 @@ class RouteTest(unittest.TestCase):
         out, _ = self.run_search("man", points=[point(1, 0.95), point(2, 0.05)], allow_gender=True,
                                  overrides={"clear": ["gender"]})
         self.assertEqual(len(out["results"]), 2)
+
+    def test_a_description_nobody_fits_says_so(self):
+        # FakeEmbedder: every text → [1, 0], so margin = cosine − picture·[1,0]; pictures fit "a person" better.
+        pts = [SimpleNamespace(id=str(uuid.UUID(int=i)), score=0.10, vector=[0.2, 0.0],
+                               payload={"tenant_id": str(TENANT), "camera_id": "ai-g2", "first_seen_ts": 1_800_000_000,
+                                        "object_class": "person"}) for i in range(1, 4)]
+        out, _ = self.run_search("a dog with a collar", points=pts)
+        self.assertEqual(out["results"], [])
+        self.assertIn("no_good_match", [n["kind"] for n in out["notices"]])
+
+    def test_text_results_carry_a_match_label(self):
+        pts = [SimpleNamespace(id=str(uuid.UUID(int=1)), score=0.14, vector=[0.10, 0.0],
+                               payload={"tenant_id": str(TENANT), "camera_id": "ai-g2", "first_seen_ts": 1_800_000_000,
+                                        "object_class": "person"})]
+        out, _ = self.run_search("person with a backpack", points=pts)
+        self.assertEqual(out["results"][0]["match"], "strong")
 
     def test_only_man_or_woman_is_accepted_as_a_gender_chip(self):
         from vms_face.api.routes.investigate import Overrides

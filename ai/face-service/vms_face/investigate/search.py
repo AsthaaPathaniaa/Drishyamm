@@ -120,6 +120,45 @@ async def count_unknown_colour(client: Any, collection: str, *, tenant_id: uuid.
     return max(0, int(a.count) - int(b.count))
 
 
+# How much a description fits a picture BEYOND it being a person (or vehicle):
+# cos(picture, description) − cos(picture, "a photo of a person"). Measured on
+# lab tracks (2026-11-25): real matches +0.01 … +0.05, "a dog" all below 0,
+# "yellow raincoat" (none present) ≤ +0.007. Unlike the raw cosine, it doesn't
+# shift between cameras and sites (the testing server showed every raw score as
+# 100%), because each picture is compared with itself.
+MATCH_STRONG = 0.015
+MATCH_GOOD = 0.005
+BASELINE_TEXT = {"vehicle": "a photo of a vehicle"}
+
+
+def baseline_text(object_class: str | None) -> str:
+    return BASELINE_TEXT.get(object_class or "", "a photo of a person")
+
+
+def match_label(margin: float | None) -> str | None:
+    if margin is None:
+        return None
+    return "strong" if margin >= MATCH_STRONG else "good" if margin >= MATCH_GOOD else "possible"
+
+
+def apply_margins(hits: list[dict], base_vector: Sequence[float], *, keep_below_zero: bool) -> list[dict]:
+    """Add each hit's margin over the baseline, best first. Without filters that
+    already vouch for a hit (a colour, man/woman), a hit the description doesn't
+    fit any better than "a person" (margin < 0) is unrelated and dropped."""
+    base = np.asarray(base_vector, dtype=np.float32)
+    out = []
+    for h in hits:
+        if h.get("vector") is None or h.get("cosine") is None:
+            out.append(h)
+            continue
+        margin = float(h["cosine"]) - float(np.asarray(h["vector"], dtype=np.float32) @ base)
+        if margin < 0 and not keep_below_zero:
+            continue
+        out.append({**h, "margin": round(margin, 4)})
+    out.sort(key=lambda h: h.get("margin", -1.0), reverse=True)
+    return out
+
+
 # Man/woman from the track's own picture vector, at query time: nothing about
 # gender is stored. Only confident readings count; measured on lab crops
 # (2026-11-25), the unclear ones (seen from above, no face) sit at 0.3–0.7.
@@ -168,7 +207,10 @@ def rerank(hits: list[dict], filters: SearchFilters, *, to_score: Callable[[floa
         if to_score(h["cosine"]) <= min_score:
             continue                       # unrelated to the description, whatever the chips say
         out.append({**h, "score": round(max(0.0, min(1.0, score)), 4), "boosts": boosts})
-    out.sort(key=lambda r: r["score"], reverse=True)
+    if any("margin" in r for r in out):
+        out.sort(key=lambda r: r.get("margin", -1.0), reverse=True)     # set by apply_margins: keep its order
+    else:
+        out.sort(key=lambda r: r["score"], reverse=True)
     return out[:top_k]
 
 
@@ -185,6 +227,7 @@ def result_row(hit: dict, *, camera_codes: dict[str, str]) -> dict:
         "first_seen": first.isoformat(),
         "last_seen": last.isoformat(),
         "score": hit["score"],
+        "match": match_label(hit.get("margin")),          # strong | good | possible | None (no description)
         "cosine": round(hit["cosine"], 4) if hit.get("cosine") is not None else None,
         "matched": hit.get("boosts", []),
         "attributes": attrs,

@@ -48,7 +48,12 @@ BOTTOM_WORDS = {
 PERSON_WORDS = {
     "man", "men", "woman", "women", "person", "people", "boy", "girl", "guy", "lady", "child", "kid", "someone",
     "आदमी", "औरत", "महिला", "व्यक्ति", "लड़का", "लड़की", "लडका", "लडकी", "बच्चा", "बच्ची", "इंसान",
+    "he", "she", "him", "her", "they", "them",
 }
+# Words that start a question but describe no one ("is it him in red?", "did
+# anyone…", "show me…"): dropped from the front of the description.
+LEAD_FILLER = {"is", "it", "was", "were", "are", "did", "does", "do", "has", "have", "there", "can", "could", "you",
+               "please", "show", "me", "find", "any", "the", "a", "an", "who", "what", "when", "where", "which", "how"}
 VEHICLE_WORDS = {
     "car": "vehicle", "suv": "vehicle", "van": "vehicle", "vehicle": "vehicle", "bike": "vehicle",
     "motorcycle": "vehicle", "scooter": "vehicle", "truck": "vehicle", "bus": "vehicle", "auto": "vehicle",
@@ -82,6 +87,18 @@ ACTIVITY_WORDS = {
     "arrived", "arriving", "visitor", "visitors", "traffic", "footfall", "anyone", "anybody", "everyone",
     "everybody", "somebody", "someone", "people", "person", "persons", "who", "happened", "happening",
     "हलचल", "गतिविधि", "आवाजाही", "कोई", "लोग", "आया", "आई", "आए", "गया", "गई", "गए",
+    # Events: what someone did, which no single picture of them shows. "bag theft
+    # from hr cabin" = people with a bag at the HR camera, not pictures of "theft".
+    "theft", "thief", "thieves", "steal", "stealing", "stole", "stolen", "snatch", "snatching", "robbery", "rob",
+    "robbed", "fight", "fighting", "quarrel", "incident", "crime", "loitering", "loiter", "break-in", "intrusion",
+    "चोरी", "चोर", "लड़ाई", "झगड़ा", "घटना",
+}
+# Room words said after a camera's name: "hr cabin", "gate 2 area", "accounts
+# room". Part of the place, never of the description.
+ROOM_WORDS = {
+    "cabin", "room", "area", "desk", "office", "side", "zone", "counter", "section", "department", "dept",
+    "corner", "bay", "wing", "table", "seat", "workspace", "premises", "camera", "cam", "cctv", "entrance",
+    "केबिन", "कमरा", "कमरे", "दफ्तर", "तरफ",
 }
 # Place words: "<place> <number>" (gate 2, floor 3, door 1, cam 4) that matches
 # none of the caller's cameras is reported back instead of being embedded.
@@ -95,6 +112,7 @@ GENERIC_CAMERA_WORDS = {"camera", "cam", "cctv", "ch", "channel", "ipc", "nvr", 
 STOP_WORDS = {
     "a", "an", "the", "in", "with", "wearing", "and", "of", "at", "on", "near", "from", "to", "between",
     "camera", "cam", "who", "was", "is", "seen", "find", "show", "me", "any", "all",
+    "inside", "outside", "around", "into", "towards", "behind", "front", "by", "for", "there", "here",
     "में", "का", "की", "के", "वाला", "वाली", "वाले", "और", "पर", "से", "तक", "पहने", "पहना", "पहनी",
 }
 
@@ -123,6 +141,7 @@ class ParsedQuery:
     chips: list[Chip] = field(default_factory=list)
     gender: str | None = None                  # "male" | "female": a wish, see MALE_WORDS
     browse: bool = False                       # nothing to describe: everyone, newest first
+    describes: bool = False                    # words beyond "person"/"man"/"woman": clothes, bag, phone…
     unknown_places: list[str] = field(default_factory=list)       # "gate 2" matching no camera
     suggestions: dict[str, list[str]] = field(default_factory=dict)  # unknown place → close camera names
 
@@ -140,6 +159,7 @@ class ParsedQuery:
             "chips": [{"kind": c.kind, "label": c.label, "value": _json(c.value)} for c in self.chips],
             "gender": self.gender,
             "browse": self.browse,
+            "describes": self.describes,
             "unknown_places": self.unknown_places,
             "suggestions": self.suggestions,
         }
@@ -280,16 +300,28 @@ def parse(
     # camera phrases are cut out, plus filler left dangling where they were.
     text = re.sub(r"\s*,(\s*,)+", ",", t.s)
     text = re.sub(r"\s+", " ", text).strip(" ,;।")
-    text = re.sub(r"(?i)\b(at|on|in|from|near|between|camera|cam)\s*(,|$)", r"\2", text).strip(" ,;।")
+    # Place words left dangling where a camera/place was cut out ("in the ,").
+    text = re.sub(r"(?i)\b(?:at|on|in|inside|outside|from|near|around|by|to|into|towards|behind|between|of|camera|cam)"
+                  r"(?:\s+the)?\s*(,|$)", r"\1", text).strip(" ,;।")
+    # Event words ("theft", "fight") and question openers describe no one.
+    toks = text.split(" ")
+    toks = [w for w in toks if w.lower().strip(".,!?") not in ACTIVITY_WORDS - PERSON_WORDS]
+    while toks and toks[0].lower().strip(".,!?\"'") in LEAD_FILLER:
+        toks.pop(0)
+    text = " ".join(toks).strip(" ,;।?")
     # Nothing left that describes how someone looks ("movement", "anyone",
     # "people"): browse everyone in the window, newest first, no similarity.
     describing = [lw for lw in lower if lw and lw not in STOP_WORDS and lw not in ACTIVITY_WORDS]
     if not describing:
         text = ""
     out.browse = not describing and not (out.top_colour or out.bottom_colour or out.vehicle_colour)
+    out.describes = any(w not in PERSON_WORDS | MALE_WORDS | FEMALE_WORDS and w not in VEHICLE_WORDS
+                        and w not in VEHICLE_TYPES for w in describing)
     if not text:
         text = {"vehicle": "a vehicle"}.get(out.object_class or "", "a person")
-    elif out.object_class == "person" and not any(w in PERSON_WORDS | MALE_WORDS | FEMALE_WORDS for w in lower):
+    elif re.match(r"(?i)^(he|she|him|her|they|them)\b", text):
+        text = re.sub(r"(?i)^(he|she|him|her|they|them)\b", "person", text)   # "him in a red top"
+    elif out.object_class != "vehicle" and not any(w in PERSON_WORDS | MALE_WORDS | FEMALE_WORDS for w in lower):
         # "red top, backpack" → "a person wearing a red top, backpack": SigLIP
         # scores a person far better than a garment floating on its own.
         wearing = any(w in COLOURS or w in TOP_WORDS | BOTTOM_WORDS for w in lower)
@@ -306,7 +338,12 @@ def parse(
 # Hindi place words people type next to an English camera name ("गेट 2" = "gate 2").
 HINDI_PLACES = {"गेट": "gate", "दरवाजा": "door", "दरवाज़ा": "door", "पार्किंग": "parking", "लॉबी": "lobby",
                 "मंजिल": "floor", "मंज़िल": "floor", "कैमरा": "camera", "रिसेप्शन": "reception", "ऑफिस": "office"}
-_PREP = r"(?:(?:at|on|in|near|from|of|by)\s+(?:the\s+)?)"
+_PREP = r"(?:(?:at|on|in|inside|outside|near|around|by|from|of|to|into|towards|behind|in\s+front\s+of)\s+(?:the\s+)?)"
+# One-word place matches ("at reception") need a real place preposition: "on"/
+# "of"/"by"/"to" are too often part of a description ("talking on phone").
+_PREP_STRICT = r"(?:(?:at|in|inside|outside|near|around|from|into|towards|behind|in\s+front\s+of)\s+(?:the\s+)?)"
+_ROOM = r"(?:[\s\-_]+(?:the\s+)?(?:" + "|".join(sorted((re.escape(w) for w in ROOM_WORDS), key=len, reverse=True)) + r"))"
+_PREP_HI = r"(?:[\s,]*(?:के\s+पास|में|पर|से|के\s+अंदर|के\s+बाहर))"
 
 
 def _numbered(s: str) -> str:
@@ -322,6 +359,17 @@ def _words(form: str) -> str:
     return r"(?<![\wऀ-ॿ])" + r"[\s\-_]*0*".join(re.escape(p) for p in form.split(" ")) + r"(?![\wऀ-ॿ])"
 
 
+def _place_pattern(form: str) -> str:
+    """A camera form in the query, with any room word after it ("hr cabin",
+    "gate 2 area"). A very short name ("HR", "IT") counts only after a place word
+    ("at hr", "near hr") or before a room word ("hr cabin"), so the English "it"
+    never picks the IT camera."""
+    core = _words(form)
+    if len(form.replace(" ", "")) < 3:
+        return r"(?:" + _PREP + core + _ROOM + r"?|" + core + _ROOM + r"|" + core + _PREP_HI + r")"
+    return core + _ROOM + r"?"
+
+
 def _parse_cameras(t: _Text, cameras: Iterable[tuple[str, str | None, str | None]], out: ParsedQuery) -> None:
     """Camera names in the query → camera chips. One phrase may name several
     cameras ("gate 2" = "Gate 2 In" and "Gate 2 Out"): all of them are searched."""
@@ -335,10 +383,14 @@ def _parse_cameras(t: _Text, cameras: Iterable[tuple[str, str | None, str | None
             if raw and len(_norm(raw)) >= 2:
                 forms.setdefault(_norm(raw), set()).add(cid)
         toks = [w for w in _norm(name or "").split() if w not in GENERIC_CAMERA_WORDS]
-        # "Camera Gate2" is also just "gate 2": drop generic words people leave out.
+        # "Camera Gate2" is also just "gate 2", "Camera HR" just "hr", "HR Cabin"
+        # just "hr": drop generic and room words people leave out.
         short = " ".join(toks)
-        if len(short) >= 3 and not short.replace(" ", "").isdigit():
+        if len(short) >= 2 and not short.replace(" ", "").isdigit():
             forms.setdefault(short, set()).add(cid)
+        core = " ".join(w for w in toks if w not in ROOM_WORDS)
+        if core != short and len(core) >= 2 and not core.replace(" ", "").isdigit():
+            forms.setdefault(core, set()).add(cid)
         # "gate 2" also finds "Main Gate 2 Entry": every run of 2+ words holding a number.
         for i in range(len(toks)):
             for j in range(i + 2, len(toks) + 1):
@@ -346,9 +398,14 @@ def _parse_cameras(t: _Text, cameras: Iterable[tuple[str, str | None, str | None
                 if any(w.isdigit() for w in run) and not all(w.isdigit() for w in run):
                     forms.setdefault(" ".join(run), set()).add(cid)
         # "at reception" finds "Reception Cam 01": a distinctive single word.
+        # Not for imported videos: their titles are sentences ("Phone video from
+        # security guard") whose words are also things people describe.
+        if str(code or "").startswith("file:"):
+            continue
         for w in toks:
             if len(w) >= 4 and not w.isdigit() and w not in COLOURS and w not in TOP_WORDS | BOTTOM_WORDS \
-                    and w not in PERSON_WORDS and w not in STOP_WORDS and w not in ACTIVITY_WORDS:
+                    and w not in PERSON_WORDS and w not in STOP_WORDS and w not in ACTIVITY_WORDS \
+                    and w not in ROOM_WORDS:
                 loose.setdefault(w, set()).add(cid)
 
     def hit(ids: set[str]) -> None:
@@ -357,8 +414,14 @@ def _parse_cameras(t: _Text, cameras: Iterable[tuple[str, str | None, str | None
                 out.camera_ids.append(cid)
                 out.chips.append(Chip("camera", labels[cid], cid))
 
+    # The whole search is a camera's name ("hr", "IT"): that camera.
+    whole = _norm(t.s)
+    if whole in forms:
+        t.take(r"^.*$")
+        hit(forms[whole])
+        return
     for form in sorted(forms, key=len, reverse=True):     # longest first: "gate 3 exit" before "gate 3"
-        while t.take(_words(form)):
+        while t.take(_place_pattern(form)):
             # An exact name wins: with "Gate" and "Gate 3", "gate" means "Gate".
             # Only a word no camera is named exactly (below) spreads to every camera that has it.
             hit(forms[form])
@@ -366,7 +429,7 @@ def _parse_cameras(t: _Text, cameras: Iterable[tuple[str, str | None, str | None
         if word in forms:
             continue
         # Never when a number follows: "gate 7" means gate 7, not every gate.
-        pattern = (_PREP + "?" if word in PLACE_WORDS else _PREP) + _words(word) + r"(?![\s\-_#]*\d)"
+        pattern = (_PREP_STRICT + "?" if word in PLACE_WORDS else _PREP_STRICT) + _words(word) + r"(?![\s\-_#]*\d)" + _ROOM + "?"
         while t.take(pattern):
             hit(loose[word])
 
@@ -380,9 +443,12 @@ def _parse_unknown_places(t: _Text, cameras: list[tuple[str, str | None, str | N
     words = "|".join(sorted((re.escape(w) for w in PLACE_WORDS), key=len, reverse=True))
     numbered = r"(?<![\wऀ-ॿ])" + _PREP + r"?(" + words + r")[\s\-_]*0*(\d{1,4}[a-z]?)(?![\wऀ-ॿ])"
     bare = r"(?<![\wऀ-ॿ])" + _PREP + r"(" + words + r")()(?![\wऀ-ॿ])"
+    rooms = "|".join(sorted((re.escape(w) for w in ROOM_WORDS - {"camera", "cam", "cctv"}), key=len, reverse=True))
+    # "near accounts cabin" when no camera is called accounts: report "accounts cabin".
+    named_room = r"(?<![\wऀ-ॿ])" + _PREP + r"([a-z][\w\-]{1,24})\s+(" + rooms + r")(?![\wऀ-ॿ])"
     names = [(name or code or "") for _cid, code, name in cameras]
     lowered = {_norm(n): n for n in names if n}
-    for pattern in (numbered, bare):
+    for pattern in (numbered, named_room, bare):
         while True:
             m = t.take(pattern)
             if not m:
