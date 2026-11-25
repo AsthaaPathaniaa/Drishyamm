@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  readSearchState, writeSearchState, removeChip, visibleChips, scoreLabel, summarise, playbackLink, colourLabel, highlight, searchOverrides, isBrowse,
+  readSearchState, writeSearchState, removeChip, visibleChips, scoreLabel, summarise, playbackLink, colourLabel, highlight, searchOverrides, isBrowse, matchBadge,
 } from './search-model.js';
 
 test('search state round-trips through the URL and drops unknown chip kinds', () => {
@@ -84,4 +84,16 @@ test('browse results (nothing described) have no score to show', () => {
   assert.equal(isBrowse({ parsed: {}, results: [{ score: 0.5 }] }), false);
   assert.equal(isBrowse({ parsed: {}, results: [] }), false);
   assert.equal(isBrowse(null), false);
+});
+
+test('text results show a match label, never a fake percentage; photo results keep the percentage', () => {
+  assert.equal(matchBadge({ match: 'strong', score: 1 }), 'Strong match');
+  assert.equal(matchBadge({ match: 'good', score: 1 }), 'Good match');
+  assert.equal(matchBadge({ match: 'possible', score: 0.2 }), 'Possible match');
+  assert.equal(matchBadge({ match: null, score: 1 }), null);          // nothing described: no badge
+  assert.equal(matchBadge({ score: null }), null);                     // browse
+  assert.equal(matchBadge({ match: 'weird' }), null);
+  assert.equal(matchBadge({ score: 0.83 }, { photo: true }), '83% match');
+  assert.equal(matchBadge({ score: null }, { photo: true }), null);
+  assert.equal(matchBadge(undefined), null);
 });

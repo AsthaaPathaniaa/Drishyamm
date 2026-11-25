@@ -52,6 +52,17 @@ export function visibleChips(parsed, clear = []) {
   return (parsed?.chips || []).filter((c) => !clear.includes(c.kind));
 }
 
+/**
+ * The badge on a result. Text searches: how well the description fits, beyond
+ * "a person" (the AI's `match`); raw percentages there meant nothing (every
+ * result read 100% on the testing server). Photo searches keep the percentage:
+ * photo-to-photo similarity is a real number. Nothing to show → null.
+ */
+export function matchBadge(r, { photo = false } = {}) {
+  if (photo) return r?.score != null ? `${scoreLabel(r.score)} match` : null;
+  return { strong: 'Strong match', good: 'Good match', possible: 'Possible match' }[r?.match] || null;
+}
+
 /** "92%" for a score in 0..1. */
 export function scoreLabel(score) {
   const n = Math.round(Math.max(0, Math.min(1, Number(score) || 0)) * 100);

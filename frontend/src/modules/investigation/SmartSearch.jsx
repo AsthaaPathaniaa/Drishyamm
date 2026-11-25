@@ -20,7 +20,7 @@ import { rangeAround } from './evidence-model';
 import AddToCaseDialog from './AddToCaseDialog';
 import { itemFrom } from './case-model';
 import {
-  colourLabel, isBrowse, isImported, playbackLink, readSearchState, removeChip, scoreLabel, searchOverrides, visibleChips, whenLabel,
+  colourLabel, isBrowse, isImported, matchBadge, playbackLink, readSearchState, removeChip, searchOverrides, visibleChips, whenLabel,
   writeSearchState,
 } from './search-model';
 
@@ -220,7 +220,7 @@ export default function SmartSearch() {
 
         <div className={cn('grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-6', state.loading && 'opacity-60')}>
           {results.map((r) => (
-            <ResultCard key={r.track_id} r={r} onExport={canExport && r.camera_code && !isImported(r.camera_code) ? () => setExporting(r) : null}
+            <ResultCard key={r.track_id} r={r} photo={!!photo} onExport={canExport && r.camera_code && !isImported(r.camera_code) ? () => setExporting(r) : null}
               onCase={canCase && r.camera_code ? () => setCasing(r) : null} />
           ))}
         </div>
@@ -243,17 +243,19 @@ export default function SmartSearch() {
   );
 }
 
-function ResultCard({ r, onExport, onCase }) {
+function ResultCard({ r, photo, onExport, onCase }) {
   const colour = colourLabel(r);
+  const badge = matchBadge(r, { photo });
   return (
     <PageCard as="article" className="group overflow-hidden">
       <Link to={playbackLink(r)} className="block" title="Play this moment">
         <div className="relative aspect-[3/4] bg-surface-sunken">
           <img src={cropUrl(r.track_id)} alt={`Person on ${r.camera_name || 'camera'}`} loading="lazy"
             className="h-full w-full object-cover" />
-          {r.score != null ? (
-            <span className="absolute left-2 top-2 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px] font-bold text-white">
-              {scoreLabel(r.score)} match
+          {badge ? (
+            <span className={cn('absolute left-2 top-2 rounded-md px-1.5 py-0.5 text-[11px] font-bold text-white',
+              r.match === 'strong' ? 'bg-emerald-700/85' : r.match === 'good' ? 'bg-black/70' : 'bg-black/50')}>
+              {badge}
             </span>
           ) : null}
           {r.ir ? (

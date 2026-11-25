@@ -168,9 +168,11 @@ def _filters_meta(f: SearchFilters) -> dict:
 
 
 async def _run(tenant_id, vector, filters, top_k, to_score, cam_codes, *, gender_ok: bool = False,
-               embedder=None, browse: bool = False) -> tuple[list[dict], list[dict]]:
+               embedder=None, browse: bool = False, describes: bool = False) -> tuple[list[dict], list[dict]]:
     """Run a search → (result rows, notices for the page)."""
-    from vms_face.investigate.search import GENDER_PROMPTS, browse_tracks, count_unknown_colour, gender_filter
+    from vms_face.investigate.search import (
+        GENDER_PROMPTS, apply_margins, baseline_text, browse_tracks, count_unknown_colour, gender_filter,
+    )
 
     store = get_qdrant_tracks()
     notices: list[dict] = []
@@ -178,6 +180,7 @@ async def _run(tenant_id, vector, filters, top_k, to_score, cam_codes, *, gender
     if filters.gender and not gender_ok:
         notices.append({"kind": "gender_off", "message": "Man/woman filtering is switched off for this account, "
                         "so this shows everyone who fits the rest of the description."})
+    use_margin = bool(describes and embedder is not None and vector is not None and not browse)
     limit = min(top_k * (8 if use_gender else 3), 600)
     try:
         if browse or vector is None:
@@ -185,7 +188,7 @@ async def _run(tenant_id, vector, filters, top_k, to_score, cam_codes, *, gender
                                        limit=limit, with_vectors=use_gender)
         else:
             hits = await query_tracks(store.client, store.collection, tenant_id=tenant_id, vector=vector,
-                                      filters=filters, limit=limit, with_vectors=use_gender)
+                                      filters=filters, limit=limit, with_vectors=use_gender or use_margin)
         unknown = await count_unknown_colour(store.client, store.collection, tenant_id=tenant_id, filters=filters)
     except ValueError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
@@ -197,6 +200,16 @@ async def _run(tenant_id, vector, filters, top_k, to_score, cam_codes, *, gender
             notices.append({"kind": "gender_unsure", "count": unsure,
                             "message": f"{unsure} more {'person' if unsure == 1 else 'people'} left out: "
                                        "seen from above or too far to tell man from woman."})
+    if use_margin:
+        loop = asyncio.get_running_loop()
+        cls = filters.object_classes[0] if len(filters.object_classes) == 1 else None
+        base = (await loop.run_in_executor(get_gpu_pool(), embedder.embed_texts, [baseline_text(cls)]))[0]
+        vouched = bool(filters.attribute_chips() or use_gender)
+        before = len(hits)
+        hits = apply_margins(hits, base, keep_below_zero=vouched)
+        if before and not hits:
+            notices.append({"kind": "no_good_match", "message": "Nobody here looks like that description. "
+                            "Try fewer words, or check the time and cameras."})
     if unknown:
         notices.append({"kind": "colour_unknown", "count": unknown,
                         "message": f"{unknown} more {'person' if unknown == 1 else 'people'} left out because their "
@@ -254,7 +267,8 @@ async def search(
         vector = None if parsed.browse else \
             (await loop.run_in_executor(get_gpu_pool(), embedder.embed_texts, [parsed.text]))[0]
         results, notices = await _run(tenant_id, vector, filters, body.top_k, text_relevance, cam_codes,
-                                      gender_ok=body.allow_gender, embedder=embedder, browse=parsed.browse)
+                                      gender_ok=body.allow_gender, embedder=embedder, browse=parsed.browse,
+                                      describes=parsed.describes)
         if parsed.browse:
             notices.insert(0, {"kind": "browse", "message": "Everyone in this time and place, newest first."})
         notices = off_notice + notices
