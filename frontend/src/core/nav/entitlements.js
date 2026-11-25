@@ -54,7 +54,7 @@ export const DEMO_KEYS = ['weapon', 'fire', 'aggression', 'anpr', 'activity'];
  * New real features shipped dark: on ONLY when listed, like DEMO_KEYS, but
  * they don't open the demo pages. Mirror of featureCatalog.js (`optIn: true`).
  */
-export const OPT_IN_KEYS = ['investigate_search', 'evidence_export', 'investigate_cases', 'investigate_ask', 'investigate_audio'];
+export const OPT_IN_KEYS = ['investigate_search', 'evidence_export', 'investigate_cases', 'investigate_ask', 'investigate_audio', 'investigate_gender'];
 
 /**
  * Who may save zones — restricted zones, head-count rooms and gates, AI Feed
@@ -100,7 +100,7 @@ export function makeEntitlement(user) {
 const AI_KEYS = new Set([
   'face_watchlist', 'face_detection', 'person_search', 'person_tracker', 'journey_map',
   'headcount', 'restricted_zone', 'activity', 'weapon', 'fire', 'aggression', 'anpr', 'ai_feed',
-  'investigate_search', 'investigate_ask', 'investigate_audio',
+  'investigate_search', 'investigate_ask', 'investigate_audio', 'investigate_gender',
   // Activity history only lists AI detections today (User / System sources are
   // not recorded yet), so a VMS-only account (aiEnabled false) would only ever
   // see an empty page. Move it out of this set once those sources exist.

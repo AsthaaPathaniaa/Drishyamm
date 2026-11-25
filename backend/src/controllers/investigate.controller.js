@@ -69,9 +69,19 @@ function mapUpstreamError(err, where) {
     status >= 400 && status < 600 ? status : 502);
 }
 
+async function genderAllowed(user) {
+  try {
+    const { getEntitlements, allowsAny } = require('../services/entitlements.service');
+    return allowsAny(await getEntitlements(user.id), ['investigate_gender']);
+  } catch (_) {
+    return false;                    // fail closed: no sensitive filter on an entitlement error
+  }
+}
+
 const pickOverrides = (o = {}) => {
   const out = {};
-  for (const k of ['camera_codes', 'object_class', 'since', 'until', 'top_colour', 'bottom_colour', 'vehicle_type', 'vehicle_colour', 'clear']) {
+  for (const k of ['camera_codes', 'object_class', 'since', 'until', 'top_colour', 'bottom_colour', 'vehicle_type', 'vehicle_colour',
+    'gender', 'include_unknown_colour', 'clear']) {
     if (o[k] !== undefined) out[k] = o[k];
   }
   return out;
@@ -83,6 +93,8 @@ const search = asyncHandler(async (req, res) => {
   if (typeof q !== 'string' || q.length > 300) throw new AppError('q must be text, at most 300 characters', 400);
   const cameras = await ownCameras(req.user);
   const body = {
+    // Man/woman filter: the account's own opt-in switch, decided here, never by the browser.
+    allow_gender: await genderAllowed(req.user),
     q,
     tz: typeof tz === 'string' && tz.length < 64 ? tz : 'Asia/Kolkata',
     cameras,

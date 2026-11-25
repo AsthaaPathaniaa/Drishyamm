@@ -64,6 +64,33 @@ VEHICLE_TYPES = {
     "bus": "bus", "बस": "bus", "truck": "truck", "lorry": "truck", "ट्रक": "truck",
     "cycle": "bicycle", "bicycle": "bicycle", "साइकिल": "bicycle",
 }
+# Gender words. Only a wish: it filters only for an account that switched the
+# man/woman filter on (sensitive attribute, rule 8); otherwise it is a person.
+MALE_WORDS = {
+    "man", "men", "boy", "boys", "guy", "guys", "gentleman", "gents", "male", "males",
+    "आदमी", "पुरुष", "लड़का", "लडका", "लड़के", "लडके", "मर्द",
+}
+FEMALE_WORDS = {
+    "woman", "women", "girl", "girls", "lady", "ladies", "female", "females",
+    "औरत", "महिला", "महिलाएं", "लड़की", "लडकी", "लड़कियां", "लडकियां", "स्त्री",
+}
+# Words that describe that something happened, not what someone looks like:
+# "movement at gate 2" means "everyone at gate 2", newest first.
+ACTIVITY_WORDS = {
+    "movement", "movements", "motion", "activity", "activities", "moving", "walking", "passing", "passed",
+    "entering", "entered", "entry", "exiting", "exited", "came", "come", "coming", "went", "going", "leaving",
+    "arrived", "arriving", "visitor", "visitors", "traffic", "footfall", "anyone", "anybody", "everyone",
+    "everybody", "somebody", "someone", "people", "person", "persons", "who", "happened", "happening",
+    "हलचल", "गतिविधि", "आवाजाही", "कोई", "लोग", "आया", "आई", "आए", "गया", "गई", "गए",
+}
+# Place words: "<place> <number>" (gate 2, floor 3, door 1, cam 4) that matches
+# none of the caller's cameras is reported back instead of being embedded.
+PLACE_WORDS = {
+    "gate", "door", "entrance", "exit", "lobby", "reception", "parking", "floor", "lift", "elevator",
+    "corridor", "hall", "cabin", "room", "office", "workstation", "basement", "terrace", "stairs", "staircase",
+    "warehouse", "godown", "shop", "counter", "block", "wing", "zone", "area", "camera", "cam", "channel", "ch",
+    "गेट", "दरवाजा", "दरवाज़ा", "पार्किंग", "लॉबी", "मंजिल", "कैमरा",
+}
 GENERIC_CAMERA_WORDS = {"camera", "cam", "cctv", "ch", "channel", "ipc", "nvr", "कैमरा"}
 STOP_WORDS = {
     "a", "an", "the", "in", "with", "wearing", "and", "of", "at", "on", "near", "from", "to", "between",
@@ -94,6 +121,10 @@ class ParsedQuery:
     since: dt.datetime | None = None
     until: dt.datetime | None = None
     chips: list[Chip] = field(default_factory=list)
+    gender: str | None = None                  # "male" | "female": a wish, see MALE_WORDS
+    browse: bool = False                       # nothing to describe: everyone, newest first
+    unknown_places: list[str] = field(default_factory=list)       # "gate 2" matching no camera
+    suggestions: dict[str, list[str]] = field(default_factory=dict)  # unknown place → close camera names
 
     def to_dict(self) -> dict:
         return {
@@ -107,6 +138,10 @@ class ParsedQuery:
             "since": self.since.isoformat() if self.since else None,
             "until": self.until.isoformat() if self.until else None,
             "chips": [{"kind": c.kind, "label": c.label, "value": _json(c.value)} for c in self.chips],
+            "gender": self.gender,
+            "browse": self.browse,
+            "unknown_places": self.unknown_places,
+            "suggestions": self.suggestions,
         }
 
 
@@ -186,11 +221,13 @@ def parse(
     """Parse a description. ``cameras``: (camera_id, code, name) of the tenant."""
     tz = zone(tz) if isinstance(tz, str) or tz is None else tz
     now = now.astimezone(tz)
-    t = _Text(unicodedata.normalize("NFC", q or ""))
+    t = _Text(_numbered(unicodedata.normalize("NFC", q or "")))
     out = ParsedQuery(text="")
+    cameras = list(cameras)
 
     _parse_time(t, now, out)
     _parse_cameras(t, cameras, out)
+    _parse_unknown_places(t, cameras, out)
 
     # Words that remain, in order, for colour/garment/class tagging.
     words = [w for w in re.split(r"[\s,;।]+", t.s) if w]
@@ -207,8 +244,14 @@ def parse(
             elif nxt in TOP_WORDS or prev in TOP_WORDS:
                 out.top_colour = out.top_colour or pending_colour
                 pending_colour = None
-        elif w in PERSON_WORDS and not out.object_class:
-            out.object_class = "person"
+        elif w in PERSON_WORDS or w in MALE_WORDS or w in FEMALE_WORDS or w in {"persons", "visitor", "visitors"}:
+            # People, not vehicles ("someone"/"person" too). "movement" alone keeps both.
+            if w in MALE_WORDS:
+                out.gender = out.gender or "male"
+            elif w in FEMALE_WORDS:
+                out.gender = out.gender or "female"
+            if not out.object_class:
+                out.object_class = "person"
         elif w in VEHICLE_WORDS or w in VEHICLE_TYPES:
             out.object_class = "vehicle"
             out.vehicle_type = out.vehicle_type or VEHICLE_TYPES.get(w)
@@ -222,6 +265,8 @@ def parse(
 
     if out.object_class:
         out.chips.insert(0, Chip("object_class", out.object_class.capitalize(), out.object_class))
+    if out.gender:
+        out.chips.append(Chip("gender", "Man" if out.gender == "male" else "Woman", out.gender))
     if out.top_colour:
         out.chips.append(Chip("top_colour", f"{out.top_colour.capitalize()} top", out.top_colour))
     if out.bottom_colour:
@@ -236,10 +281,19 @@ def parse(
     text = re.sub(r"\s*,(\s*,)+", ",", t.s)
     text = re.sub(r"\s+", " ", text).strip(" ,;।")
     text = re.sub(r"(?i)\b(at|on|in|from|near|between|camera|cam)\s*(,|$)", r"\2", text).strip(" ,;।")
-    if not any(lw not in STOP_WORDS for lw in lower):
+    # Nothing left that describes how someone looks ("movement", "anyone",
+    # "people"): browse everyone in the window, newest first, no similarity.
+    describing = [lw for lw in lower if lw and lw not in STOP_WORDS and lw not in ACTIVITY_WORDS]
+    if not describing:
         text = ""
+    out.browse = not describing and not (out.top_colour or out.bottom_colour or out.vehicle_colour)
     if not text:
         text = {"vehicle": "a vehicle"}.get(out.object_class or "", "a person")
+    elif out.object_class == "person" and not any(w in PERSON_WORDS | MALE_WORDS | FEMALE_WORDS for w in lower):
+        # "red top, backpack" → "a person wearing a red top, backpack": SigLIP
+        # scores a person far better than a garment floating on its own.
+        wearing = any(w in COLOURS or w in TOP_WORDS | BOTTOM_WORDS for w in lower)
+        text = f"person {'wearing' if wearing else 'with'} {'a ' if not re.match(r'(?i)(a|an|the)\b', text) else ''}{text}"
     if re.match(r"(?i)^(a|an) (photo|picture)", text):
         out.text = text
     elif re.match(r"(?i)^(a|an|the|some|someone|somebody|anyone|people|men|women|two|three)\b", text) or not re.match(r"[a-z]", text, re.I):
@@ -249,26 +303,97 @@ def parse(
     return out
 
 
+# Hindi place words people type next to an English camera name ("गेट 2" = "gate 2").
+HINDI_PLACES = {"गेट": "gate", "दरवाजा": "door", "दरवाज़ा": "door", "पार्किंग": "parking", "लॉबी": "lobby",
+                "मंजिल": "floor", "मंज़िल": "floor", "कैमरा": "camera", "रिसेप्शन": "reception", "ऑफिस": "office"}
+_PREP = r"(?:(?:at|on|in|near|from|of|by)\s+(?:the\s+)?)"
+
+
+def _numbered(s: str) -> str:
+    """'gate no. 2', 'gate number 2', 'gate #2', 'गेट 2' → 'gate 2' (cameras are matched on that)."""
+    for hi, en in HINDI_PLACES.items():
+        s = re.sub(r"(?<![\wऀ-ॿ])" + re.escape(hi) + r"(?![\wऀ-ॿ])", en, s)
+    s = re.sub(r"(?i)(?<=[a-z\u0900-\u097f])\s*(?:no\.?|num\.?|number|#)\s*(?=\d)", " ", s)
+    return re.sub(r"#\s*(?=\d)", "", s)
+
+
+def _words(form: str) -> str:
+    """Whole-word pattern for a normalised form, tolerant to spacing, punctuation and leading zeros."""
+    return r"(?<![\wऀ-ॿ])" + r"[\s\-_]*0*".join(re.escape(p) for p in form.split(" ")) + r"(?![\wऀ-ॿ])"
+
+
 def _parse_cameras(t: _Text, cameras: Iterable[tuple[str, str | None, str | None]], out: ParsedQuery) -> None:
-    forms: list[tuple[str, str, str]] = []           # (normalised form, camera_id, label)
+    """Camera names in the query → camera chips. One phrase may name several
+    cameras ("gate 2" = "Gate 2 In" and "Gate 2 Out"): all of them are searched."""
+    forms: dict[str, set[str]] = {}                  # normalised form → camera ids
+    loose: dict[str, set[str]] = {}                  # one-word forms: need "at/in/near" unless a place word
+    labels: dict[str, str] = {}
     for cid, code, name in cameras:
+        cid = str(cid)
+        labels[cid] = name or code or cid
         for raw in (name, code):
             if raw and len(_norm(raw)) >= 2:
-                forms.append((_norm(raw), str(cid), name or code or str(cid)))
+                forms.setdefault(_norm(raw), set()).add(cid)
+        toks = [w for w in _norm(name or "").split() if w not in GENERIC_CAMERA_WORDS]
         # "Camera Gate2" is also just "gate 2": drop generic words people leave out.
-        if name:
-            short = " ".join(w for w in _norm(name).split() if w not in GENERIC_CAMERA_WORDS)
-            if len(short) >= 3 and not short.replace(" ", "").isdigit() and short != _norm(name):
-                forms.append((short, str(cid), name))
-    forms.sort(key=lambda f: -len(f[0]))             # longest first: "gate 3 exit" before "gate 3"
-    for form, cid, label in forms:
-        if cid in out.camera_ids:
+        short = " ".join(toks)
+        if len(short) >= 3 and not short.replace(" ", "").isdigit():
+            forms.setdefault(short, set()).add(cid)
+        # "gate 2" also finds "Main Gate 2 Entry": every run of 2+ words holding a number.
+        for i in range(len(toks)):
+            for j in range(i + 2, len(toks) + 1):
+                run = toks[i:j]
+                if any(w.isdigit() for w in run) and not all(w.isdigit() for w in run):
+                    forms.setdefault(" ".join(run), set()).add(cid)
+        # "at reception" finds "Reception Cam 01": a distinctive single word.
+        for w in toks:
+            if len(w) >= 4 and not w.isdigit() and w not in COLOURS and w not in TOP_WORDS | BOTTOM_WORDS \
+                    and w not in PERSON_WORDS and w not in STOP_WORDS and w not in ACTIVITY_WORDS:
+                loose.setdefault(w, set()).add(cid)
+
+    def hit(ids: set[str]) -> None:
+        for cid in sorted(ids, key=lambda c: labels[c]):
+            if cid not in out.camera_ids:
+                out.camera_ids.append(cid)
+                out.chips.append(Chip("camera", labels[cid], cid))
+
+    for form in sorted(forms, key=len, reverse=True):     # longest first: "gate 3 exit" before "gate 3"
+        while t.take(_words(form)):
+            # An exact name wins: with "Gate" and "Gate 3", "gate" means "Gate".
+            # Only a word no camera is named exactly (below) spreads to every camera that has it.
+            hit(forms[form])
+    for word in sorted(loose, key=len, reverse=True):
+        if word in forms:
             continue
-        # Match on whole words, tolerant to spacing/punctuation/leading zeros.
-        pattern = r"(?<![\wऀ-ॿ])" + r"[\s\-_]*0*".join(re.escape(p) for p in form.split(" ")) + r"(?![\wऀ-ॿ])"
-        if t.take(pattern):
-            out.camera_ids.append(cid)
-            out.chips.append(Chip("camera", label, cid))
+        # Never when a number follows: "gate 7" means gate 7, not every gate.
+        pattern = (_PREP + "?" if word in PLACE_WORDS else _PREP) + _words(word) + r"(?![\s\-_#]*\d)"
+        while t.take(pattern):
+            hit(loose[word])
+
+
+def _parse_unknown_places(t: _Text, cameras: list[tuple[str, str | None, str | None]], out: ParsedQuery) -> None:
+    """A place the person named that is none of their cameras ("gate 7", "at the
+    parking"): cut it out of the description and report it, with close camera
+    names. A search never quietly runs on every camera instead."""
+    import difflib
+
+    words = "|".join(sorted((re.escape(w) for w in PLACE_WORDS), key=len, reverse=True))
+    numbered = r"(?<![\wऀ-ॿ])" + _PREP + r"?(" + words + r")[\s\-_]*0*(\d{1,4}[a-z]?)(?![\wऀ-ॿ])"
+    bare = r"(?<![\wऀ-ॿ])" + _PREP + r"(" + words + r")()(?![\wऀ-ॿ])"
+    names = [(name or code or "") for _cid, code, name in cameras]
+    lowered = {_norm(n): n for n in names if n}
+    for pattern in (numbered, bare):
+        while True:
+            m = t.take(pattern)
+            if not m:
+                break
+            place = f"{m.group(1).lower()} {m.group(2).lower()}".strip()
+            if place in out.unknown_places:
+                continue
+            out.unknown_places.append(place)
+            close = difflib.get_close_matches(place, list(lowered), n=3, cutoff=0.5)
+            same_word = [n for k, n in lowered.items() if m.group(1).lower() in k.split()]
+            out.suggestions[place] = list(dict.fromkeys([lowered[c] for c in close] + same_word))[:3]
 
 
 def _day_start(d: dt.datetime) -> dt.datetime:

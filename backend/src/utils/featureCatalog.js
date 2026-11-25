@@ -121,6 +121,8 @@ const FEATURE_GROUPS = Object.freeze([
     // every account, even a full one, until an admin switches it on here.
     id: 'investigation', label: 'Investigation', ai: true,
     items: [
+      { key: 'investigate_gender', label: 'Smart Search: man / woman filter', optIn: true,
+        description: 'Customer can narrow Smart Search to men or women (“man in a red top”). Judged from each person’s picture at search time, confident readings only; nothing about gender is stored. Gender is a sensitive attribute: switch on only where that is lawful and expected. New: off until switched on here.' },
       { key: 'investigate_audio', label: 'Audio Search', optIn: true,
         description: 'Customer sees “Audio search”: speech in imported videos and chosen recorded ranges is turned into text they can search. Speech is personal data: switch on only where recording audio is lawful and people are told. Runs only when someone asks for a video or range. New: off until switched on here.' },
       { key: 'investigate_ask', label: 'Ask Drishyam & Summaries', optIn: true,

@@ -20,11 +20,12 @@ import { rangeAround } from './evidence-model';
 import AddToCaseDialog from './AddToCaseDialog';
 import { itemFrom } from './case-model';
 import {
-  colourLabel, isImported, playbackLink, readSearchState, removeChip, scoreLabel, visibleChips, whenLabel, writeSearchState,
+  colourLabel, isBrowse, isImported, playbackLink, readSearchState, removeChip, scoreLabel, searchOverrides, visibleChips, whenLabel,
+  writeSearchState,
 } from './search-model';
 
 const EXAMPLES = ['man, red top, backpack, 1–4 pm', 'woman in yellow kurta, yesterday evening', 'लाल शर्ट वाला आदमी, आज'];
-const CHIP_ICON = { object_class: User, camera: Camera, time: Clock, top_colour: Palette, bottom_colour: Palette, vehicle_type: Car, vehicle_colour: Palette };
+const CHIP_ICON = { object_class: User, camera: Camera, time: Clock, top_colour: Palette, bottom_colour: Palette, vehicle_type: Car, vehicle_colour: Palette, gender: User };
 
 function errorText(err) {
   return err?.response?.data?.message || err?.response?.data?.detail || err?.message || 'Search failed';
@@ -49,11 +50,12 @@ export default function SmartSearch() {
     investigateService.status().then(setStatus).catch(() => setStatus({ enabled: false }));
   }, []);
 
-  const run = useCallback(async ({ q, clear }, file = null) => {
+  const run = useCallback(async (st, file = null) => {
+    const { q } = st;
     const id = ++reqId.current;
     setState((s) => ({ ...s, loading: true, error: null }));
     try {
-      const overrides = { clear };
+      const overrides = searchOverrides(st);
       const data = file
         ? await investigateService.searchPhoto(file, { overrides })
         : await investigateService.search({ q, overrides });
@@ -99,6 +101,8 @@ export default function SmartSearch() {
   };
 
   const dropChip = (kind) => setParams(writeSearchState(removeChip(urlState, kind)));
+  const pickCamera = (code) => setParams(writeSearchState({ ...urlState, cams: [code], clear: urlState.clear.filter((k) => k !== 'camera') }));
+  const showUnknown = () => setParams(writeSearchState({ ...urlState, unknown: true }));
 
   const data = state.data;
   const results = data?.results || [];
@@ -152,10 +156,11 @@ export default function SmartSearch() {
 
           {chips.length ? (
             <div className="mt-3 flex flex-wrap gap-2" aria-label="Filters understood from your search">
-              {chips.map((c) => {
+              {chips.map((c, i) => {
                 const Icon = CHIP_ICON[c.kind] || Search;
                 return (
-                  <span key={c.kind} className="inline-flex h-8 items-center gap-1.5 rounded-full border border-line bg-surface-sunken pl-3 pr-1 text-small text-fg">
+                  // Several cameras can come from one phrase ("gate 2" = Gate 2 In + Out): key by label too.
+                  <span key={`${c.kind}-${c.label}-${i}`} className="inline-flex h-8 items-center gap-1.5 rounded-full border border-line bg-surface-sunken pl-3 pr-1 text-small text-fg">
                     <Icon className="h-3.5 w-3.5 text-brand" />
                     {c.label}
                     <button type="button" onClick={() => dropChip(c.kind)} title="Remove this filter"
@@ -191,12 +196,16 @@ export default function SmartSearch() {
 
         {state.error ? <Notice title="Search failed" tone="error">{state.error}</Notice> : null}
 
+        {(data?.notices || []).filter((n) => n.kind !== 'browse').map((n) => (
+          <SearchNotice key={`${n.kind}-${n.place || ''}`} n={n} onPick={pickCamera} onShowUnknown={showUnknown} />
+        ))}
+
         {data ? (
           <div className="flex items-baseline justify-between gap-3 text-small text-fg-muted">
             <span>
               <strong className="text-fg">{results.length}</strong> {results.length === 1 ? 'match' : 'matches'}
               {data.summary?.cameras ? <> on <strong className="text-fg">{data.summary.cameras}</strong> {data.summary.cameras === 1 ? 'camera' : 'cameras'}</> : null}
-              {' '}· best first
+              {' '}· {isBrowse(data) ? 'everyone in this time and place, newest first' : 'best first'}
             </span>
             <span className="hidden sm:inline">Matches are leads: check the footage before acting on one.</span>
           </div>
@@ -242,9 +251,11 @@ function ResultCard({ r, onExport, onCase }) {
         <div className="relative aspect-[3/4] bg-surface-sunken">
           <img src={cropUrl(r.track_id)} alt={`Person on ${r.camera_name || 'camera'}`} loading="lazy"
             className="h-full w-full object-cover" />
-          <span className="absolute left-2 top-2 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px] font-bold text-white">
-            {scoreLabel(r.score)} match
-          </span>
+          {r.score != null ? (
+            <span className="absolute left-2 top-2 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px] font-bold text-white">
+              {scoreLabel(r.score)} match
+            </span>
+          ) : null}
           {r.ir ? (
             <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px] text-white">
               <Moon className="h-3 w-3" /> Night
@@ -278,11 +289,40 @@ function ResultCard({ r, onExport, onCase }) {
   );
 }
 
+/** What the search couldn't do as asked, and the one-click way round it. */
+function SearchNotice({ n, onPick, onShowUnknown }) {
+  if (n.kind === 'unknown_place') {
+    const picks = (n.suggestions || []).filter((s) => s.code);
+    return (
+      <Notice title={n.message}>
+        Nothing was searched, so you don’t get results from the wrong cameras.
+        {picks.length ? (
+          <span className="mt-2 flex flex-wrap items-center gap-2">
+            Did you mean
+            {picks.map((s) => (
+              <button key={s.code} type="button" onClick={() => onPick(s.code)}
+                className="rounded-full border border-line px-3 py-1 text-fg hover:bg-surface-sunken">{s.name}</button>
+            ))}
+          </span>
+        ) : ' Check the camera’s name in Cameras, or remove the place from your search.'}
+      </Notice>
+    );
+  }
+  if (n.kind === 'colour_unknown') {
+    return (
+      <Notice title={n.message}>
+        <button type="button" onClick={onShowUnknown} className="font-semibold text-brand hover:underline">Show them too</button>
+      </Notice>
+    );
+  }
+  return <Notice title={n.message} />;
+}
+
 function Notice({ title, children, tone }) {
   return (
     <PageCard className={cn('p-4', tone === 'error' && 'border-danger')}>
       <p className={cn('text-small font-semibold', tone === 'error' ? 'text-danger' : 'text-fg')}>{title}</p>
-      <p className="mt-1 text-small text-fg-muted">{children}</p>
+      {children ? <div className="mt-1 text-small text-fg-muted">{children}</div> : null}
     </PageCard>
   );
 }

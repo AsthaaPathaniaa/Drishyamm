@@ -276,6 +276,14 @@ def track_is_ir(samples: Sequence[np.ndarray], best: np.ndarray) -> bool:
     return sum(votes) * 2 > len(votes)
 
 
+def upper_body(crop: np.ndarray) -> np.ndarray:
+    """Shoulders to waist of a person crop: the top's colour without the trousers,
+    the floor or (mostly) the head. Measured on lab crops (2026-11-25): it reads
+    tops that the whole-person crop left too unsure to store, and fewer floors."""
+    h = crop.shape[0]
+    return crop[int(h * 0.15):max(int(h * 0.55), int(h * 0.15) + 1)]
+
+
 def lower_half(crop: np.ndarray) -> np.ndarray:
     """Legs region of a person crop (drops the feet and floor at the very bottom)."""
     h = crop.shape[0]
@@ -283,14 +291,17 @@ def lower_half(crop: np.ndarray) -> np.ndarray:
 
 
 def colour_attributes(embedder, full_vecs: np.ndarray, lower_vecs: np.ndarray, ir_flags: Sequence[bool],
-                      classes: Sequence[str] | None = None, vehicle_types: Sequence | None = None) -> list[dict]:
-    """People: top colour from the whole person, bottom colour from the lower
-    half. Vehicles: the vehicle's colour, and its type as voted over the pass.
+                      classes: Sequence[str] | None = None, vehicle_types: Sequence | None = None,
+                      upper_vecs: np.ndarray | None = None) -> list[dict]:
+    """People: top colour from the upper body (whole person when ``upper_vecs``
+    is not given), bottom colour from the lower half. Vehicles: the vehicle's
+    colour, and its type as voted over the pass.
     SigLIP zero-shot (one prompt per colour); measured on real crops it beats
     the HSV heuristic, which picked up floors and walls. IR: no colours."""
     classes = list(classes or ["person"] * len(ir_flags))
     vehicle_types = list(vehicle_types or [None] * len(ir_flags))
-    tops = embedder.classify(full_vecs, COLOURS, TOP_PROMPT) if len(full_vecs) else []
+    top_src = upper_vecs if upper_vecs is not None and len(upper_vecs) == len(full_vecs) else full_vecs
+    tops = embedder.classify(top_src, COLOURS, TOP_PROMPT) if len(top_src) else []
     bottoms = embedder.classify(lower_vecs, COLOURS, BOTTOM_PROMPT) if len(lower_vecs) else []
     vcols = embedder.classify(full_vecs, COLOURS, VEHICLE_PROMPT) if "vehicle" in classes and len(full_vecs) else []
     out = []
@@ -376,21 +387,22 @@ class IndexWriter:
         loop = asyncio.get_running_loop()
         embedder = await loop.run_in_executor(None, SiglipEmbedder.shared)
         n = len(batch)
-        # One GPU call: the best crops (the searchable fingerprint) and their
-        # lower halves (bottom colour).
+        # One GPU call: the best crops (the searchable fingerprint), their lower
+        # halves (bottom colour) and upper bodies (top colour).
+        crops = [s.best_crop for s in batch]
         both = await loop.run_in_executor(
-            get_gpu_pool(), embedder.embed_images, [s.best_crop for s in batch] + [lower_half(s.best_crop) for s in batch])
-        vectors, lower = both[:n], both[n:]
+            get_gpu_pool(), embedder.embed_images, crops + [lower_half(c) for c in crops] + [upper_body(c) for c in crops])
+        vectors, lower, upper = both[:n], both[n:2 * n], both[2 * n:]
         irs = await loop.run_in_executor(None, lambda: [track_is_ir(s.samples, s.best_crop) for s in batch])
         colours = await loop.run_in_executor(get_gpu_pool(), colour_attributes, embedder, vectors, lower, irs,
-                                             [s.object_class for s in batch], [s.vehicle_type for s in batch])
+                                             [s.object_class for s in batch], [s.vehicle_type for s in batch], upper)
         derived = list(zip(colours, irs))
         jpegs = await loop.run_in_executor(
             None, lambda: [cv2.imencode(".jpg", s.best_crop, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes() for s in batch])
 
         objects = get_object_store()
         bucket = settings.minio_bucket_investigate
-        model_info = {"embedder": embedder.model_tag, "detector": "yolov8n-coco", "attributes": f"{embedder.model_tag} zero-shot colours v1",
+        model_info = {"embedder": embedder.model_tag, "detector": "yolov8n-coco", "attributes": f"{embedder.model_tag} zero-shot colours v2 (upper-body top)",
                       "tracker": "investigate.box_tracker@v1"}
         points: list[PointStruct] = []
         async with session_scope() as session:
