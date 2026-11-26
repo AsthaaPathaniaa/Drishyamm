@@ -305,13 +305,23 @@ export const aiService = {
    * head-count model on for this camera; threshold (>0) arms an occupancy alert
    * when that many people are counted (with hysteresis, so it doesn't flap).
    */
-  setHeadcount(cameraId, { enabled, threshold, zones, imgsz, enableAi } = {}) {
+  setHeadcount(cameraId, {
+    enabled, threshold, zones, imgsz, enableAi, countWindow, schedule,
+  } = {}) {
     // `zones` is only sent when supplied — the backend preserves the existing
     // ones otherwise, so toggling a camera on/off never wipes the counting area
     // an operator drew.
     const body = { enabled, threshold };
     if (zones !== undefined) body.zones = zones;
     if (imgsz !== undefined) body.imgsz = imgsz;
+    // COUNTING HOURS. Sent only when supplied, like `zones` and for the same
+    // reason: the backend keeps the stored window otherwise, so flipping the
+    // tick or nudging the detail level never silently drops a schedule
+    // somebody typed in. `null` is how the hours are CLEARED -- distinct from
+    // absent, which means "leave them alone" -- so the check is for
+    // `undefined` and not for falsiness.
+    if (countWindow !== undefined) body.countWindow = countWindow;
+    if (schedule !== undefined) body.schedule = schedule;
     // `enableAi` is CONSENT, and is only ever sent after somebody has been
     // asked. Counting needs the camera's master AI switch on; without this the
     // backend refuses with 409 AI_CONSENT_REQUIRED rather than switching it on

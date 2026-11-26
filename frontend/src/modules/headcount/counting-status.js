@@ -30,10 +30,13 @@
  * The tile used to render that as "Counting zone" over the whole-view number,
  * which is the one reading it is not.
  *
- * Pure, with no imports, so it runs under `node --test` -- the JSX around it
+ * Its one import is the AI-consent rule in core/services/aiConsent.js, which
+ * is pure too, so this still runs under `node --test` -- the JSX around it
  * cannot be loaded there. It decides nothing: `eligible` on the server is the
  * authority, and this is what the operator is TOLD.
  */
+
+import { aiOn, errorText } from '../../core/services/aiConsent.js';
 
 /** The camera's master AI switch is off. Fixable from this page. */
 export const AI_OFF = 'ai-off';
@@ -43,16 +46,14 @@ export const OFFLINE = 'offline';
 export const WAITING = 'waiting';
 /** The detector is already counting as many cameras as it will open. */
 export const AT_CAPACITY = 'at-capacity';
-
 /**
- * Is this camera's AI master switch on?
- *
- * Mirrors the backend's `isAiEnabled` exactly -- `enabled === true` AND the
- * mode is not 'off'. Restated here rather than guessed at, because a second,
- * looser reading of the same switch is how a page comes to disagree with the
- * service it is describing.
+ * The camera is outside its own counting hours. The ONLY reason in this file
+ * that is not a fault: the operator asked for this, and it is the system
+ * obeying them. Carries `normal: true`, which keeps it out of the amber strip
+ * -- a warning that appears every night at ten o'clock teaches an operator to
+ * stop reading warnings.
  */
-export const aiOn = (cam) => cam?.ai?.enabled === true && cam?.ai?.mode !== 'off';
+export const OUTSIDE_HOURS = 'outside-hours';
 
 /** Does the operator want this camera counted? */
 export const wanted = (cam) => cam?.headcount?.enabled === true;
@@ -83,6 +84,42 @@ export function notCountingReason(cam, running = false, detector = {}) {
       line: 'its AI is switched off, so no service reads it',
       fix: 'Turn AI on',
       fixable: true,
+    };
+  }
+
+  // SECOND, because it is CERTAIN and the three below it are not. A camera
+  // outside its hours has been dropped from the registry list on purpose, so
+  // "the VMS cannot reach it", "the detector is full" and "not started yet"
+  // are all true-but-irrelevant things to say about it -- and the first of
+  // them would send an operator to check a camera that is working perfectly.
+  //
+  // It ranks BELOW the AI switch, which outranks everything: AI off means this
+  // camera will not count when its window opens either, so that is the bigger
+  // fact and the only one with an action attached.
+  //
+  // `=== false` STRICTLY. `countingNow` is computed by the server
+  // (aiFeatureCameras.withinCountWindow, reported on the camera row), and a
+  // row that does not carry it at all -- an older backend, a cached response --
+  // means UNKNOWN, not paused. Reading absent as paused would explain away a
+  // genuinely broken camera as a schedule nobody set.
+  if (cam?.headcount?.countingNow === false) {
+    const w = cam.headcount.countWindow || {};
+    const hours = w.from && w.to;
+    return {
+      code: OUTSIDE_HOURS,
+      line: hours
+        ? `it counts only between ${w.from} and ${w.to}, and it is outside those hours`
+        : 'it is outside its counting hours',
+      // Nothing to offer. The fix for "it is doing what you told it" is to
+      // change the hours, which lives on the camera's own card next to the
+      // number it governs -- not on a page-wide strip, where one button would
+      // have to pick which camera's schedule to edit.
+      fix: '',
+      fixable: false,
+      normal: true,
+      // When it comes back. Outside a window, the next opening is always its
+      // start -- true for 09:00-17:00 at midnight and for 22:00-06:00 at noon.
+      resumesAt: hours ? w.from : null,
     };
   }
 
@@ -229,6 +266,28 @@ export function notCountingSummary(items = [], nameOf = (c) => c?.name || c?.mon
 }
 
 /**
+ * Split the not-counting cameras into the ones that are WRONG and the ones
+ * that are merely OFF DUTY.
+ *
+ * Both still have to be accounted for -- the wall is built from the detector's
+ * streams, so either kind has no tile at all, and a camera with no tile and no
+ * sentence is the original defect this file was written to remove. What differs
+ * is the REGISTER they are said in: a fault is amber and asks for something, a
+ * scheduled pause is a quiet line that confirms the camera is behaving.
+ *
+ * Kept as two functions over one flag read at the call site so that adding a
+ * second non-fault reason later cannot leave one strip behind.
+ */
+export function faults(items = []) {
+  return items.filter(({ reason }) => reason && !reason.normal);
+}
+
+/** The cameras that are off duty by their own schedule, and nothing else. */
+export function paused(items = []) {
+  return items.filter(({ reason }) => reason?.normal === true);
+}
+
+/**
  * The cameras whose only problem is the AI switch — the one reason an operator
  * can act on without leaving this page.
  */
@@ -258,31 +317,15 @@ export const ZONE_PENDING_LABEL = 'Zone drawn, not yet applied · counting the w
 
 /* ── consent to switch the camera's AI on ───────────────────────────────────
  *
- * Counting cannot start while the camera's master AI switch is off. The switch
- * an operator is given here only asks for counting, so something has to turn
- * the master on -- and that something must ASK, not decide.
+ * Counting cannot start while the camera's master AI switch is off, and the
+ * switch an operator is given here only asks for counting -- so something has
+ * to turn the master on, and that something must ASK, not decide.
  *
- * Using a camera for AI at all is a privacy and a cost choice. "I ticked
- * counting" is not the same sentence as "yes, run AI on this camera", and
- * telling somebody afterwards that it happened is the same fault one step
- * quieter: a change they did not choose. So the page asks first, and the
- * backend refuses (409 AI_CONSENT_REQUIRED) if anything ever sends without
- * having asked.
+ * That rule is not head count's to state: it governs every feature behind the
+ * master switch, and it lives in core/services/aiConsent.js with its
+ * reasoning. What belongs here is the WORDING of the question, which is
+ * head-count copy and nobody else's -- see `consentCopy` below.
  */
-
-/** The server's machine-readable "ask first". Matched on the code, never prose. */
-export const AI_CONSENT_REQUIRED = 'AI_CONSENT_REQUIRED';
-
-/** Will ticking this camera for counting need the master switch turned on? */
-export function needsAiConsent(cam) {
-  return !aiOn(cam);
-}
-
-/** Is this the server telling us to ask? Read from the code, not the message. */
-export function isConsentRefusal(err) {
-  const body = err?.response?.data;
-  return err?.response?.status === 409 && body?.code === AI_CONSENT_REQUIRED;
-}
 
 /* ── when a save does not land ──────────────────────────────────────────────
  *
@@ -297,13 +340,6 @@ export function isConsentRefusal(err) {
  * None of those is a consent question, so none of them opened the dialog, and
  * the catch simply put the tick back. Silent.
  */
-
-/** The sentence the server sent, or the nearest honest thing. */
-export function errorText(err) {
-  return err?.response?.data?.message
-    || err?.message
-    || 'the request was refused and gave no reason';
-}
 
 /**
  * One line for the saves that did not land, or null when none failed.

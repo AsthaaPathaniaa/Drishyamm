@@ -61,10 +61,12 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/core/ui/tooltip';
 import { pointsToSvg } from './zone-geometry';
 import { ConfirmDialog } from '@/core/ui/confirm-dialog';
 import {
-  notCounting, notCountingReason, notCountingSummary, fixable,
+  needsAiConsent, isConsentRefusal, errorText,
+} from '@/core/services/aiConsent';
+import {
+  notCounting, notCountingReason, notCountingSummary, fixable, faults, paused,
   zonesPending, ZONE_PENDING_LABEL,
-  needsAiConsent, isConsentRefusal, consentCopy,
-  errorText, saveFailureSummary,
+  consentCopy, saveFailureSummary,
   detectorCapacity, atCapacity, capacityCopy,
 } from './counting-status';
 
@@ -283,6 +285,63 @@ export default function HeadCount() {
     }
   }, []);
 
+  /**
+   * The camera's counting hours — the one per-camera control that SAVES money
+   * rather than spending it.
+   *
+   * A door nobody walks through between 22:00 and 07:00 was holding a decode
+   * and a YOLO worker open all night, and one of the detector's eight stream
+   * slots with it. The hours are applied in the backend's camera selector, so
+   * a camera outside them drops out of the registry list the detector polls and
+   * its worker is stopped within about 15 seconds.
+   *
+   * `null` CLEARS the hours (count around the clock); a window sets them.
+   *
+   * `countingNow` IS NOT GUESSED HERE, and that is deliberate. It is the
+   * server's answer -- it needs the midnight-wrap maths and the deployment's
+   * timezone -- and a page that worked it out for itself would be a second
+   * reading of the same schedule, free to disagree with the selector about
+   * whether this camera is on duty. So:
+   *
+   *   clearing  sets it true, which needs no maths at all: a camera with no
+   *             window counts always, and leaving the old `false` behind would
+   *             leave the paused strip claiming hours that no longer exist.
+   *   setting   DELETES it, because absent means "unknown" to
+   *             notCountingReason and an unknown is simply not reported. The
+   *             pause appears when the next poll brings the real answer, which
+   *             is a few seconds of saying nothing rather than a few seconds of
+   *             possibly saying something false.
+   */
+  const saveHours = useCallback(async (cam, countWindow) => {
+    const before = cam.headcount?.countWindow || null;
+    const patch = (c, w, nowKnown) => {
+      const hc = { ...(c.headcount || {}), countWindow: w };
+      if (nowKnown === undefined) delete hc.countingNow;
+      else hc.countingNow = nowKnown;
+      return { ...c, headcount: hc };
+    };
+    setCamList((list) => list.map((c) => (c.id === cam.id
+      ? patch(c, countWindow, countWindow ? undefined : true) : c)));
+    setFailures([]);
+    try {
+      await aiService.setHeadcount(cam.id, {
+        enabled: cam.headcount?.enabled === true,
+        threshold: cam.headcount?.threshold || 0,
+        countWindow,
+        // Storing a window and then ignoring it is the odd case and has to be
+        // asked for, so a window that has just been set is a window to obey.
+        schedule: countWindow ? 'window' : undefined,
+      });
+    } catch (err) {
+      // Put the old hours back AND SAY SO, rather than letting the registry
+      // poll silently undo the operator's choice ten seconds later -- the same
+      // defect the detail picker had, and the reason this page exists.
+      setCamList((list) => list.map((c) => (c.id === cam.id
+        ? patch(c, before, undefined) : c)));
+      setFailures([{ cam, message: errorText(err) }]);
+    }
+  }, []);
+
   const enabledCount = camList.filter((c) => c.headcount?.enabled === true).length;
   const runningIds = useMemo(() => new Set(streams.map((x) => x.id)), [streams]);
 
@@ -299,8 +358,18 @@ export default function HeadCount() {
   const stranded = useMemo(
     () => notCounting(camList, runningIds, detector), [camList, runningIds, detector],
   );
+  // TWO STRIPS, because two different things are being said. A camera that is
+  // broken asks the operator for something; a camera that is off duty by its
+  // own schedule is confirming that it obeyed them. Both must be accounted for
+  // -- the wall is built from the detector's streams, so neither has a tile --
+  // but an amber warning that appears every night at ten o'clock is how an
+  // operator learns to stop reading amber warnings.
   const strandedNote = useMemo(
-    () => notCountingSummary(stranded, (c) => c?.name || c?.monitorId),
+    () => notCountingSummary(faults(stranded), (c) => c?.name || c?.monitorId),
+    [stranded],
+  );
+  const pausedNote = useMemo(
+    () => notCountingSummary(paused(stranded), (c) => c?.name || c?.monitorId),
     [stranded],
   );
   const canFix = useMemo(() => fixable(stranded), [stranded]);
@@ -441,6 +510,7 @@ export default function HeadCount() {
               onFix={() => turnAiOn(canFix)}
             />
           )}
+          {loaded && pausedNote && <PausedNote note={pausedNote} />}
           {!loaded ? (
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
               {[0, 1, 2].map((i) => (
@@ -557,6 +627,7 @@ export default function HeadCount() {
           savingId={savingId} onToggle={toggleHeadcount}
           onAskAi={setAskingAi}
           onDetail={saveDetail}
+          onHours={saveHours}
           runningIds={runningIds} enabledCount={enabledCount}
           onClose={() => setPickerOpen(false)}
         />
@@ -635,6 +706,31 @@ function FailureNote({ note, onDismiss }) {
  * Amber, not red: a camera deliberately taken out of AI is a legitimate state,
  * and the operator may simply have forgotten this page also depends on it.
  */
+/**
+ * The cameras that are off duty by their own counting hours.
+ *
+ * Deliberately NOT amber and deliberately button-less. This strip exists for
+ * one reason only: the wall is built from the detector's streams, so a paused
+ * camera has no tile, and "8 cameras selected" over six tiles is the gap this
+ * page was written to close. It closes it by confirming the camera is
+ * behaving, which is the opposite of a warning.
+ *
+ * No control, because the fix for "it is doing what you told it" is to change
+ * the hours, and those live on the camera's own card beside the number they
+ * govern. One button here would have to choose whose schedule to open.
+ */
+function PausedNote({ note }) {
+  return (
+    <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-line
+                    bg-surface-muted/50 px-3 py-2">
+      <Clock className="h-4 w-4 shrink-0 text-ink-subtle" strokeWidth={2.25} />
+      <p className="min-w-0 flex-1 text-caption leading-relaxed text-ink-subtle">
+        {note}
+      </p>
+    </div>
+  );
+}
+
 function StrandedNote({ note, fixable: fixableCams = [], busy, onFix }) {
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-warning-line
@@ -754,6 +850,95 @@ const DETAIL_LEVELS = [
 ];
 
 /**
+ * The camera's counting hours.
+ *
+ * THE ONLY CONTROL ON THIS PAGE THAT MAKES A CAMERA CHEAPER. Detail spends
+ * more per frame; zones narrow what a number means; this one stops the model
+ * outright for the hours nobody is there. An entrance counted 09:00-18:00
+ * instead of around the clock costs roughly a third of the GPU and gives its
+ * stream slot back to a camera that needs it -- the detector opens eight.
+ *
+ * OFF BY DEFAULT, AND SILENT WHEN OFF. Every camera that exists today counts
+ * around the clock, and that must keep being what "no hours" means: a default
+ * window would stop counting on somebody's night shift the day this shipped.
+ *
+ * `<input type="time">` rather than a dropdown of hours: it emits exactly the
+ * zero-padded HH:MM the backend stores and the browser renders it in the
+ * operator's own locale, so a 12-hour-clock user types 10:00 PM and the server
+ * still receives "22:00".
+ *
+ * A window whose end is before its start WRAPS, and the hint says so, because
+ * 22:00-07:00 is the commonest reason anybody opens this control and reading it
+ * as an empty set would be the obvious wrong guess.
+ */
+function HoursPicker({ value, onChange }) {
+  const on = !!(value?.from && value?.to);
+  // Seeded with a night-shift pause rather than 00:00-00:00: the operator is
+  // here to stop counting at night, and a zero-length window is both the
+  // likeliest typo and a shape the backend refuses.
+  const [draft, setDraft] = useState({
+    from: value?.from || '09:00', to: value?.to || '18:00',
+  });
+
+  const set = (part) => {
+    const next = { ...draft, ...part };
+    setDraft(next);
+    // Saved only once both ends are real times. A half-typed window would be
+    // rejected as "no window" by the backend and would read on the way back as
+    // the operator's hours having been thrown away.
+    if (next.from && next.to && next.from !== next.to) onChange(next);
+  };
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between gap-2">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="inline-flex items-center gap-1 text-micro font-semibold uppercase tracking-wide text-fg-muted">
+              <Clock size={10} /> Hours
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-[260px]">
+            When this camera is counted. Outside these hours the detector stops its
+            model for this camera — no GPU spent, and its stream slot goes to another
+            camera. An end before the start crosses midnight (22:00-07:00 is a night).
+          </TooltipContent>
+        </Tooltip>
+        <button
+          type="button"
+          onClick={() => (on ? onChange(null) : onChange(draft))}
+          className={`cursor-pointer rounded border px-1.5 py-0.5 text-micro font-semibold transition duration-200
+            ${on
+            ? 'border-brand/40 bg-brand-soft text-brand-ink'
+            : 'border-line text-fg-muted hover:border-brand/40'}`}
+        >
+          {on ? 'Set hours' : 'All day'}
+        </button>
+      </div>
+      {on && (
+        <div className="flex items-center gap-1">
+          <input
+            aria-label="Start counting at"
+            className="min-w-0 flex-1 rounded border border-line bg-surface px-1 py-0.5 text-micro text-fg"
+            onChange={(e) => set({ from: e.target.value })}
+            type="time"
+            value={draft.from}
+          />
+          <span className="text-micro text-fg-muted">to</span>
+          <input
+            aria-label="Stop counting at"
+            className="min-w-0 flex-1 rounded border border-line bg-surface px-1 py-0.5 text-micro text-fg"
+            onChange={(e) => set({ to: e.target.value })}
+            type="time"
+            value={draft.to}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * The three detail levels as a segmented control rather than a dropdown: all
  * three are visible at once, each is its own hover target, and hovering (or
  * focusing) one says in a sentence what it reaches and what it costs. The row
@@ -808,7 +993,7 @@ function DetailPicker({ value, onChange }) {
 }
 
 function CameraPicker({ camList, query, setQuery, savingId, onToggle, onAskAi,
-                        onDetail, runningIds, enabledCount, onClose }) {
+                        onDetail, onHours, runningIds, enabledCount, onClose }) {
   const [group, setGroup] = useState('all');
 
   useEffect(() => {
@@ -980,6 +1165,13 @@ function CameraPicker({ camList, query, setQuery, savingId, onToggle, onAskAi,
                     <DetailPicker
                       value={cam.headcount?.imgsz || 640}
                       onChange={(v) => onDetail(cam, v)}
+                    />
+                    {/* Under detail on purpose: they are the two halves of what
+                        this camera costs -- how hard the model looks, and for
+                        how many hours a day it looks at all. */}
+                    <HoursPicker
+                      onChange={(w) => onHours(cam, w)}
+                      value={cam.headcount?.countWindow || null}
                     />
                     <Link to={zoneSetupHref(cam.monitorId)}
                       title="Draw the counting zone and set its capacity in Zone Setup"

@@ -10,11 +10,11 @@ import assert from 'node:assert/strict';
 
 import {
   AI_OFF, OFFLINE, WAITING,
-  aiOn, wanted, notCountingReason, notCounting, notCountingSummary,
+  wanted, notCountingReason, notCounting, notCountingSummary,
   andList, fixable, zonesPending,
-  AI_CONSENT_REQUIRED, needsAiConsent, isConsentRefusal, consentCopy,
-  errorText, saveFailureSummary,
+  consentCopy, saveFailureSummary,
   AT_CAPACITY, atCapacity, detectorCapacity, capacityCopy,
+  OUTSIDE_HOURS, faults, paused,
 } from './counting-status.js';
 
 // A camera the way GET /ai/cameras serialises one. `ai.enabled` + mode are the
@@ -31,17 +31,10 @@ const cam = (over = {}) => ({
 
 const SHAPE = [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9]];
 
-// ── the master switch, read exactly as the backend reads it ─────────────────
-
-test('aiOn mirrors the backend: enabled must be true and the mode not off', () => {
-  assert.equal(aiOn({ ai: { enabled: true, mode: 'continuous' } }), true);
-  assert.equal(aiOn({ ai: { enabled: true, mode: 'off' } }), false);
-  assert.equal(aiOn({ ai: { enabled: false, mode: 'continuous' } }), false);
-  // Absent means OFF for the master, unlike the feature flags under it.
-  assert.equal(aiOn({ ai: {} }), false);
-  assert.equal(aiOn({}), false);
-  assert.equal(aiOn(null), false);
-});
+// ── the page's own tick ─────────────────────────────────────────────────────
+//
+// The master switch itself is read by core/services/aiConsent.js and pinned
+// there; this is the only switch the page owns.
 
 test('wanted is this page\'s own tick, and nothing else', () => {
   assert.equal(wanted(cam()), true);
@@ -223,22 +216,12 @@ test('a missing breakdown is the same as an empty one', () => {
   assert.equal(zonesPending({ zones: [{ id: 'z1', name: 'Room', points: SHAPE }] }), true);
 });
 
-// ── consent to switch the camera's AI on ───────────────────────────────────
+// ── what the consent question SAYS ─────────────────────────────────────────
 //
-// Counting cannot start while the master AI switch is off, and something has
-// to turn it on. These pin that the something ASKS. Telling an operator
-// afterwards that their tick also switched AI on is the same fault as doing it
-// silently, one step quieter: a change they did not choose.
-
-test('a camera whose AI is off needs to be asked about', () => {
-  assert.equal(needsAiConsent(cam({ ai: { enabled: false, mode: 'off' } })), true);
-  assert.equal(needsAiConsent(cam({ ai: { enabled: true, mode: 'off' } })), true);
-  assert.equal(needsAiConsent(cam({ ai: {} })), true);
-});
-
-test('a camera whose AI is already on is not asked about — nothing changes for it', () => {
-  assert.equal(needsAiConsent(cam()), false);
-});
+// That it is asked at all is the shared rule, pinned in
+// core/services/aiConsent.test.js. These pin head count's WORDING of it, which
+// is this module's own: an operator deciding needs to be told what is off,
+// what will start, and what will not.
 
 test('the question names what is off, what starts, and what does NOT', () => {
   const copy = consentCopy(cam({ name: 'Server room', ai: { enabled: false } }));
@@ -281,39 +264,11 @@ test('consentCopy survives being handed nothing', () => {
   assert.deepEqual(copy.cameras, []);
 });
 
-test('the server asking is read from its CODE, never from its prose', () => {
-  // A copy edit to the message must not stop the dialog appearing.
-  assert.equal(isConsentRefusal({
-    response: { status: 409, data: { code: AI_CONSENT_REQUIRED, message: 'anything at all' } },
-  }), true);
-  assert.equal(isConsentRefusal({
-    response: { status: 409, data: { message: 'some other conflict' } },
-  }), false);
-  assert.equal(isConsentRefusal({
-    response: { status: 500, data: { code: AI_CONSENT_REQUIRED } },
-  }), false);
-  assert.equal(isConsentRefusal(new Error('network down')), false);
-  assert.equal(isConsentRefusal(undefined), false);
-});
-
 // ── a save that does not land ──────────────────────────────────────────────
 //
 // A tick that springs back with no message is this module's own complaint,
 // committed by the page written to fix it. The licence running out is the
 // common case and is not guessable from a bouncing tick.
-
-test('the server\'s own sentence is what the operator is shown', () => {
-  assert.equal(
-    errorText({ response: { data: { message: 'Your head-count licence covers 10 cameras.' } } }),
-    'Your head-count licence covers 10 cameras.',
-  );
-});
-
-test('a network error still says something true', () => {
-  assert.equal(errorText(new Error('Network Error')), 'Network Error');
-  assert.match(errorText(undefined), /gave no reason/);
-  assert.match(errorText({}), /gave no reason/);
-});
 
 test('nothing failed says nothing at all', () => {
   assert.equal(saveFailureSummary([]), null);
@@ -466,4 +421,121 @@ test('the dialog says, in the contract\'s own words, what will not happen', () =
 test('the bulk wording keeps the promise too — it is the same switch', () => {
   const many = consentCopy([cam(), cam({ monitorId: '2' })]).body;
   assert.ok(many.includes(PROMISE.saidToTheOperator));
+});
+
+// ── counting hours: the one reason that is not a fault ──────────────────────
+//
+// A camera outside its own counting hours is not broken -- it is the system
+// obeying the operator. It still has to be ACCOUNTED FOR, because the wall is
+// built from the detector's streams so a paused camera has no tile, and "8
+// cameras selected" over six tiles is the gap this whole module closes. What
+// these tests pin is that it is accounted for in the right REGISTER: a quiet
+// confirmation, never the amber strip, because a warning that fires every
+// night at ten o'clock teaches an operator to stop reading warnings.
+
+/** A ticked camera the server says is outside its hours. */
+const paused_cam = (from, to, over = {}) => cam({
+  headcount: {
+    enabled: true, threshold: 0, zones: [],
+    countWindow: { from, to }, schedule: 'window', countingNow: false,
+  },
+  ...over,
+});
+
+test('outside its hours, the reason names the hours it does count', () => {
+  const r = notCountingReason(paused_cam('09:00', '18:00'), false);
+  assert.equal(r.code, OUTSIDE_HOURS);
+  assert.match(r.line, /09:00/);
+  assert.match(r.line, /18:00/);
+  // Nothing to press: the fix is to change the hours, and those live on the
+  // camera's own card, not on a page-wide strip.
+  assert.equal(r.fixable, false);
+  assert.equal(r.fix, '');
+});
+
+test('it is marked normal, which is what keeps it out of the amber strip', () => {
+  assert.equal(notCountingReason(paused_cam('09:00', '18:00'), false).normal, true);
+  // And every other reason is NOT, or they would all go quiet together.
+  assert.ok(!notCountingReason(cam({ ai: { enabled: false, mode: 'off' } }), false).normal);
+  assert.ok(!notCountingReason(cam({ status: 'offline' }), false).normal);
+  assert.ok(!notCountingReason(cam(), false).normal);
+});
+
+test('it says when counting resumes, which is always the window start', () => {
+  // True for a day shift read at midnight and for a night shift read at noon:
+  // outside a window, the next opening is its start.
+  assert.equal(notCountingReason(paused_cam('09:00', '18:00'), false).resumesAt, '09:00');
+  assert.equal(notCountingReason(paused_cam('22:00', '06:00'), false).resumesAt, '22:00');
+});
+
+test('the AI switch still outranks the hours', () => {
+  // AI off means this camera will not count when its window opens either, so
+  // that is the bigger fact and the only one with an action attached.
+  const c = paused_cam('09:00', '18:00', { ai: { enabled: false, mode: 'off' } });
+  assert.equal(notCountingReason(c, false).code, AI_OFF);
+});
+
+test('the hours outrank offline, capacity and waiting', () => {
+  // All three are true-but-irrelevant about a camera that is off duty on
+  // purpose, and the first of them would send an operator to check a camera
+  // that is working perfectly.
+  const off = paused_cam('09:00', '18:00', { status: 'offline' });
+  assert.equal(notCountingReason(off, false).code, OUTSIDE_HOURS);
+  const full = paused_cam('09:00', '18:00');
+  assert.equal(notCountingReason(full, false, { max: 8, counting: 8 }).code, OUTSIDE_HOURS);
+});
+
+test('countingNow ABSENT means unknown, not paused', () => {
+  // An older backend or a cached response does not carry it. Reading absent as
+  // paused would explain away a genuinely broken camera as a schedule nobody
+  // set -- so the page falls through to the reasons it can stand behind.
+  const noFlag = cam({
+    headcount: {
+      enabled: true, threshold: 0, zones: [], countWindow: { from: '09:00', to: '18:00' },
+    },
+  });
+  assert.equal(notCountingReason(noFlag, false).code, WAITING);
+});
+
+test('countingNow true is counted, hours or no hours', () => {
+  const onDuty = cam({
+    headcount: {
+      enabled: true, threshold: 0, zones: [],
+      countWindow: { from: '09:00', to: '18:00' }, countingNow: true,
+    },
+  });
+  // Inside its hours and running: nothing to say at all.
+  assert.equal(notCountingReason(onDuty, true), null);
+  // Inside its hours and not yet running: early, not paused.
+  assert.equal(notCountingReason(onDuty, false).code, WAITING);
+});
+
+test('faults and paused split the list, and together they lose nobody', () => {
+  // The split is the whole mechanism: one strip asks for something, the other
+  // confirms. A camera in neither would be a camera with no tile and no
+  // sentence, which is the original defect.
+  const list = [
+    cam({ monitorId: '1', name: 'Lobby', ai: { enabled: false, mode: 'off' } }),
+    paused_cam('22:00', '06:00', { monitorId: '2', name: 'Night Bay' }),
+    cam({ monitorId: '3', name: 'Dock' }),
+  ];
+  const stranded = notCounting(list, new Set());
+  assert.equal(stranded.length, 3);
+  assert.deepEqual(faults(stranded).map((x) => x.cam.name), ['Lobby', 'Dock']);
+  assert.deepEqual(paused(stranded).map((x) => x.cam.name), ['Night Bay']);
+  assert.equal(faults(stranded).length + paused(stranded).length, stranded.length);
+});
+
+test('the paused sentence reads as a confirmation, not a failure', () => {
+  const list = [paused_cam('22:00', '06:00', { monitorId: '2', name: 'Night Bay' })];
+  const note = notCountingSummary(paused(notCounting(list, new Set())));
+  assert.match(note, /Night Bay/);
+  assert.match(note, /22:00 and 06:00/);
+});
+
+test('a paused camera never reaches the fixable list', () => {
+  // `fixable` drives the "Turn AI on" button. Offering it for a camera that is
+  // merely off duty would switch nothing on and explain nothing.
+  const stranded = notCounting([paused_cam('09:00', '18:00')], new Set());
+  assert.deepEqual(fixable(stranded), []);
 });
