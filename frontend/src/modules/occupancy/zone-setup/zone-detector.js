@@ -150,7 +150,24 @@ export async function enableBodyDetection({ row, buildPayload, enableCamera }) {
   if (bodyProducing(row)) return { status: 'already-on', note: '' };
 
   try {
-    const payload = await enableCamera(row.id, buildPayload(row, { zoneBodyDetection: true }));
+    // `faceRecognition` is sent EXPLICITLY, and this is the whole point of the
+    // line. buildEnablePayload defaults it to `ai.faceRecognition !== false` --
+    // absent means ON -- so sending only `zoneBodyDetection` switched FACE
+    // RECOGNITION on as well for any camera nobody had configured, and spent a
+    // face licence the operator never asked for. This button says one thing:
+    // turn on body detection.
+    //
+    // `faceProducing(row)` is the camera's CURRENT state, not a constant,
+    // because both constant answers are wrong:
+    //   true  -- the bug above.
+    //   false -- would stop a camera that IS matching faces today (absent
+    //            means on, so plenty are) the moment someone adds a zone to it.
+    // The detector dialog (applyZoneEntry) already sends the flag explicitly
+    // for both of its options; this path was the one that did not.
+    const payload = await enableCamera(row.id, buildPayload(row, {
+      zoneBodyDetection: true,
+      faceRecognition: faceProducing(row),
+    }));
     if (payload?.reconcile && payload.reconcile.ok === false) {
       return {
         status: 'failed',
@@ -203,24 +220,59 @@ export const USE_FACE = 'face';
 /** Turn on body detection, leaving faces unmatched. */
 export const USE_BODY = 'body';
 
-/**
- * What must be decided before this camera can carry a zone — or null when it
- * already can, in which case the panel simply navigates as before.
- *
- * Returns `{ code, title, body, options }`. Each option carries the
- * `overrides` to hand `buildEnablePayload`, so the caller does not restate the
- * rules; it also carries `costsFaceLicence`, because spending one is the kind
- * of consequence an operator should see named before they choose.
- *
- * TWO CASES, ONE DIALOG. A camera whose master AI is off and one whose
- * detectors are both off need the same decision -- which detector -- and
- * differ only in what else gets switched on with it. One dialog asking one
- * question beats two dialogs in a row.
- */
-export function zoneEntry(row, cameraName = 'this camera') {
-  if (hasProducer(row)) return null;      // nothing to decide
+/** "Dock and Vault", "Dock, Vault and Gate" — names, never a tally. */
+const andList = (names) => {
+  const list = names.filter(Boolean).map(String);
+  if (list.length <= 1) return list[0] || '';
+  if (list.length === 2) return `${list[0]} and ${list[1]}`;
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+};
 
-  const masterOff = !aiOn(row);
+/** What to call a camera when the caller offers nothing better. */
+const nameOfRow = (row) => row?.name || row?.monitorId || 'this camera';
+
+/** The name the operator knows this camera by. */
+const resolveName = (nameOf, row) => (typeof nameOf === 'function' ? nameOf(row) : null)
+  || nameOfRow(row);
+
+/**
+ * What must be decided before this zone's cameras can carry it — or null when
+ * they already can, in which case the panel simply navigates as before.
+ *
+ * TAKES THE WHOLE CAMERA LIST, not one camera. A zone writes its counting
+ * config to every camera it is drawn on (`touched` in room-settings' saveRoom)
+ * and the master AI switch gates that write, so a three-camera zone whose
+ * second camera has AI off still dies at the save however carefully the first
+ * was checked. One row is accepted too, for the door, where one is all there is.
+ *
+ * ONE DIALOG FOR ALL OF THEM. It is the same decision -- which detector -- so
+ * asking per camera would be a queue of identical questions. The cameras that
+ * need it are NAMED: a count tells an operator that something is wrong without
+ * telling them where.
+ *
+ * Returns `{ code, title, body, options, cameras }`. `cameras` is the rows
+ * that need changing, so the caller does not re-derive the set -- hand it
+ * straight back to `applyZoneEntry`. Each option carries the `overrides` to
+ * give `buildEnablePayload`, so the caller does not restate the rules; it also
+ * carries `costsFaceLicence`, because spending one is the kind of consequence
+ * an operator should see named before they choose.
+ *
+ * @param input   one camera row, or the rows for every camera the zone covers
+ * @param nameOf  (row) => the name the operator knows it by. Falls back to the
+ *                row's own name, so it is optional.
+ */
+export function zoneEntry(input, nameOf = nameOfRow) {
+  const rows = Array.isArray(input) ? input : [input];
+  // Only the cameras that cannot carry a zone yet. A four-camera zone with one
+  // anonymous camera is one decision about that one, not four. An empty list is
+  // nobody to ask about -- a zone with no cameras at all is the editor's own
+  // problem, and it reports that itself.
+  const cameras = rows.filter((row) => !hasProducer(row));
+  if (!cameras.length) return null;
+
+  const who = andList(cameras.map((row) => resolveName(nameOf, row)));
+  const count = cameras.length;
+  const many = count > 1;
   const options = [
     {
       id: USE_BODY,
@@ -245,25 +297,109 @@ export function zoneEntry(row, cameraName = 'this camera') {
         + 'recognition licence.',
       overrides: { enabled: true, faceRecognition: true },
       costsFaceLicence: true,
-      recommendedFor: 'allow-list',
+      // No `recommendedFor`. The mode this option suits -- allow-list -- is
+      // `unavailable` in access-data.js until the overlay channel can say
+      // whether a box could carry a name, so recommending it here would point
+      // an operator at a choice they cannot make. Restore it with the mode.
     },
   ];
 
-  if (masterOff) {
+  // Any master switch off means the choice switches AI on as well. Said in the
+  // body, because using a camera for AI at all is the operator's decision and
+  // this dialog is where they are taking it.
+  if (cameras.some((row) => !aiOn(row))) {
     return {
       code: 'ai-off',
-      title: `${cameraName} is not being used by AI yet`,
-      body: 'A zone needs something watching for people on this camera. Choose what '
-        + 'should watch — this also switches the camera\'s AI on.',
+      cameras,
       options,
+      title: many
+        ? `${count} cameras on this zone are not being used by AI yet`
+        : `${who} is not being used by AI yet`,
+      body: many
+        ? 'A zone needs something watching for people on every camera it is drawn on. '
+          + `Choose what should watch ${who} — the same choice is applied to all ${count}, `
+          + 'and switches AI on where it is off.'
+        : 'A zone needs something watching for people on this camera. Choose what '
+          + 'should watch — this also switches the camera\'s AI on.',
     };
   }
 
   return {
     code: 'no-detector',
-    title: `Nothing is detecting people on ${cameraName}`,
-    body: 'Face recognition and body detection are both off, so a zone drawn here '
-      + 'would never set anything off. Choose one before drawing it.',
+    cameras,
     options,
+    title: many
+      ? `Nothing is detecting people on ${count} of this zone's cameras`
+      : `Nothing is detecting people on ${who}`,
+    body: many
+      ? `Face recognition and body detection are both off on ${who}, so a zone drawn `
+        + 'here would never set anything off on them. Choose one — the same choice is '
+        + `applied to all ${count}.`
+      : 'Face recognition and body detection are both off, so a zone drawn here '
+        + 'would never set anything off. Choose one before drawing it.',
+  };
+}
+
+/**
+ * Apply the chosen option to every camera the dialog named.
+ *
+ * Goes through the SAME per-camera lifecycle route the AI Detection tab uses,
+ * which is allowed to switch the master on -- because this dialog IS the
+ * operator deciding to switch it on. Nothing here touches the head-count
+ * route: the zone save writes counting afterwards, and that write stops being
+ * refused precisely because the master is on by the time it goes out.
+ *
+ * NEVER THROWS, AND NEVER STOPS EARLY. One unreachable camera must not leave
+ * the others unchanged, and must not leave the operator guessing which is
+ * which. The caller decides what a partial result means; in a dialog, a
+ * non-empty `failed` is the reason to stay open and show `note`.
+ *
+ * @param entry        the `zoneEntry` result being answered
+ * @param option       the option the operator chose
+ * @param buildPayload (row, overrides) => lifecycle body (aiCamera's
+ *                     buildEnablePayload, injected so this stays pure)
+ * @param enableCamera (cameraId, payload) => PATCH /ai/cameras/:id/lifecycle
+ *
+ * @returns { applied, failed, notices, note }
+ */
+export async function applyZoneEntry({
+  entry, option, buildPayload, enableCamera, nameOf = nameOfRow,
+}) {
+  const applied = [];
+  const failed = [];
+  const notices = [];
+
+  for (const row of entry?.cameras || []) {
+    const name = resolveName(nameOf, row);
+    if (!row?.id) {
+      failed.push({ name, why: 'it is not in the AI camera list' });
+      continue;
+    }
+    try {
+      const result = await enableCamera(row.id, buildPayload(row, option?.overrides || {}));
+      applied.push({ row, name, result });
+      // Saved, but the service did not start the camera. Not a reason to refuse
+      // the zone -- the setting is right and it retries -- but it is said,
+      // because nothing is detected until it does.
+      if (result?.reconcile && result.reconcile.ok === false) {
+        notices.push(`${name}: saved, but the AI service did not start it (${
+          result.reconcile.error || 'it did not respond.'}).`);
+      }
+    } catch (err) {
+      failed.push({
+        name,
+        why: err?.response?.data?.message || err?.message || 'the request was refused',
+      });
+    }
+  }
+
+  return {
+    applied,
+    failed,
+    notices,
+    note: failed.length
+      ? `${andList(failed.map((f) => f.name))} could not be changed: ${
+        andList([...new Set(failed.map((f) => f.why))])}. Nothing was drawn, so nothing is lost.`
+      : '',
   };
 }

@@ -178,6 +178,32 @@ test('it sends zoneBodyDetection true through the lifecycle route', async () => 
   assert.equal(m.calls[0].payload.carried, 6);
 });
 
+test('turning body detection on does NOT switch face recognition on', async () => {
+  // The defect: buildEnablePayload defaults faceRecognition to `!== false`, so
+  // a camera nobody had configured got face recognition -- and a face licence
+  // -- from a button that only offered body detection.
+  const m = mocks();
+  await enableBodyDetection({ row: AI_OFF, ...m });
+  assert.equal(m.calls[0].payload.zoneBodyDetection, true);
+  assert.equal(m.calls[0].payload.faceRecognition, false,
+    'a camera whose AI was off must not start matching faces because a zone was drawn');
+});
+
+test('nor does it switch face recognition OFF on a camera already matching', async () => {
+  // The opposite mistake, and just as bad: absent means ON, so FACE_ONLY is
+  // matching faces right now. Adding body detection must not stop it.
+  const m = mocks();
+  await enableBodyDetection({ row: FACE_ONLY, ...m });
+  assert.equal(m.calls[0].payload.faceRecognition, true);
+});
+
+test('an anonymous camera stays anonymous', async () => {
+  const m = mocks();
+  await enableBodyDetection({ row: ANON, ...m });
+  assert.equal(m.calls[0].payload.faceRecognition, false);
+  assert.equal(m.calls[0].payload.zoneBodyDetection, true);
+});
+
 test('a camera already running it is left alone, and nothing is said', async () => {
   const m = mocks();
   const res = await enableBodyDetection({ row: BODY_ON, ...m });
