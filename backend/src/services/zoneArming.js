@@ -19,39 +19,27 @@
  * `enabled: true` is already its SQL WHERE clause and re-testing it in JS
  * would be a second copy of a condition the database just applied.
  *
- * Pure: no models, no logger, no bus. `now` is injectable so the window can be
- * tested at a time of day rather than at whatever o'clock CI runs.
+ * THE TIME MATHS ITSELF IS NO LONGER HERE. It moved to timeWindow.js when head
+ * counting needed the same question for its own schedule, because the one
+ * thing two features asking "is it on duty now?" must not do is answer it two
+ * ways -- that is how 22:00-06:00 comes to mean a night shift in one file and
+ * an empty set in another. What stays here is the zone's NAME for the
+ * question and the fields it keeps the answer in; `withinArmWindow` is
+ * identical to the version it replaces for every input, which is asserted
+ * rather than claimed (zoneArming.test.js).
  */
+const { withinWindow } = require('./timeWindow');
 
 /**
  * Is `now` inside this zone's arm window?
  *
- * Three deliberate "yes"es, every one of them the safe answer for a security
- * feature — when the schedule cannot be read, the zone is WATCHED:
- *
- *   - no `armWindow`, or `schedule === 'always'`: there is no window to be
- *     outside of.
- *   - a window missing either end: half a window is not a schedule.
- *   - anything that throws (an unknown timezone, a malformed field).
- *
- * A window whose `from` is later than its `to` wraps past midnight
- * (22:00–06:00 is a night shift, not an empty set).
+ * The three deliberate "yes"es -- no window, half a window, anything that
+ * throws -- are documented where they are implemented, in timeWindow.js. For a
+ * security feature they are all the safe answer: when the schedule cannot be
+ * read, the zone is WATCHED.
  */
 function withinArmWindow(zone, now = new Date()) {
-  if (!zone || !zone.armWindow || zone.schedule === 'always') return true;
-  try {
-    const hhmm = now.toLocaleTimeString('en-GB', {
-      hour12: false,
-      hour: '2-digit',
-      minute: '2-digit',
-      timeZone: process.env.ALERT_TIMEZONE || 'Asia/Kolkata',
-    });
-    const { from, to } = zone.armWindow;
-    if (!from || !to) return true;
-    return from <= to ? (hhmm >= from && hhmm <= to) : (hhmm >= from || hhmm <= to);
-  } catch {
-    return true;
-  }
+  return withinWindow({ window: zone?.armWindow, schedule: zone?.schedule }, now);
 }
 
 /** Enabled, and inside its window. What the intrusion engine asks. */

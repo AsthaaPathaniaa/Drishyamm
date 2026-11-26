@@ -34,6 +34,7 @@ const { getAiEntitledUserIds } = require('./entitlements.service');
 const streamingService = require('./drishyamStreaming.service');
 const { bodyProducerOn } = require('./zoneProducer.service');
 const { withinArmWindow } = require('./zoneArming');
+const { withinCountWindow } = require('./headcountWindow');
 
 /** The two stream URLs a service may subscribe to, main and sub. */
 function streamsFor(camera) {
@@ -121,18 +122,33 @@ async function zoneGuardCameras() {
 }
 
 /**
- * head count: the camera needs `settings.headcount.enabled`.
+ * head count: the camera needs `settings.headcount.enabled`, AND to be inside
+ * its counting hours.
  *
  * Rows come back in the SHAPE THE SERVICE ALREADY READS — `settings`, `status`,
  * `rtsp`, `rtspSub` — so the only change on that side is which URL it polls.
  * `status` is included deliberately: the service drops cameras the VMS reports
  * offline, which is about whether a camera can be DIALLED, not whether it is
  * eligible, and that stays its decision. So do its stream caps.
+ *
+ * THE HOURS ARE APPLIED HERE, NOT IN THE DETECTOR, and that is the whole point
+ * of the feature. The detector reconciles its workers to whatever list this
+ * returns (manager.reconcile stops the ones that have gone), so a camera that
+ * falls outside its window DROPS OUT of the list and its decode and its YOLO
+ * worker are stopped within one poll -- 15s. Filtering inside the detector
+ * instead would keep the stream open and throw the frames away, which is the
+ * exact waste zone-guard was found doing for sixteen hours a day before
+ * zoneArming moved this test to the selector.
+ *
+ * It also GIVES THE SLOT BACK. The detector opens 8 streams at most, so a
+ * night-shift camera that counts nobody until 07:00 was holding one of eight
+ * all night; now a day camera can have it.
  */
 async function headcountCameras() {
   const cams = await eligible(null);
   return cams
     .filter((c) => c.settings?.headcount?.enabled === true)
+    .filter((c) => withinCountWindow(c.settings?.headcount))
     .map((c) => ({
       id: c.id,
       userId: c.userId,

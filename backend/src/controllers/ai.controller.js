@@ -36,6 +36,8 @@ const {
   AI_TURNED_ON_FOR_COUNTING, AI_TURNED_ON_FOR_ACTIVITY,
   AI_CONSENT_REQUIRED, aiConsentQuestion,
 } = require('../services/aiLifecycle.service');
+const { parseWindow } = require('../services/timeWindow');
+const { withinCountWindow } = require('../services/headcountWindow');
 const { AIEvent, Camera, CameraGroup, RestrictedZone } = require('../models');
 const {
   bodyDetectionRequired, nextZoneBodyFlag, NO_PRODUCER_REASON,
@@ -854,6 +856,20 @@ function serializeAiCamera(camera, runtimeByMonitor = {}, armedZonesByMonitor = 
       zones: Array.isArray(camera.settings?.headcount?.zones)
         ? camera.settings.headcount.zones : [],
       imgsz: Number(camera.settings?.headcount?.imgsz) || null,
+      // COUNTING HOURS. The window itself goes back so the page can render the
+      // control and name the hours in a sentence; `countingNow` is the ANSWER,
+      // computed by the same function the camera selector filters on
+      // (headcountWindow.withinCountWindow).
+      //
+      // The browser is told the answer rather than left to work it out. Doing
+      // it client-side would need a second copy of the midnight-wrap maths and
+      // the server's ALERT_TIMEZONE, and a page that disagreed with the
+      // selector about whether a camera is on duty would be a page that cannot
+      // explain its own missing tile -- which is the defect this whole module
+      // was written to remove.
+      schedule: camera.settings?.headcount?.schedule || null,
+      countWindow: camera.settings?.headcount?.countWindow || null,
+      countingNow: withinCountWindow(camera.settings?.headcount),
     },
     runtime: {
       running: runtime.running === true,
@@ -1416,6 +1432,41 @@ const setCameraHeadcount = asyncHandler(async (req, res) => {
     ? (ALLOWED_DETAIL.includes(Number(req.body.imgsz)) ? Number(req.body.imgsz) : null)
     : (prev.imgsz ?? null);
 
+  // COUNTING HOURS -- the operator's control over what this camera costs.
+  //
+  // A door nobody walks through between 22:00 and 07:00 was holding a decode
+  // and a YOLO worker open for nine hours a night, and one of the detector's
+  // eight stream slots with it. The hours are applied in the camera SELECTOR,
+  // so a camera outside them drops out of the registry list and the detector
+  // stops its worker within one poll. See aiFeatureCameras.headcountCameras.
+  //
+  // THE TICK AND THE HOURS ARE DIFFERENT SENTENCES. Un-ticking a camera says
+  // "do not count this"; a window says "count this, during these hours". So
+  // the hours never clear the tick and the tick never clears the hours -- an
+  // operator who sets 09:00-17:00, un-ticks for a week and ticks again gets
+  // their hours back, because losing a typed-in schedule to an unrelated
+  // click is the kind of silent loss this page has been fixing all week.
+  //
+  // A BAD WINDOW IS NO WINDOW, NOT A REFUSAL. parseWindow returns null for
+  // anything that is not two real times, and null means "count always". The
+  // field is optional and arrives alongside the tick, the threshold and the
+  // zones: failing the whole save over a mistyped time would throw away work
+  // the operator can see, to protect a field they may not have touched.
+  // Counting always is also the recoverable direction -- it spends GPU, where
+  // the other way round loses hours of numbers that cannot be got back.
+  const windowSent = req.body?.countWindow !== undefined;
+  const countWindow = windowSent
+    ? parseWindow(req.body.countWindow)
+    : parseWindow(prev.countWindow);
+  // `schedule` only means anything with a window to obey or ignore, so it is
+  // dropped with the window rather than left behind pointing at nothing.
+  let schedule;
+  if (countWindow) {
+    const sent = req.body?.schedule;
+    if (sent !== undefined) schedule = sent === 'always' ? 'always' : 'window';
+    else schedule = prev.schedule === 'always' ? 'always' : 'window';
+  }
+
   // THE TICK IS THE WHOLE SWITCH -- ONCE SOMEBODY HAS AGREED TO IT.
   //
   // Counting is gated on the camera's master AI switch like every other
@@ -1452,6 +1503,10 @@ const setCameraHeadcount = asyncHandler(async (req, res) => {
     headcount: {
       ...prev, enabled, threshold, zones,
       ...(detail ? { imgsz: detail } : { imgsz: undefined }),
+      // Both written every time, so clearing the window really clears it: left
+      // to `...prev` a removed window would survive its own deletion.
+      countWindow: countWindow || undefined,
+      schedule,
       updatedAt: now,
     },
   };
