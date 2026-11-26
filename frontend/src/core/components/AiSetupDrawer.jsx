@@ -20,6 +20,7 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/core/ui/she
 // a trivial follow-up if the inversion ever bites.
 import { zoneEntry } from '@/modules/occupancy/zone-setup/zone-detector';
 import { ZoneDetectorDialog } from './ZoneDetectorDialog';
+import { planHeadcountChange } from './ai-setup-headcount.js';
 
 /**
  * The "Set up AI" drawer: which features, where the camera is, start.
@@ -69,8 +70,10 @@ const INPUT_SIZES = [
 function SetupLink({ camera, feature, onBlocked }) {
   const href = featureSetupPath(feature, camera);
   const label = feature.setupLabel.replace(/^Draw a /, 'Draw ');
+  // One camera, because that is all the drawer is open on. The zone editor
+  // asks the same question about every camera a zone covers.
   const gate = feature.key === 'restricted_zone'
-    ? zoneEntry(camera, camera?.name)
+    ? zoneEntry([camera])
     : null;
 
   if (!gate) {
@@ -110,20 +113,34 @@ function SetupDrawer({ camera, onClose, onSaved }) {
   const navigate = useNavigate();
 
   const submit = async (payload, headcountEnabled) => {
-    setSaving(true);
     setError('');
     setNotices([]);
+    // Counting is a separate route (settings.headcount, not settings.ai), so
+    // the toggle is a second call. What it should do is decided HERE, from the
+    // payload about to be sent -- before anything is sent at all. Counting
+    // cannot start on a camera whose master AI switch is off, and this drawer
+    // will not send the `enableAi` consent flag on an operator's behalf, so
+    // "AI off + counting on" is a submit that can only come back refused. It
+    // is answered in the drawer instead, beside the two controls that
+    // disagree, rather than saving the AI half and reporting the failure of a
+    // request that never had a chance. See ai-setup-headcount.js.
+    const headcount = planHeadcountChange({ camera, payload, headcountEnabled });
+    if (headcount.refuse) {
+      setError(headcount.refuse);
+      return;
+    }
+    setSaving(true);
     try {
       const res = await aiService.updateCameraAiLifecycle(camera.id, payload);
-      // Counting is a separate route (settings.headcount, not settings.ai), so
-      // the toggle is a second call -- made only when it actually changed, and
-      // AFTER the AI save, so a failure here cannot lose the main edit. `zones`
-      // is deliberately not sent: the backend keeps the counting area already
-      // drawn, so switching counting off and on again never wipes it.
-      if (headcountEnabled !== undefined && headcountEnabled !== (camera.headcount?.enabled === true)) {
+      // Made AFTER the AI save, so a failure here cannot lose the main edit --
+      // and so that a submit which turns the master ON has already turned it
+      // on by the time counting is asked for. `zones` is deliberately not
+      // sent: the backend keeps the counting area already drawn, so switching
+      // counting off and on again never wipes it.
+      if (headcount.send) {
         try {
           await aiService.setHeadcount(camera.id, {
-            enabled: headcountEnabled,
+            enabled: headcount.enabled,
             threshold: Number(camera.headcount?.threshold) || 0,
           });
         } catch (err) {

@@ -35,6 +35,7 @@
  * zone being saved.
  */
 import { aiService } from '@/core/services/ai';
+import { isConsentRefusal } from '@/core/services/aiConsent';
 import { FULL_PCT, PROFILE_BY_ID, ROOM_PROFILES } from './occupancy-data';
 import { cameraFailures, partialNote } from './room-messages';
 import { boundaryOn, cameraPayload, normalizeZone, normalizeZones } from './zone-model';
@@ -196,18 +197,47 @@ export async function syncRooms() {
  * shape on purpose (`clear`). Otherwise it is left off: an empty list also
  * means "the shape had not loaded yet", and must not wipe the camera's area.
  *
- * Returns the two failures SEPARATELY, because they are different events and
+ * Returns the three failures SEPARATELY, because they are different events and
  * only one of them is the camera's fault:
  *
  *   unknown  the registry has no row for this monitor, so there is no camera
  *            id to write to and nothing was ever sent. The save silently did
  *            not switch counting on there -- which is the one thing the
  *            operator needs told, by name, since nothing on screen shows it.
- *   failed   the write was sent and refused.
+ *   needsAi  the write was sent and refused because the camera's master AI
+ *            switch is off (409 AI_CONSENT_REQUIRED).
+ *   failed   the write was sent and refused for some other reason -- a dead
+ *            backend, a camera deleted elsewhere. What is left once the causes
+ *            that can be named have been taken out of it.
+ *
+ * `needsAi` IS A BACKSTOP, NOT THE PRIMARY PATH. DO NOT "SIMPLIFY" IT AWAY.
+ * ------------------------------------------------------------------------
+ * The primary path is `zoneEntry` in zone-setup/zone-detector.js: it asks
+ * which detector should watch a camera BEFORE a shape is drawn on it, and a
+ * camera whose AI it switched on never reaches this refusal at all. So in
+ * normal use this bucket stays empty, and a reader who finds it empty will be
+ * tempted to delete it. It is still reachable, because the gate can be got
+ * round:
+ *
+ *   - a registry row polled before someone switched that camera's AI off
+ *   - a second tab that switched it off after the dialog was answered
+ *   - a zone whose camera list changed between the dialog and the save
+ *   - a caller written next year that does not know the gate exists
+ *
+ * In every one of those the operator has already drawn real work, and a save
+ * that reports "1 of 3 cameras could not be updated" tells them nothing they
+ * can act on. The two are not duplicates of each other: one PREVENTS the
+ * refusal, this one EXPLAINS it when it happens anyway.
+ *
+ * It does not retry with consent, and must not learn to. `enableAi: true`
+ * would make the 409 disappear and hollow out the rule the endpoint exists to
+ * enforce -- that switching a camera's AI on is always something a person
+ * chose. This screen never asked, so it does not get to answer.
  */
 async function pushCameras(rooms, monitorIds, registry, { clear = [], enable = [] } = {}) {
   const failed = [];
   const unknown = [];
+  const needsAi = [];
   for (const m of monitorIds) {
     const cam = registry[m];
     if (!cam?.id) { unknown.push(m); continue; }
@@ -220,11 +250,16 @@ async function pushCameras(rooms, monitorIds, registry, { clear = [], enable = [
     if (zones.length || zoneCount === 0 || clear.includes(m)) body.zones = zones;
     try {
       await aiService.setHeadcount(cam.id, body);
-    } catch {
-      failed.push(m);
+    } catch (err) {
+      // Asked of the one module that knows what the refusal means, never
+      // re-read from the status code or the body here: a second, looser
+      // reading of the same 409 is how a page comes to disagree with the
+      // service that refused it.
+      if (isConsentRefusal(err)) needsAi.push(m);
+      else failed.push(m);
     }
   }
-  return { failed, unknown };
+  return { failed, unknown, needsAi };
 }
 
 /** The single-camera registry older callers can still describe with two fields. */
@@ -263,15 +298,20 @@ export async function saveRoom(room, opts = {}) {
   // ── the cameras: what the detector counts and alarms on ─────────────────
   const registry = opts.registry || fallbackRegistry(zone.cameras[0], room.cameraId, opts.cameraEnabled);
   const touched = [...new Set([...zone.cameras, ...(prev?.cameras || [])])];
-  const { failed, unknown } = await pushCameras(next, touched, registry, {
+  const { failed, unknown, needsAi } = await pushCameras(next, touched, registry, {
     clear: opts.clearBoundary ? zone.cameras : [],
     enable: zone.cameras,
   });
   // A camera with no registry row was never asked at all, so it is named
   // rather than counted -- see room-messages.js for why that distinction is
-  // the whole message.
-  const engineSaved = failed.length === 0 && unknown.length === 0;
-  failures.push(...cameraFailures({ unknown, failed, touched, cameraName: opts.cameraName }));
+  // the whole message. A camera that refused for want of AI is named too, and
+  // for the same reason: it has a cause, and a cause the operator can act on.
+  // `engineSaved` keeps its meaning -- the detector got ALL of it -- so a
+  // refusal of any kind still makes it false.
+  const engineSaved = failed.length === 0 && unknown.length === 0 && needsAi.length === 0;
+  failures.push(...cameraFailures({
+    unknown, failed, needsAi, touched, cameraName: opts.cameraName,
+  }));
 
   // ── the server: what the intrusion pipeline enforces ────────────────────
   // It holds one camera per zone, so it is given the primary and the shape on
@@ -324,8 +364,15 @@ export async function removeRoom(id, opts = {}) {
 
   const cameras = zone?.cameras || [];
   const registry = opts.registry || fallbackRegistry(cameras[0], opts.cameraId, opts.cameraEnabled);
-  const { failed, unknown } = await pushCameras(rooms, cameras, registry);
-  if (failed.length || unknown.length) failures.push('a camera still has the old boundary and limit');
+  const { failed, unknown, needsAi } = await pushCameras(rooms, cameras, registry);
+  // All three are one sentence HERE, deliberately. On a delete the action the
+  // save path offers -- "switch this camera's AI on, then save again" -- is the
+  // wrong thing to ask: the operator is removing the zone, not arming it, and
+  // nobody should switch a camera to AI to finish taking a zone off it. What
+  // they need to know is only that a stale boundary is still on a camera.
+  if (failed.length || unknown.length || needsAi.length) {
+    failures.push('a camera still has the old boundary and limit');
+  }
 
   return {
     rooms,
