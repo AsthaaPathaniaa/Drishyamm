@@ -179,3 +179,91 @@ export function zoneDetectorProblem(row, cameraName = 'this camera') {
   return `${cameraName} has face recognition off and no body detection, so nothing would `
     + 'detect people in this zone. Switch on "Catch people with no visible face" for it.';
 }
+
+/* ── the door, not the save ─────────────────────────────────────────────────
+ *
+ * Drawing a zone on a camera that cannot carry one used to be a round trip:
+ * the side panel's "Draw a zone" link navigated straight to the zone page, the
+ * operator picked a camera, drew a shape, named it, set its rules, pressed
+ * Save -- and only then learned the camera has no detector, from a 409.
+ *
+ * Everything between the click and the save was wasted, and the message
+ * arrived at the point where it reads as "your work is lost" rather than
+ * "choose a detector first".
+ *
+ * So the question is asked AT THE DOOR. `zoneEntry` is what the panel checks
+ * before it navigates, and what it offers is a CHOICE, not a confirmation:
+ * face and body are different trade-offs, and which one is right depends on
+ * what the zone is for. Picking for the operator would be picking wrong half
+ * the time.
+ */
+
+/** Turn on face recognition: the master too, if it is off. */
+export const USE_FACE = 'face';
+/** Turn on body detection, leaving faces unmatched. */
+export const USE_BODY = 'body';
+
+/**
+ * What must be decided before this camera can carry a zone — or null when it
+ * already can, in which case the panel simply navigates as before.
+ *
+ * Returns `{ code, title, body, options }`. Each option carries the
+ * `overrides` to hand `buildEnablePayload`, so the caller does not restate the
+ * rules; it also carries `costsFaceLicence`, because spending one is the kind
+ * of consequence an operator should see named before they choose.
+ *
+ * TWO CASES, ONE DIALOG. A camera whose master AI is off and one whose
+ * detectors are both off need the same decision -- which detector -- and
+ * differ only in what else gets switched on with it. One dialog asking one
+ * question beats two dialogs in a row.
+ */
+export function zoneEntry(row, cameraName = 'this camera') {
+  if (hasProducer(row)) return null;      // nothing to decide
+
+  const masterOff = !aiOn(row);
+  const options = [
+    {
+      id: USE_BODY,
+      label: 'Catch anyone (body detection)',
+      detail: 'Sets the zone off for any person who enters, including someone hooded, '
+        + 'turned away or far from the camera. It never tells you WHO — it detects a '
+        + 'body, not a face. This is the right choice for a strict lockout, where '
+        + 'nobody is permitted and the person you most need to catch is the one '
+        + 'avoiding the camera.',
+      // Face explicitly off: this option promises no face matching, so it must
+      // not quietly leave a flag that starts it. Absent means ON for that one.
+      overrides: { enabled: true, faceRecognition: false, zoneBodyDetection: true },
+      costsFaceLicence: false,
+      recommendedFor: 'lockout',
+    },
+    {
+      id: USE_FACE,
+      label: 'Recognise faces',
+      detail: 'Tells you who entered, and lets an allow-list excuse the people who '
+        + 'are meant to be there. It only sees a person whose face the camera can '
+        + 'read, so a covered or turned-away face sets nothing off. Uses one face '
+        + 'recognition licence.',
+      overrides: { enabled: true, faceRecognition: true },
+      costsFaceLicence: true,
+      recommendedFor: 'allow-list',
+    },
+  ];
+
+  if (masterOff) {
+    return {
+      code: 'ai-off',
+      title: `${cameraName} is not being used by AI yet`,
+      body: 'A zone needs something watching for people on this camera. Choose what '
+        + 'should watch — this also switches the camera\'s AI on.',
+      options,
+    };
+  }
+
+  return {
+    code: 'no-detector',
+    title: `Nothing is detecting people on ${cameraName}`,
+    body: 'Face recognition and body detection are both off, so a zone drawn here '
+      + 'would never set anything off. Choose one before drawing it.',
+    options,
+  };
+}
