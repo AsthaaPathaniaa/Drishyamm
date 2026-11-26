@@ -1,13 +1,13 @@
 ---
 name: drishyam-deploy
-description: Deploy, verify, or roll back Drishyam on the TESTING server (auto-deploy of main, Tailscale-only access), and the rules for touching any server. Use whenever the task involves deploying code, the self-hosted runner, scripts/deploy.sh, the deploy-testing workflow, the ts.net testing URL, server health after a merge, rolling back a bad deploy, or someone wanting to "just fix it on the server".
+description: Deploy, verify, or roll back Drishyam on the TESTING server (auto-deploy of main, public via Cloudflare Tunnel), and the rules for touching any server. Use whenever the task involves deploying code, the self-hosted runner, scripts/deploy.sh, the deploy-testing workflow, the testing URL / Cloudflare tunnel, server health after a merge, rolling back a bad deploy, or someone wanting to "just fix it on the server".
 ---
 
 # Drishyam: deploying to the testing server
 
 Full background: `docs/DEPLOYMENT.md`. Setup progress (what exists yet):
 `.claude/skills/drishyam-cicd-setup/SKILL.md`. Check its status table before
-assuming a workflow, script, nginx entrypoint or Tailscale serve config exists.
+assuming a workflow, script, nginx entrypoint or tunnel config exists.
 
 ## Golden rules (never break these)
 
@@ -36,7 +36,9 @@ assuming a workflow, script, nginx entrypoint or Tailscale serve config exists.
   (volumes `drishyamm_*`). After deploys it sits in detached HEAD at the deployed SHA.
 - User `systools-pc` (docker group). `sudo` needs a password, so the user runs root
   commands with `! sudo ...`.
-- Access: **public via Tailscale Funnel** (since 2026-11-13, maintainer's choice): `<testing URL>`. No site password and open self-registration (user's explicit choice). Only the app's JWT login protects `/api`; `/ai/`, `/hls/`, `/live/` are unauthenticated. Funnel → `edge` nginx on 127.0.0.1:8080 (`deploy/testing/`).
+- Access: **public via Cloudflare Tunnel** (since 2026-11-24; before that Tailscale Funnel, now off): `<testing URL>`.
+  Tunnel = systemd service `cloudflared` (token mode, hostname managed in the Cloudflare
+  dashboard) → `edge` nginx on 127.0.0.1:8080. `tailscaled` still runs for admin access only. No site password and open self-registration (user's explicit choice). Only the app's JWT login protects `/api`; `/ai/`, `/hls/`, `/live/` are unauthenticated. Edge config: `deploy/testing/`.
 - Dev-mode compose: `./backend`, `./frontend` bind-mounted (nodemon / Vite). A checkout
   changes running code immediately. `node_modules` live in named volumes, so after a
   lockfile change run `docker compose exec -T <svc> npm ci`; a rebuild won't do it.
@@ -65,11 +67,12 @@ curl -fsS localhost:8001/healthz
 curl -fsSI localhost:5173/ | head -1
 docker compose logs --since 10m smart-cam-backend | grep -i "migrat\|error" | tail
 docker compose logs --since 10m smart-cam-ai     | grep -i "alembic\|error" | tail
-tailscale funnel status
+systemctl is-active cloudflared
+curl -fsS https://<testing URL>/api/health
 ```
 
-From a tailnet device, at `https://drishyam-test.<tailnet>.ts.net`: login, API pages
-load, live notifications (Socket.IO), Live View plays (WebRTC over the tailnet or HLS),
+From a browser, at the testing URL: login, API pages
+load, live notifications (Socket.IO), Live View plays (HLS; WebRTC media does not cross the tunnel),
 playback, an AI page (Live detections / Find a person) responds.
 
 ## Roll back
@@ -90,7 +93,7 @@ playback, an AI page (Live detections / Find a person) responds.
 | Runner offline | service stopped / re-registration needed | `systemctl status 'actions.runner.*'`, `~/actions-runner/_diag/` |
 | Backend unhealthy after deploy | failed migration, missing env var, new npm dep | `docker compose logs smart-cam-backend`; `npm ci` in container |
 | AI unhealthy for minutes | first boot builds TensorRT engines (start_period 300 s) | wait, then `docker compose logs smart-cam-ai` |
-| ts.net URL: "Blocked request. This host is not allowed" | Vite `server.allowedHosts` | `frontend/vite.config.js`, `.env` |
-| Page loads, API/AI calls go to localhost | `PUBLIC_API_URL` / `VITE_AI_BASE_URL` / CORS | root `.env`, restart `smart-cam-app` + backend |
-| ts.net URL doesn't resolve / cert error | MagicDNS / HTTPS certs off, device not on tailnet | Tailscale admin console, `tailscale status` |
+| Testing URL: "Blocked request. This host is not allowed" | Vite `server.allowedHosts` | `frontend/vite.config.js`, `.env` |
+| Page loads, API/AI calls go to localhost or an old URL | `PUBLIC_*` URLs / CORS; the console build bakes them in | root `.env`, then re-run *Deploy testing* for the live SHA |
+| Testing URL: Cloudflare 502/1033, or doesn't resolve | `cloudflared` down, edge down, or the dashboard hostname/route missing | `systemctl status cloudflared`, `journalctl -u cloudflared` ("Updated to new configuration" lists the ingress), `curl localhost:8080/edge-health`, Cloudflare Zero Trust → Tunnels |
 | Video fails remotely, works locally | WebRTC host not advertised / H.265 transcode / NVR loss | `webrtcAdditionalHosts`, `docs/12-streaming-recording-architecture.md` |

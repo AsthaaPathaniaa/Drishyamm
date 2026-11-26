@@ -36,6 +36,11 @@ jest.mock('node:child_process', () => ({
 }));
 
 jest.mock('../src/models', () => ({ Camera: { findOne: jest.fn() }, CameraGroup: {} }));
+// The encoder probe would spawn the (fake, never-exiting) ffmpeg too; this file
+// tests the export's lifecycle, so pin the CPU encoder (h264Encode.test.js covers the choice).
+jest.mock('../src/services/h264Encode', () => ({
+  h264Encode: async () => ({ name: 'libx264', input: [], video: ['-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p'] }),
+}));
 jest.mock('../src/services/vendors', () => ({
   supportsPlayback: () => true,
   buildPlaybackPath: () => '/Streaming/tracks/101',

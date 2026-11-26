@@ -218,7 +218,7 @@ export default function Customers() {
                 {filtered.map((a) => (
                   <button key={a.id} className={`acct-card ${fresh.has(a.id) ? 'row-fresh' : ''}`} onClick={() => navigate(`/admin/customers/${a.id}`)}>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontWeight: 600 }} className="truncate">{a.name}</div>
+                      <div style={{ fontWeight: 600 }} className="truncate">{a.name}{a.operator && <span className="mono" title="Platform operator: this email also signs in to the customer console. Its features are set here like any account's; it can't be suspended." style={{ fontSize: 10.5, fontWeight: 700, marginLeft: 6, padding: '1px 5px', borderRadius: 4, border: '1px solid var(--color-border)', color: 'var(--color-text-secondary)' }}>OPERATOR</span>}</div>
                       <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }} className="truncate">{a.email || 'no email'} · {a.plan ? a.plan.name : 'No plan'}</div>
                     </div>
                     <StatusDot tone={a.status === 'active' ? 'success' : 'danger'}>{a.status === 'active' ? 'Active' : 'Suspended'}</StatusDot>
@@ -253,7 +253,7 @@ export default function Customers() {
                         onKeyDown={(e) => { if (e.key === 'Enter') navigate(`/admin/customers/${a.id}`) }}
                       >
                         <td>
-                          <div style={{ fontWeight: 600 }}>{a.name}</div>
+                          <div style={{ fontWeight: 600 }}>{a.name}{a.operator && <span className="mono" title="Platform operator: this email also signs in to the customer console. Its features are set here like any account's; it can't be suspended." style={{ fontSize: 10.5, fontWeight: 700, marginLeft: 6, padding: '1px 5px', borderRadius: 4, border: '1px solid var(--color-border)', color: 'var(--color-text-secondary)' }}>OPERATOR</span>}</div>
                           <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                             {a.email || 'no email'}{a.members ? ` · ${a.members + 1} users` : ''}
                           </div>

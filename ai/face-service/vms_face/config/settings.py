@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     minio_bucket_enrollments: str = "vms-enrollments"
     # Journey stitch artifacts (MP4 / PDF / map). Reuses person-tracker's bucket.
     minio_bucket_output: str = "vms-person-tracker"
+    # Investigation index (I-1) track crops. Own bucket: the snapshot prune
+    # deletes by age, but crops a case holds must stay.
+    minio_bucket_investigate: str = "vms-investigate"
 
     # --- Journey reconstruction (forensic search + stitch) ---
     # Timezone for human-readable timestamps baked server-side (video overlay,
@@ -504,6 +507,34 @@ class Settings(BaseSettings):
     investigate_min_track_seconds: float = 1.0        # shorter tracks count as junk
     investigate_min_track_hits: int = 3               # fewer matched frames count as junk
     investigate_person_track_max_gap_s: float = 1.0   # person track ends after this long unseen
+    # --- Investigation index (I-1) ---
+    # Per-track rows in Postgres (tracks / track_points / activity_buckets,
+    # migration 0007), crops in MinIO, image embeddings in Qdrant
+    # `vms_tracks`. Off by default: when off, the collection isn't created and
+    # nothing is written. The tables exist either way (migrations always run).
+    investigate_index_enabled: bool = False
+    qdrant_collection_tracks: str = "vms_tracks"
+    # Image-embedding width: SigLIP base patch16-224 = 768 (Apache-2.0, see
+    # docs/investigation/LICENCES.md). Changing it needs a new collection.
+    investigate_embed_dim: int = 768
+    # Files from vms_face/investigate/tools/export_siglip.py (host:
+    # data/ai-models/siglip2/).
+    investigate_embed_model_dir: str = "/srv/data/models/siglip2"
+    investigate_heartbeat_s: float = 30.0         # long tracks are written every this often
+    investigate_queue_max: int = 512              # summaries waiting for the writer; full → dropped
+    investigate_crop_max_h: int = 256             # px, best crop stored per track
+    investigate_retention_days: int = 30          # tracks older than this are deleted unless a case holds them
+    # File import (I-7): uploads live here (the backend writes, we only read);
+    # imported tracks are kept until the import is deleted, not by age.
+    investigate_imports_root: str = "/recordings/_imports"
+    investigate_import_sample_fps: float = 8.0    # detector samples per second of video
+    # Vehicle journey (I-10): index cars, motorcycles, buses, trucks and
+    # bicycles from the same YOLO pass that finds people (no extra model).
+    investigate_vehicles_enabled: bool = True
+    # Audio Search (phase 4): Whisper ONNX files (tools/export_whisper.py, host
+    # data/ai-models/whisper/) and the languages speech may be detected as.
+    investigate_speech_model_dir: str = "/srv/data/models/whisper"
+    investigate_speech_languages: str = "en,hi"
     # --- Motion gate (roadmap task E.3) — skip SCRFD on static scenes ---
     # A cheap CPU frame-difference check runs before the detector. When the
     # scene is static AND no tracks are alive, the detect call is skipped
@@ -583,6 +614,10 @@ class Settings(BaseSettings):
     # 15.1 -> 9.6 ms CPU per frame; the remainder is the download + NV12->BGR
     # conversion, which the sub-stream (2.5 ms) removes far more effectively.
     rtsp_hwaccel: str = ""
+    # API process watchdog: if the event loop makes no progress for this many
+    # seconds, dump all thread stacks to the log and exit (the container's
+    # restart policy brings it back). 0 = off. See api/main.py.
+    loop_freeze_exit_sec: float = 120.0
     # Fall back to software decode when the hardware decoder cannot be opened
     # (no libnvcuvid, unsupported codec). False makes open() fail loud instead.
     rtsp_hwaccel_fallback: bool = True

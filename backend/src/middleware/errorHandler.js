@@ -50,8 +50,11 @@ const errorHandler = (err, req, res, next) => {
   // SequelizeDatabaseError with raw SQL, etc.) return a generic message;
   // intentional 4xx AppErrors keep their human-readable message. The stack is
   // never returned (it's logged server-side above) — independent of NODE_ENV,
-  // so a public deploy leaks nothing even if it boots in dev mode.
-  const safeMessage = statusCode >= 500 ? 'Internal Server Error' : message;
+  // so a public deploy leaks nothing even if it boots in dev mode. The one
+  // exception is an AppError.public(): fixed text written for the user
+  // ("Smart Search isn't switched on…"), which would otherwise read as a crash.
+  const safeMessage = statusCode >= 500 && !(err instanceof AppError && err.expose === true)
+    ? 'Internal Server Error' : message;
 
   // A machine-readable reason, for the few refusals a client must act on
   // differently from other refusals of the same status -- without it a UI ends

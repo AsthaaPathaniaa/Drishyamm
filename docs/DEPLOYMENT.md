@@ -18,7 +18,7 @@ touching any server.
 | Environment | Branch | Access | Deploys when |
 |---|---|---|---|
 | Local dev | any | teammate laptop | `docker compose up -d` |
-| **Testing** | `main` | `<testing URL>`: **public via Tailscale Funnel, no site password** (only the app's own login) | automatically on every push/merge to `main` |
+| **Testing** | `main` | `<testing URL>`: **public via Cloudflare Tunnel, no site password** (only the app's own login) | automatically on every push/merge to `main` |
 | Production | `production` | Cloudflare Tunnel + gpu-bridge | on push to `production`, **after approval** (runner `drishyam-prod`, label `production`). Runbook: [`deploy/production/README.md`](../deploy/production/README.md) |
 
 ```
@@ -42,7 +42,7 @@ touching any server.
 | Checkout | `/home/systools-pc/Desktop/Projects/Drishyamm` (compose project `drishyamm`) |
 | Compose files | `COMPOSE_FILE=docker-compose.yml:docker-compose.nvidia.yml:deploy/testing/docker-compose.testing.yml` in `.env` (base + NVIDIA GPU add-on + testing edge) |
 | Secrets | `.env`, `backend/.env`: gitignored, only on the server |
-| URL | `<testing URL>`, Tailscale **Funnel** → `127.0.0.1:8080` (`edge` nginx) |
+| URL | `<testing URL>`, **Cloudflare Tunnel** → `127.0.0.1:8080` (`edge` nginx). Tailscale Funnel was turned off on 2026-11-24 |
 | Public access | open to anyone with the URL. The app's JWT login protects `/api`; **`/ai/`, `/hls/`, `/live/` have no auth** (AI runs with dev bypass) and self-registration is open. Maintainer's explicit choice, 2026-11-13. |
 | Deployed version | `.deploy/last-deployed`, history in `.deploy/history.log` |
 | Pre-deploy DB dumps | `~/drishyam-backups/<time>-<sha>/` (last 20 kept) |
@@ -54,8 +54,9 @@ bind-mounted (backend under `nodemon`, frontend on the Vite dev server):
 - `node_modules` live in named volumes and mask the image's copy, so a new npm
   dependency needs `npm ci` inside the container (deploy.sh does this when a
   lockfile changes).
-- The frontend's URLs come from env at dev-server start, not from a build, so
-  changing them means restarting `smart-cam-app`. No rebuild is needed.
+- The edge serves a production build of the console (`frontend/dist`, made by
+  deploy.sh), and that build bakes in `PUBLIC_API_URL` and the other `PUBLIC_*`
+  URLs. After changing them in `.env`, re-run *Deploy testing* for the live SHA.
 
 Production (`deploy/production/docker-compose.prod.yml`) differs: prebuilt images,
 no bind mounts, SPA on :80.
@@ -101,19 +102,32 @@ Never rename compose **service** names; code and env depend on them.
 ### The single entrypoint
 
 Everything goes through one nginx entrypoint (`deploy/testing/`) bound to
-`127.0.0.1:8080`, published over HTTPS by `tailscale funnel --bg 8080` (public)
-— switch back to tailnet-only with `tailscale funnel --https=443 off && tailscale serve --bg 8080`:
+`127.0.0.1:8080`, published over HTTPS by a **Cloudflare Tunnel** (public).
+
+- The tunnel is managed in the Cloudflare dashboard (Zero Trust → Networks →
+  Tunnels), token mode. Its public hostname routes to HTTP `localhost:8080`.
+  Hostname changes are made there, not in this repo.
+- On the server it runs as the systemd service `cloudflared` (installed with
+  `sudo cloudflared service install <token>`, enabled on boot). This is not the
+  repo's compose `cloudflared` profile (`deploy/cloudflared/`).
+- The server `.env` points `PUBLIC_API_URL`, `PUBLIC_APP_URL`, `PUBLIC_HLS_URL`,
+  `PUBLIC_WEBRTC_URL`, `PUBLIC_AI_URL`, `PUBLIC_WHEP_BASE`, `CORS_ORIGINS` and
+  `VITE_ALLOWED_HOSTS` at the testing URL.
+- Check: `systemctl status cloudflared`, `journalctl -u cloudflared`.
+- Tailscale Funnel/serve is off (2026-11-24). `tailscaled` still runs, so the
+  machine stays on the tailnet for admin access.
 
 | Path | Goes to |
 |---|---|
-| `/` | `smart-cam-app:5173` (Vite) |
+| `/` | `frontend/dist` (falls back to `smart-cam-app:5173`, Vite) |
 | `/api/`, `/socket.io/` | `smart-cam-backend:5000` |
 | `/ai/` | `smart-cam-ai:8001` |
 | `/hls/` | `stream-service:8888` |
 | `/live/` | `stream-service:8889` (WHEP signalling) |
 
-WebRTC media (UDP 8189) flows directly over the tailnet; MediaMTX advertises
-the machine's Tailscale address.
+WebRTC media (UDP 8189) does not pass through the Cloudflare Tunnel. Viewers
+outside the LAN/tailnet get live video only through HLS (`/hls/`) or a TURN server
+([COTURN-DEPLOYMENT.md](COTURN-DEPLOYMENT.md)).
 
 ### Migrations
 

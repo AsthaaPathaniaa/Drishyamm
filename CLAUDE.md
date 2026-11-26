@@ -9,7 +9,8 @@ frontend = React/Vite (`frontend/`), AI = FastAPI (`ai/face-service`, plus
 ## Deployment rules (always apply)
 
 - **This machine is the TESTING server**, public at `<testing URL>`
-  via Tailscale Funnel (no site password, by the maintainer's choice). Its checkout
+  through a Cloudflare Tunnel (no site password, by the maintainer's choice; Tailscale
+  Funnel was turned off on 2026-11-24). Its checkout
   (`/home/systools-pc/Desktop/Projects/Drishyamm`) is auto-deployed from `main`.
   Production (demo.indyatools.com, another machine) deploys only from the `production`
   branch via `deploy-production.yml`, after approval. Runbook: `deploy/production/README.md`.

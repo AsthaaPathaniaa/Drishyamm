@@ -112,7 +112,10 @@ async function loadAccountOwner(userId) {
     err.ownerId = user.parentUserId;
     throw err;
   }
-  if (user.isPlatformAdmin) throw new AppError('This is a platform operator, not a customer account.', 400);
+  // Platform operators are listed and opened too: the same email signs in to the
+  // customer console, and its features/plan/licences are set here like anyone
+  // else's (opt-in features are off until switched on). Suspending one is
+  // refused in setAccountStatus.
   return user;
 }
 
@@ -139,8 +142,8 @@ async function writeAudit(req, action, ownerId, payload) {
 const listAccounts = asyncHandler(async (req, res) => {
   const [owners, members, subs, cameras, zones, licences, lastSessions, healthCtx, openAlerts] = await Promise.all([
     User.findAll({
-      where: { parentUserId: null, isPlatformAdmin: { [Op.not]: true } },
-      attributes: ['id', 'name', 'email', 'role', 'isActive', 'createdAt'],
+      where: { parentUserId: null },
+      attributes: ['id', 'name', 'email', 'role', 'isActive', 'isPlatformAdmin', 'createdAt'],
       order: [['createdAt', 'DESC']],
     }),
     User.findAll({ where: { parentUserId: { [Op.ne]: null } }, attributes: ['id', 'parentUserId'] }),
@@ -253,6 +256,7 @@ const listAccounts = asyncHandler(async (req, res) => {
       id: o.id,
       name: o.name,
       email: o.email,
+      operator: o.isPlatformAdmin === true,
       status: o.isActive ? 'active' : 'suspended',
       createdAt: o.createdAt,
       members: memberCount.get(o.id) || 0,
@@ -439,6 +443,7 @@ const getHub = asyncHandler(async (req, res) => {
         id: owner.id,
         name: owner.name,
         email: owner.email,
+        operator: owner.isPlatformAdmin === true,
         status: owner.isActive ? 'active' : 'suspended',
         createdAt: owner.createdAt,
         members: members.length,
@@ -536,6 +541,9 @@ const setAccountStatus = asyncHandler(async (req, res) => {
   try { owner = await loadAccountOwner(req.params.userId); } catch (err) { return sendOwnerError(res, err); }
   if (typeof req.body?.active !== 'boolean') throw new AppError('active must be true or false.', 400);
   if (String(owner.id) === String(req.user.id)) throw new AppError('You cannot suspend your own account.', 400);
+  // Same rule as the Users page (admin.controller toggleUserStatus): suspending
+  // an operator could lock the platform out of its own console.
+  if (owner.isPlatformAdmin && req.body.active === false) throw new AppError('Cannot suspend a platform operator.', 403);
 
   const active = req.body.active;
   const reason = String(req.body.reason || '').trim().slice(0, 500) || null;

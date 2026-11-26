@@ -4,6 +4,7 @@
 // person-tracker/docs/API.md.
 const { Router } = require('express');
 const authenticate = require('../middleware/authenticate');
+const withAccount = require('../middleware/withAccount');
 const requireAiCapability = require('../middleware/requireAiCapability');
 const requireFeature = require('../middleware/requireFeature');
 const pt = require('../controllers/personTracker.controller');
@@ -11,6 +12,7 @@ const pt = require('../controllers/personTracker.controller');
 const router = Router();
 
 router.use(authenticate);
+router.use(withAccount);   // org (account owner) for sub-users: the AI tenant is the organisation's
 router.use(requireAiCapability);   // PersonTracker is an AI+VMS feature (Basic VMS → 403)
 // ...and one of the search/track pages must be switched on for the account.
 router.use(requireFeature('person_search', 'person_tracker', 'journey_map'));

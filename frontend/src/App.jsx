@@ -33,6 +33,13 @@ const Watchlist      = lazy(() => import('@/modules/face/Watchlist'));
 const CameraHealth   = lazy(() => import('@/core/pages/CameraHealth'));
 const PersonnelSearch = lazy(() => import('@/modules/face/PersonnelSearch'));
 const JourneyMap      = lazy(() => import('@/modules/person-tracking/JourneyMap'));
+const SmartSearch     = lazy(() => import('@/modules/investigation/SmartSearch'));
+const EvidenceExports = lazy(() => import('@/modules/investigation/EvidenceExports'));
+const TrackJourney    = lazy(() => import('@/modules/investigation/TrackJourney'));
+const Cases           = lazy(() => import('@/modules/investigation/Cases'));
+const Imports         = lazy(() => import('@/modules/investigation/Imports'));
+const AskDrishyam     = lazy(() => import('@/modules/investigation/AskDrishyam'));
+const AudioSearch     = lazy(() => import('@/modules/investigation/AudioSearch'));
 const AiFeed          = lazy(() => import('@/modules/ai-feed/AiFeed'));
 const AttendanceReport = lazy(() => import('@/modules/employee-productivity/AttendanceReport'));
 const ActivityDashboard = lazy(() => import('@/modules/employee-productivity/dashboard/ActivityDashboard'));
@@ -330,6 +337,16 @@ export default function App() {
       <Route path="/ai-event/personlsearch" element={<ProtectedRoute>{wrap(<PersonnelSearch />)}</ProtectedRoute>} />
       <Route path="/ai-event/cameramapping" element={<Navigate to="/occupancy/zone-setup" replace />} />
       <Route path="/ai-event/journeymap" element={<ProtectedRoute>{wrap(<JourneyMap />)}</ProtectedRoute>} />
+      <Route path="/investigate" element={<ProtectedRoute>{wrap(<SmartSearch />)}</ProtectedRoute>} />
+      <Route path="/investigate/evidence" element={<ProtectedRoute>{wrap(<EvidenceExports />)}</ProtectedRoute>} />
+      <Route path="/investigate/track" element={<ProtectedRoute>{wrap(<TrackJourney />)}</ProtectedRoute>} />
+      <Route path="/investigate/track/:trackId" element={<ProtectedRoute>{wrap(<TrackJourney />)}</ProtectedRoute>} />
+      <Route path="/investigate/cases" element={<ProtectedRoute>{wrap(<Cases />)}</ProtectedRoute>} />
+      <Route path="/investigate/cases/:caseId" element={<ProtectedRoute>{wrap(<Cases />)}</ProtectedRoute>} />
+      <Route path="/investigate/ask" element={<ProtectedRoute>{wrap(<AskDrishyam />)}</ProtectedRoute>} />
+      <Route path="/investigate/audio" element={<ProtectedRoute>{wrap(<AudioSearch />)}</ProtectedRoute>} />
+      <Route path="/investigate/imports" element={<ProtectedRoute>{wrap(<Imports />)}</ProtectedRoute>} />
+      <Route path="/investigate/imports/:importId" element={<ProtectedRoute>{wrap(<Imports />)}</ProtectedRoute>} />
       <Route path="/ai-event/headcount"  element={<ProtectedRoute>{wrap(<HeadCount />)}</ProtectedRoute>} />
       <Route path="/occupancy" element={<ProtectedRoute>{wrap(<Occupancy />)}</ProtectedRoute>} />
       {/* Past head-count records. It was ?tab=usage-trends on the page above;

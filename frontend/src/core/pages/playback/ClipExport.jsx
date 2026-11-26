@@ -22,6 +22,7 @@ const FORMATS = [
 export default function ClipExport({
   id, range, onChange, playhead, canExport, onExport, notice, onDismissNotice,
   formats = FORMATS, limitText = NVR_LIMIT_TEXT, actionLabel = 'Export Clip',
+  extraAction = null,     // e.g. "Export evidence" (sealed pack), shown beside the export button
 }) {
   const [format, setFormat] = useState(formats[0].id);
   const duration = range.end - range.start;
@@ -98,6 +99,7 @@ export default function ClipExport({
             <Download className="h-4 w-4" />
             {actionLabel}
           </button>
+          {extraAction}
         </div>
       </div>
 

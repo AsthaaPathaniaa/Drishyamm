@@ -99,6 +99,62 @@ Service directly. Details: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 * ~40 GB disk for images and models, plus recording storage.
 * Git LFS if you push this folder to a Git host (several files > 100 MB).
 
+## Investigation tools: turning them on on a server
+
+The investigation tools (Smart Search, Click to track, Ask Drishyam, Import
+video, Audio search, Cases, Evidence) ship switched off. Until all three steps
+below are done on a server, the pages say "isn't running on this server yet".
+People are indexed from the moment the index is on: there is no backlog of
+past footage. Full runbook: [`docs/investigation/PHASE1_RUNBOOK.md`](docs/investigation/PHASE1_RUNBOOK.md).
+
+**1. Model files** (not in git: `data/ai-models/*` is ignored; about 2.6 GB).
+They live in the checkout's `data/ai-models/`, mounted read-only into the AI
+container as `/srv/data/models/`. On the testing server that is
+`/home/systools-pc/Desktop/Projects/Drishyamm/data/ai-models/`.
+
+| Folder | Files | Used for | Made by |
+|---|---|---|---|
+| `data/ai-models/siglip2/` (~1.5 GB) | `vision.onnx`, `text.onnx`, `tokenizer.json`, `meta.json` | the search index and Smart Search (SigLIP 2, Apache-2.0) | `ai/face-service/vms_face/investigate/tools/export_siglip.py` |
+| `data/ai-models/whisper/` (~1.1 GB) | `encoder.onnx`, `decoder.onnx`, `tokenizer.json`, `mel_filters.npy`, `meta.json` | Audio search (Whisper small, MIT) | `ai/face-service/vms_face/investigate/tools/export_whisper.py` |
+| `data/ai-models/yolov8n.onnx` (~12 MB) | one file | finding people and vehicles | `git lfs pull --include="models/person/yolov8n.onnx"`, then copy it here |
+
+Either copy the folders from a machine that already has them (same paths), or
+export them on the server (needs Python; PyTorch is only used for the export):
+
+```bash
+python3 -m venv ~/siglip-venv
+~/siglip-venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
+~/siglip-venv/bin/pip install transformers sentencepiece protobuf onnx onnxruntime tokenizers pillow
+~/siglip-venv/bin/python ai/face-service/vms_face/investigate/tools/export_siglip.py \
+    --revision 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2 --out data/ai-models/siglip2
+~/siglip-venv/bin/python ai/face-service/vms_face/investigate/tools/export_whisper.py \
+    --model openai/whisper-small --out data/ai-models/whisper
+git lfs pull --include="models/person/yolov8n.onnx" && cp models/person/yolov8n.onnx data/ai-models/yolov8n.onnx
+```
+
+Both export scripts refuse to finish unless the ONNX output matches PyTorch.
+
+**2. Switch the index on** in the server's root `.env` (server-local config,
+not in git), then restart the AI:
+
+```bash
+PIPELINE_PERSON_DETECTION_ENABLED=true
+INVESTIGATE_INDEX_ENABLED=true
+```
+
+```bash
+docker compose up -d smart-cam-ai
+```
+
+**3. Switch the features on per account** in the admin console: Customers →
+the account → Licences & features → the Investigation group, Cases, Evidence
+export. They are opt-in, so "All features" does not include them, and admin
+accounts are no exception. Smart Search, Ask and Audio search also need an AI
+plan.
+
+Check: Smart Search shows no "isn't running" notice, and
+`GET /api/investigate/status` returns `"enabled": true`.
+
 ## Licences to be aware of
 
 InsightFace model weights (buffalo_l / buffalo_sc), CodeFormer and UTKFace are

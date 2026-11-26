@@ -299,6 +299,30 @@ async def _stop_camera_internal(camera_id: uuid.UUID, *, mark_offline: bool = Tr
                 cam.status = CameraStatus.OFFLINE
 
 
+async def _retire_default_tenant_twins(session: AsyncSession, tenant: Tenant, monitor_id: str) -> int:
+    """A camera now registered under its organisation's tenant may still have a
+    row in the shared default tenant from before the backend sent org tokens
+    (aiLifecycle start/stop, fixed 2026-11-24). That twin ran its own pipeline
+    on the same stream: double GPU, and everything it saw (sightings, the
+    investigation index) filed where the organisation's searches never look.
+    Stop it and disable it so a restart doesn't bring it back. Only rows in
+    the default tenant are touched; their history stays."""
+    default = (await session.execute(select(Tenant).where(Tenant.name == settings.default_tenant_name))).scalar_one_or_none()
+    if default is None or default.id == tenant.id:
+        return 0
+    twins = (await session.execute(
+        select(Camera).where(Camera.tenant_id == default.id, Camera.code == monitor_id, Camera.enabled.is_(True))
+    )).scalars().all()
+    for twin in twins:
+        await _stop_camera_internal(twin.id, mark_offline=False)
+        twin.enabled = False
+        twin.status = CameraStatus.OFFLINE
+    if twins:
+        await session.commit()
+        log.info("retired default-tenant twin camera", monitor_id=monitor_id, tenant=str(tenant.id), rows=len(twins))
+    return len(twins)
+
+
 async def _stop_other_running_cameras(keep_camera_id: uuid.UUID) -> None:
     others = [camera_id for camera_id in list(_RUNNING.keys()) if camera_id != keep_camera_id]
     if not others:
@@ -406,6 +430,7 @@ async def set_camera(
     )
     if not owns(cam.id):
         return await forward_to_owner(request, cam.id)
+    await _retire_default_tenant_twins(session, tenant, monitor_id)
     if settings.legacy_single_active_camera:
         await _stop_other_running_cameras(cam.id)
 
@@ -477,7 +502,11 @@ async def status(session: AsyncSession = Depends(db_session)) -> dict[str, Any]:
     cache = get_detection_cache()
     rows = (await session.execute(select(Camera))).scalars().all()
     by_monitor: dict[str, dict[str, Any]] = {}
-    for cam in rows:
+    # One entry per monitor_id. A code can have more than one row (a retired
+    # default-tenant twin beside the organisation's row): the running row
+    # wins, then an enabled one — never let a disabled twin mask the live one.
+    rank = lambda c: (_is_running(c.id), bool(c.enabled))  # noqa: E731
+    for cam in sorted(rows, key=rank):
         running = _is_running(cam.id)
         snap = cache.get(str(cam.id))
         by_monitor[cam.code] = {

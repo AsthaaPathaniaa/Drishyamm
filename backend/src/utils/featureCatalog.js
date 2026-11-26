@@ -58,6 +58,10 @@ const FEATURE_GROUPS = Object.freeze([
         description: 'Many cameras on one screen, with saved wall layouts.' },
       { key: 'playback', label: 'Recordings', defaultOn: true,
         description: 'Play back footage from the site recorder (NVR) and make timelapses.' },
+      { key: 'investigate_cases', label: 'Cases', optIn: true,
+        description: 'One workspace per incident: pin people, clips, journeys and notes; members; legal hold keeps footage before the recorder overwrites it. New: off until switched on here.' },
+      { key: 'evidence_export', label: 'Evidence export', optIn: true,
+        description: 'Sealed evidence packs: footage + report + SHA-256 manifest signed by the account, with a reason for every export and a verify tool. New: off until switched on here.' },
       { key: 'cloud_recordings', label: 'Cloud recordings', defaultOn: true,
         description: 'Clips saved to Drishyam cloud storage (the Cloud tab inside Recordings).' },
       { key: 'map', label: 'Map',
@@ -110,6 +114,21 @@ const FEATURE_GROUPS = Object.freeze([
         description: 'Customer sees “Track a person”: follow one person across cameras, live too.' },
       { key: 'journey_map',    label: 'Journey Map',
         description: 'Customer sees “Where they went”: a person’s route on the site plan.' },
+    ],
+  },
+  {
+    // Investigation toolkit (docs/investigation). New and opt-in: off for
+    // every account, even a full one, until an admin switches it on here.
+    id: 'investigation', label: 'Investigation', ai: true,
+    items: [
+      { key: 'investigate_gender', label: 'Smart Search: man / woman filter', optIn: true,
+        description: 'Customer can narrow Smart Search to men or women (“man in a red top”). Judged from each person’s picture at search time, confident readings only; nothing about gender is stored. Gender is a sensitive attribute: switch on only where that is lawful and expected. New: off until switched on here.' },
+      { key: 'investigate_audio', label: 'Audio Search', optIn: true,
+        description: 'Customer sees “Audio search”: speech in imported videos and chosen recorded ranges is turned into text they can search. Speech is personal data: switch on only where recording audio is lawful and people are told. Runs only when someone asks for a video or range. New: off until switched on here.' },
+      { key: 'investigate_ask', label: 'Ask Drishyam & Summaries', optIn: true,
+        description: 'Customer sees “Ask Drishyam”: questions in English or Hindi answered from search, journeys, counts and alerts, every fact linked; and short summaries (“last night in 3 lines”). New: off until switched on here.' },
+      { key: 'investigate_search', label: 'Smart Search', optIn: true,
+        description: 'Customer sees “Smart Search”: find people by describing them (“red top, backpack, gate 3, 1–4 pm”) or by a photo. New: off until switched on here.' },
     ],
   },
   {
@@ -201,6 +220,13 @@ const DEFAULT_ON_KEYS = Object.freeze(
 const DEMO_KEYS = Object.freeze(
   FEATURE_GROUPS.flatMap((g) => g.items.filter((i) => i.demo).map((i) => i.key)),
 );
+// New features shipped dark (`optIn: true`): like demo keys, on ONLY when
+// listed, but they are real features, so they don't open the demo pages.
+// Mirror: OPT_IN_KEYS in core/nav/entitlements.js.
+const OPT_IN_KEYS = Object.freeze(
+  FEATURE_GROUPS.flatMap((g) => g.items.filter((i) => i.optIn).map((i) => i.key)),
+);
+const LISTED_ONLY_KEYS = Object.freeze([...DEMO_KEYS, ...OPT_IN_KEYS]);
 
 /**
  * Is `key` on for a stored Subscription.features value? Tier (AI) is NOT
@@ -209,7 +235,7 @@ const DEMO_KEYS = Object.freeze(
  * @param {string} key
  */
 function isFeatureOn(features, key) {
-  if (DEMO_KEYS.includes(key)) return Array.isArray(features) && features.includes(key);
+  if (LISTED_ONLY_KEYS.includes(key)) return Array.isArray(features) && features.includes(key);
   if (!Array.isArray(features) || !features.length) return true;
   if (DEFAULT_ON_KEYS.includes(key)) return !features.includes(OFF_PREFIX + key);
   return features.includes(key);
@@ -222,7 +248,7 @@ function isFeatureOn(features, key) {
  */
 function featureStateOf(raw) {
   if (!Array.isArray(raw) || !raw.length) {
-    return { mode: 'all', enabled: ALL_FEATURE_KEYS.filter((k) => !DEMO_KEYS.includes(k)), unknown: [] };
+    return { mode: 'all', enabled: ALL_FEATURE_KEYS.filter((k) => !LISTED_ONLY_KEYS.includes(k)), unknown: [] };
   }
   const enabled = ALL_FEATURE_KEYS.filter((k) => isFeatureOn(raw, k));
   const unknown = raw.filter((k) => k !== NO_FEATURES
@@ -241,7 +267,7 @@ function featureStateOf(raw) {
  */
 function storedFeatures(chosen, keep = []) {
   const on = new Set(chosen);
-  const fullAccount = ALL_FEATURE_KEYS.every((k) => (DEMO_KEYS.includes(k) ? !on.has(k) : on.has(k)));
+  const fullAccount = ALL_FEATURE_KEYS.every((k) => (LISTED_ONLY_KEYS.includes(k) ? !on.has(k) : on.has(k)));
   if (fullAccount && !keep.length) return null;
   const list = [
     ...ALL_FEATURE_KEYS.filter((k) => !DEFAULT_ON_KEYS.includes(k) && on.has(k)),
@@ -271,6 +297,7 @@ module.exports = {
   AI_FEATURE_KEYS,
   DEFAULT_ON_KEYS,
   DEMO_KEYS,
+  OPT_IN_KEYS,
   OFF_PREFIX,
   NO_FEATURES,
   isFeatureOn,

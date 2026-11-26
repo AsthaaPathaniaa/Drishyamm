@@ -1,0 +1,567 @@
+"""Rule-based Smart Search query parser (English + Hindi), no LLM, no network.
+
+    "man, red top, backpack, gate 3, 1-4 pm"
+      → chips:  Person · Red top · Gate 3 · 1:00 PM – 4:00 PM
+      → text:   "a photo of a man, red top, backpack"   (embedded by SigLIP 2)
+
+What becomes a filter:
+  * time words → ``since`` / ``until`` (hard filter)
+  * camera names / codes the tenant has → ``camera_ids`` (hard filter)
+  * person / vehicle words → ``object_class`` (hard filter)
+  * colours tied to a garment → ``top_colour`` / ``bottom_colour`` — a *soft*
+    boost in ranking, never a hard filter: the colour heuristic is a guess.
+Everything descriptive stays in the text, so "backpack", "helmet", "saree"
+are found by the image embedding even without an attribute model.
+
+The UI shows the chips and lets the user remove or edit them; the edited
+chips come back as explicit filters and win over the parse.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from typing import Iterable, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+COLOURS = {
+    # English
+    "black": "black", "white": "white", "grey": "grey", "gray": "grey", "red": "red", "maroon": "red",
+    "orange": "orange", "yellow": "yellow", "green": "green", "blue": "blue", "navy": "navy",
+    "purple": "purple", "violet": "purple", "pink": "pink", "brown": "brown", "beige": "beige", "cream": "beige",
+    # Hindi (both gendered forms)
+    "काला": "black", "काली": "black", "काले": "black", "सफेद": "white", "सफ़ेद": "white",
+    "स्लेटी": "grey", "ग्रे": "grey", "लाल": "red", "नारंगी": "orange", "पीला": "yellow", "पीली": "yellow",
+    "पीले": "yellow", "हरा": "green", "हरी": "green", "हरे": "green", "नीला": "blue", "नीली": "blue",
+    "नीले": "blue", "बैंगनी": "purple", "गुलाबी": "pink", "भूरा": "brown", "भूरी": "brown", "भूरे": "brown",
+}
+TOP_WORDS = {
+    "top", "shirt", "tshirt", "t-shirt", "tee", "jacket", "hoodie", "sweater", "kurta", "kurti", "blouse",
+    "coat", "uniform", "vest", "jersey",
+    "शर्ट", "कमीज", "कमीज़", "टॉप", "कुर्ता", "कुर्ती", "जैकेट", "टी-शर्ट", "स्वेटर",
+}
+BOTTOM_WORDS = {
+    "pants", "pant", "trousers", "jeans", "shorts", "skirt", "lower", "track", "trackpants", "salwar", "leggings",
+    "पैंट", "पेंट", "जींस", "सलवार", "निक्कर", "स्कर्ट",
+}
+PERSON_WORDS = {
+    "man", "men", "woman", "women", "person", "people", "boy", "girl", "guy", "lady", "child", "kid", "someone",
+    "आदमी", "औरत", "महिला", "व्यक्ति", "लड़का", "लड़की", "लडका", "लडकी", "बच्चा", "बच्ची", "इंसान",
+    "he", "she", "him", "her", "they", "them",
+}
+# Words that start a question but describe no one ("is it him in red?", "did
+# anyone…", "show me…"): dropped from the front of the description.
+LEAD_FILLER = {"is", "it", "was", "were", "are", "did", "does", "do", "has", "have", "there", "can", "could", "you",
+               "please", "show", "me", "find", "any", "the", "a", "an", "who", "what", "when", "where", "which", "how"}
+VEHICLE_WORDS = {
+    "car": "vehicle", "suv": "vehicle", "van": "vehicle", "vehicle": "vehicle", "bike": "vehicle",
+    "motorcycle": "vehicle", "scooter": "vehicle", "truck": "vehicle", "bus": "vehicle", "auto": "vehicle",
+    "rickshaw": "vehicle", "tempo": "vehicle", "कार": "vehicle", "गाड़ी": "vehicle", "गाडी": "vehicle",
+    "बाइक": "vehicle", "स्कूटर": "vehicle", "ट्रक": "vehicle", "बस": "vehicle", "ऑटो": "vehicle",
+}
+# Vehicle words → the type the index stores (COCO classes). Auto-rickshaws and
+# tempos aren't COCO classes, so they only make it a vehicle search.
+VEHICLE_TYPES = {
+    "car": "car", "suv": "car", "van": "car", "jeep": "car", "sedan": "car", "taxi": "car", "कार": "car",
+    "bike": "motorcycle", "motorcycle": "motorcycle", "motorbike": "motorcycle", "scooter": "motorcycle",
+    "scooty": "motorcycle", "बाइक": "motorcycle", "स्कूटर": "motorcycle",
+    "bus": "bus", "बस": "bus", "truck": "truck", "lorry": "truck", "ट्रक": "truck",
+    "cycle": "bicycle", "bicycle": "bicycle", "साइकिल": "bicycle",
+}
+# Gender words. Only a wish: it filters only for an account that switched the
+# man/woman filter on (sensitive attribute, rule 8); otherwise it is a person.
+MALE_WORDS = {
+    "man", "men", "boy", "boys", "guy", "guys", "gentleman", "gents", "male", "males",
+    "आदमी", "पुरुष", "लड़का", "लडका", "लड़के", "लडके", "मर्द",
+}
+FEMALE_WORDS = {
+    "woman", "women", "girl", "girls", "lady", "ladies", "female", "females",
+    "औरत", "महिला", "महिलाएं", "लड़की", "लडकी", "लड़कियां", "लडकियां", "स्त्री",
+}
+# Words that describe that something happened, not what someone looks like:
+# "movement at gate 2" means "everyone at gate 2", newest first.
+ACTIVITY_WORDS = {
+    "movement", "movements", "motion", "activity", "activities", "moving", "walking", "passing", "passed",
+    "entering", "entered", "entry", "exiting", "exited", "came", "come", "coming", "went", "going", "leaving",
+    "arrived", "arriving", "visitor", "visitors", "traffic", "footfall", "anyone", "anybody", "everyone",
+    "everybody", "somebody", "someone", "people", "person", "persons", "who", "happened", "happening",
+    "हलचल", "गतिविधि", "आवाजाही", "कोई", "लोग", "आया", "आई", "आए", "गया", "गई", "गए",
+    # Events: what someone did, which no single picture of them shows. "bag theft
+    # from hr cabin" = people with a bag at the HR camera, not pictures of "theft".
+    "theft", "thief", "thieves", "steal", "stealing", "stole", "stolen", "snatch", "snatching", "robbery", "rob",
+    "robbed", "fight", "fighting", "quarrel", "incident", "crime", "loitering", "loiter", "break-in", "intrusion",
+    "चोरी", "चोर", "लड़ाई", "झगड़ा", "घटना",
+}
+# Room words said after a camera's name: "hr cabin", "gate 2 area", "accounts
+# room". Part of the place, never of the description.
+ROOM_WORDS = {
+    "cabin", "room", "area", "desk", "office", "side", "zone", "counter", "section", "department", "dept",
+    "corner", "bay", "wing", "table", "seat", "workspace", "premises", "camera", "cam", "cctv", "entrance",
+    "केबिन", "कमरा", "कमरे", "दफ्तर", "तरफ",
+}
+# Place words: "<place> <number>" (gate 2, floor 3, door 1, cam 4) that matches
+# none of the caller's cameras is reported back instead of being embedded.
+PLACE_WORDS = {
+    "gate", "door", "entrance", "exit", "lobby", "reception", "parking", "floor", "lift", "elevator",
+    "corridor", "hall", "cabin", "room", "office", "workstation", "basement", "terrace", "stairs", "staircase",
+    "warehouse", "godown", "shop", "counter", "block", "wing", "zone", "area", "camera", "cam", "channel", "ch",
+    "गेट", "दरवाजा", "दरवाज़ा", "पार्किंग", "लॉबी", "मंजिल", "कैमरा",
+}
+GENERIC_CAMERA_WORDS = {"camera", "cam", "cctv", "ch", "channel", "ipc", "nvr", "कैमरा"}
+STOP_WORDS = {
+    "a", "an", "the", "in", "with", "wearing", "and", "of", "at", "on", "near", "from", "to", "between",
+    "camera", "cam", "who", "was", "is", "seen", "find", "show", "me", "any", "all",
+    "inside", "outside", "around", "into", "towards", "behind", "front", "by", "for", "there", "here",
+    "में", "का", "की", "के", "वाला", "वाली", "वाले", "और", "पर", "से", "तक", "पहने", "पहना", "पहनी",
+}
+
+AM_PM = r"(am|pm|a\.m\.|p\.m\.)"
+_TIME = r"(\d{1,2})(?:[:.](\d{2}))?\s*" + AM_PM + r"?"
+
+
+@dataclass
+class Chip:
+    kind: str          # time | camera | object_class | top_colour | bottom_colour
+    label: str
+    value: object
+
+
+@dataclass
+class ParsedQuery:
+    text: str                                  # what gets embedded
+    object_class: str | None = None
+    top_colour: str | None = None
+    bottom_colour: str | None = None
+    vehicle_type: str | None = None
+    vehicle_colour: str | None = None
+    camera_ids: list[str] = field(default_factory=list)
+    since: dt.datetime | None = None
+    until: dt.datetime | None = None
+    chips: list[Chip] = field(default_factory=list)
+    gender: str | None = None                  # "male" | "female": a wish, see MALE_WORDS
+    browse: bool = False                       # nothing to describe: everyone, newest first
+    describes: bool = False                    # words beyond "person"/"man"/"woman": clothes, bag, phone…
+    unknown_places: list[str] = field(default_factory=list)       # "gate 2" matching no camera
+    suggestions: dict[str, list[str]] = field(default_factory=dict)  # unknown place → close camera names
+
+    def to_dict(self) -> dict:
+        return {
+            "text": self.text,
+            "object_class": self.object_class,
+            "top_colour": self.top_colour,
+            "bottom_colour": self.bottom_colour,
+            "vehicle_type": self.vehicle_type,
+            "vehicle_colour": self.vehicle_colour,
+            "camera_ids": self.camera_ids,
+            "since": self.since.isoformat() if self.since else None,
+            "until": self.until.isoformat() if self.until else None,
+            "chips": [{"kind": c.kind, "label": c.label, "value": _json(c.value)} for c in self.chips],
+            "gender": self.gender,
+            "browse": self.browse,
+            "describes": self.describes,
+            "unknown_places": self.unknown_places,
+            "suggestions": self.suggestions,
+        }
+
+
+def _json(v):
+    if isinstance(v, dt.datetime):
+        return v.isoformat()
+    if isinstance(v, (list, tuple)):
+        return [_json(x) for x in v]
+    return v
+
+
+# Old IANA names browsers still report (Chrome in India says "Asia/Calcutta").
+# The container's zoneinfo lacks the "backward" links, so map the common ones.
+TZ_ALIASES = {
+    "Asia/Calcutta": "Asia/Kolkata", "Asia/Katmandu": "Asia/Kathmandu", "Asia/Rangoon": "Asia/Yangon",
+    "Asia/Saigon": "Asia/Ho_Chi_Minh", "Asia/Dacca": "Asia/Dhaka", "Asia/Thimbu": "Asia/Thimphu",
+    "US/Eastern": "America/New_York", "US/Central": "America/Chicago", "US/Mountain": "America/Denver",
+    "US/Pacific": "America/Los_Angeles", "GB": "Europe/London", "UTC": "UTC", "Etc/UTC": "UTC",
+}
+DEFAULT_TZ = "Asia/Kolkata"
+
+
+def zone(name: str | None) -> ZoneInfo:
+    """The viewer's time zone. Unknown or old names never fail a search: an
+    alias is mapped, anything else falls back to India time."""
+    for key in (name, TZ_ALIASES.get(name or ""), DEFAULT_TZ):
+        if not key:
+            continue
+        try:
+            return ZoneInfo(key)
+        except (ZoneInfoNotFoundError, ValueError, KeyError):
+            continue
+    return ZoneInfo("UTC")
+
+
+def _norm(s: str) -> str:
+    s = unicodedata.normalize("NFC", s.lower())
+    s = re.sub(r"[^\wऀ-ॿ]+", " ", s)
+    s = re.sub(r"(?<=[a-z\u0900-\u097f])(?=\d)|(?<=\d)(?=[a-z])", " ", s)   # "gate2" == "gate 2"
+    s = re.sub(r"\b0+(\d)", r"\1", s)                 # "gate 03" == "gate 3"
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _hour(h: int, m: int, ampm: str | None, hint: str | None) -> tuple[int, int]:
+    ap = (ampm or hint or "").replace(".", "")
+    if ap == "pm" and h < 12:
+        h += 12
+    if ap == "am" and h == 12:
+        h = 0
+    return h % 24, m
+
+
+def _fmt(t: dt.datetime) -> str:
+    return t.strftime("%I:%M %p").lstrip("0")
+
+
+class _Text:
+    """The query with spans cut out as they are consumed."""
+
+    def __init__(self, q: str) -> None:
+        self.s = q
+
+    def take(self, pattern: str, flags=re.I):
+        m = re.search(pattern, self.s, flags)
+        if m:
+            self.s = self.s[: m.start()] + " , " + self.s[m.end():]
+        return m
+
+
+def parse(
+    q: str,
+    *,
+    now: dt.datetime,
+    tz: ZoneInfo | str = "Asia/Kolkata",
+    cameras: Iterable[tuple[str, str | None, str | None]] = (),
+) -> ParsedQuery:
+    """Parse a description. ``cameras``: (camera_id, code, name) of the tenant."""
+    tz = zone(tz) if isinstance(tz, str) or tz is None else tz
+    now = now.astimezone(tz)
+    t = _Text(_numbered(unicodedata.normalize("NFC", q or "")))
+    out = ParsedQuery(text="")
+    cameras = list(cameras)
+
+    _parse_time(t, now, out)
+    _parse_cameras(t, cameras, out)
+    _parse_unknown_places(t, cameras, out)
+
+    # Words that remain, in order, for colour/garment/class tagging.
+    words = [w for w in re.split(r"[\s,;।]+", t.s) if w]
+    lower = [w.lower().strip(".!?\"'()") for w in words]
+    pending_colour: str | None = None
+    for i, w in enumerate(lower):
+        if w in COLOURS:
+            pending_colour = COLOURS[w]
+            nxt = lower[i + 1] if i + 1 < len(lower) else ""
+            prev = lower[i - 1] if i else ""
+            if nxt in BOTTOM_WORDS or prev in BOTTOM_WORDS:
+                out.bottom_colour = out.bottom_colour or pending_colour
+                pending_colour = None
+            elif nxt in TOP_WORDS or prev in TOP_WORDS:
+                out.top_colour = out.top_colour or pending_colour
+                pending_colour = None
+        elif w in PERSON_WORDS or w in MALE_WORDS or w in FEMALE_WORDS or w in {"persons", "visitor", "visitors"}:
+            # People, not vehicles ("someone"/"person" too). "movement" alone keeps both.
+            if w in MALE_WORDS:
+                out.gender = out.gender or "male"
+            elif w in FEMALE_WORDS:
+                out.gender = out.gender or "female"
+            if not out.object_class:
+                out.object_class = "person"
+        elif w in VEHICLE_WORDS or w in VEHICLE_TYPES:
+            out.object_class = "vehicle"
+            out.vehicle_type = out.vehicle_type or VEHICLE_TYPES.get(w)
+    if pending_colour:            # "red, backpack": a bare colour describes the top / vehicle
+        if out.object_class == "vehicle":
+            out.vehicle_colour = pending_colour
+        elif not out.top_colour:
+            out.top_colour = pending_colour
+    if out.object_class is None and (out.top_colour or out.bottom_colour or any(w in TOP_WORDS | BOTTOM_WORDS for w in lower)):
+        out.object_class = "person"
+
+    if out.object_class:
+        out.chips.insert(0, Chip("object_class", out.object_class.capitalize(), out.object_class))
+    if out.gender:
+        out.chips.append(Chip("gender", "Man" if out.gender == "male" else "Woman", out.gender))
+    if out.top_colour:
+        out.chips.append(Chip("top_colour", f"{out.top_colour.capitalize()} top", out.top_colour))
+    if out.bottom_colour:
+        out.chips.append(Chip("bottom_colour", f"{out.bottom_colour.capitalize()} bottom", out.bottom_colour))
+    if out.vehicle_type:
+        out.chips.append(Chip("vehicle_type", out.vehicle_type.capitalize(), out.vehicle_type))
+    if out.vehicle_colour:
+        out.chips.append(Chip("vehicle_colour", f"{out.vehicle_colour.capitalize()} vehicle", out.vehicle_colour))
+
+    # Embed the person's own words (SigLIP reads sentences): only the time and
+    # camera phrases are cut out, plus filler left dangling where they were.
+    text = re.sub(r"\s*,(\s*,)+", ",", t.s)
+    text = re.sub(r"\s+", " ", text).strip(" ,;।")
+    # Place words left dangling where a camera/place was cut out ("in the ,").
+    text = re.sub(r"(?i)\b(?:at|on|in|inside|outside|from|near|around|by|to|into|towards|behind|between|of|camera|cam)"
+                  r"(?:\s+the)?\s*(,|$)", r"\1", text).strip(" ,;।")
+    # Event words ("theft", "fight") and question openers describe no one.
+    toks = text.split(" ")
+    toks = [w for w in toks if w.lower().strip(".,!?") not in ACTIVITY_WORDS - PERSON_WORDS]
+    while toks and toks[0].lower().strip(".,!?\"'") in LEAD_FILLER:
+        toks.pop(0)
+    text = " ".join(toks).strip(" ,;।?")
+    # Nothing left that describes how someone looks ("movement", "anyone",
+    # "people"): browse everyone in the window, newest first, no similarity.
+    describing = [lw for lw in lower if lw and lw not in STOP_WORDS and lw not in ACTIVITY_WORDS]
+    if not describing:
+        text = ""
+    out.browse = not describing and not (out.top_colour or out.bottom_colour or out.vehicle_colour)
+    out.describes = any(w not in PERSON_WORDS | MALE_WORDS | FEMALE_WORDS and w not in VEHICLE_WORDS
+                        and w not in VEHICLE_TYPES for w in describing)
+    if not text:
+        text = {"vehicle": "a vehicle"}.get(out.object_class or "", "a person")
+    elif re.match(r"(?i)^(he|she|him|her|they|them)\b", text):
+        text = re.sub(r"(?i)^(he|she|him|her|they|them)\b", "person", text)   # "him in a red top"
+    elif out.object_class != "vehicle" and not any(w in PERSON_WORDS | MALE_WORDS | FEMALE_WORDS for w in lower):
+        # "red top, backpack" → "a person wearing a red top, backpack": SigLIP
+        # scores a person far better than a garment floating on its own.
+        wearing = any(w in COLOURS or w in TOP_WORDS | BOTTOM_WORDS for w in lower)
+        text = f"person {'wearing' if wearing else 'with'} {'a ' if not re.match(r'(?i)(a|an|the)\b', text) else ''}{text}"
+    if re.match(r"(?i)^(a|an) (photo|picture)", text):
+        out.text = text
+    elif re.match(r"(?i)^(a|an|the|some|someone|somebody|anyone|people|men|women|two|three)\b", text) or not re.match(r"[a-z]", text, re.I):
+        out.text = f"a photo of {text}"
+    else:
+        out.text = f"a photo of a {text}"
+    return out
+
+
+# Hindi place words people type next to an English camera name ("गेट 2" = "gate 2").
+HINDI_PLACES = {"गेट": "gate", "दरवाजा": "door", "दरवाज़ा": "door", "पार्किंग": "parking", "लॉबी": "lobby",
+                "मंजिल": "floor", "मंज़िल": "floor", "कैमरा": "camera", "रिसेप्शन": "reception", "ऑफिस": "office"}
+_PREP = r"(?:(?:at|on|in|inside|outside|near|around|by|from|of|to|into|towards|behind|in\s+front\s+of)\s+(?:the\s+)?)"
+# One-word place matches ("at reception") need a real place preposition: "on"/
+# "of"/"by"/"to" are too often part of a description ("talking on phone").
+_PREP_STRICT = r"(?:(?:at|in|inside|outside|near|around|from|into|towards|behind|in\s+front\s+of)\s+(?:the\s+)?)"
+_ROOM = r"(?:[\s\-_]+(?:the\s+)?(?:" + "|".join(sorted((re.escape(w) for w in ROOM_WORDS), key=len, reverse=True)) + r"))"
+_PREP_HI = r"(?:[\s,]*(?:के\s+पास|में|पर|से|के\s+अंदर|के\s+बाहर))"
+
+
+def _numbered(s: str) -> str:
+    """'gate no. 2', 'gate number 2', 'gate #2', 'गेट 2' → 'gate 2' (cameras are matched on that)."""
+    for hi, en in HINDI_PLACES.items():
+        s = re.sub(r"(?<![\wऀ-ॿ])" + re.escape(hi) + r"(?![\wऀ-ॿ])", en, s)
+    s = re.sub(r"(?i)(?<=[a-z\u0900-\u097f])\s*(?:no\.?|num\.?|number|#)\s*(?=\d)", " ", s)
+    return re.sub(r"#\s*(?=\d)", "", s)
+
+
+def _words(form: str) -> str:
+    """Whole-word pattern for a normalised form, tolerant to spacing, punctuation and leading zeros."""
+    return r"(?<![\wऀ-ॿ])" + r"[\s\-_]*0*".join(re.escape(p) for p in form.split(" ")) + r"(?![\wऀ-ॿ])"
+
+
+def _place_pattern(form: str) -> str:
+    """A camera form in the query, with any room word after it ("hr cabin",
+    "gate 2 area"). A very short name ("HR", "IT") counts only after a place word
+    ("at hr", "near hr") or before a room word ("hr cabin"), so the English "it"
+    never picks the IT camera."""
+    core = _words(form)
+    if len(form.replace(" ", "")) < 3:
+        return r"(?:" + _PREP + core + _ROOM + r"?|" + core + _ROOM + r"|" + core + _PREP_HI + r")"
+    return core + _ROOM + r"?"
+
+
+def _parse_cameras(t: _Text, cameras: Iterable[tuple[str, str | None, str | None]], out: ParsedQuery) -> None:
+    """Camera names in the query → camera chips. One phrase may name several
+    cameras ("gate 2" = "Gate 2 In" and "Gate 2 Out"): all of them are searched."""
+    forms: dict[str, set[str]] = {}                  # normalised form → camera ids
+    loose: dict[str, set[str]] = {}                  # one-word forms: need "at/in/near" unless a place word
+    labels: dict[str, str] = {}
+    for cid, code, name in cameras:
+        cid = str(cid)
+        labels[cid] = name or code or cid
+        for raw in (name, code):
+            if raw and len(_norm(raw)) >= 2:
+                forms.setdefault(_norm(raw), set()).add(cid)
+        toks = [w for w in _norm(name or "").split() if w not in GENERIC_CAMERA_WORDS]
+        # "Camera Gate2" is also just "gate 2", "Camera HR" just "hr", "HR Cabin"
+        # just "hr": drop generic and room words people leave out.
+        short = " ".join(toks)
+        if len(short) >= 2 and not short.replace(" ", "").isdigit():
+            forms.setdefault(short, set()).add(cid)
+        core = " ".join(w for w in toks if w not in ROOM_WORDS)
+        if core != short and len(core) >= 2 and not core.replace(" ", "").isdigit():
+            forms.setdefault(core, set()).add(cid)
+        # "gate 2" also finds "Main Gate 2 Entry": every run of 2+ words holding a number.
+        for i in range(len(toks)):
+            for j in range(i + 2, len(toks) + 1):
+                run = toks[i:j]
+                if any(w.isdigit() for w in run) and not all(w.isdigit() for w in run):
+                    forms.setdefault(" ".join(run), set()).add(cid)
+        # "at reception" finds "Reception Cam 01": a distinctive single word.
+        # Not for imported videos: their titles are sentences ("Phone video from
+        # security guard") whose words are also things people describe.
+        if str(code or "").startswith("file:"):
+            continue
+        for w in toks:
+            if len(w) >= 4 and not w.isdigit() and w not in COLOURS and w not in TOP_WORDS | BOTTOM_WORDS \
+                    and w not in PERSON_WORDS and w not in STOP_WORDS and w not in ACTIVITY_WORDS \
+                    and w not in ROOM_WORDS:
+                loose.setdefault(w, set()).add(cid)
+
+    def hit(ids: set[str]) -> None:
+        for cid in sorted(ids, key=lambda c: labels[c]):
+            if cid not in out.camera_ids:
+                out.camera_ids.append(cid)
+                out.chips.append(Chip("camera", labels[cid], cid))
+
+    # The whole search is a camera's name ("hr", "IT"): that camera.
+    whole = _norm(t.s)
+    if whole in forms:
+        t.take(r"^.*$")
+        hit(forms[whole])
+        return
+    for form in sorted(forms, key=len, reverse=True):     # longest first: "gate 3 exit" before "gate 3"
+        while t.take(_place_pattern(form)):
+            # An exact name wins: with "Gate" and "Gate 3", "gate" means "Gate".
+            # Only a word no camera is named exactly (below) spreads to every camera that has it.
+            hit(forms[form])
+    for word in sorted(loose, key=len, reverse=True):
+        if word in forms:
+            continue
+        # Never when a number follows: "gate 7" means gate 7, not every gate.
+        pattern = (_PREP_STRICT + "?" if word in PLACE_WORDS else _PREP_STRICT) + _words(word) + r"(?![\s\-_#]*\d)" + _ROOM + "?"
+        while t.take(pattern):
+            hit(loose[word])
+
+
+def _parse_unknown_places(t: _Text, cameras: list[tuple[str, str | None, str | None]], out: ParsedQuery) -> None:
+    """A place the person named that is none of their cameras ("gate 7", "at the
+    parking"): cut it out of the description and report it, with close camera
+    names. A search never quietly runs on every camera instead."""
+    import difflib
+
+    words = "|".join(sorted((re.escape(w) for w in PLACE_WORDS), key=len, reverse=True))
+    numbered = r"(?<![\wऀ-ॿ])" + _PREP + r"?(" + words + r")[\s\-_]*0*(\d{1,4}[a-z]?)(?![\wऀ-ॿ])"
+    bare = r"(?<![\wऀ-ॿ])" + _PREP + r"(" + words + r")()(?![\wऀ-ॿ])"
+    rooms = "|".join(sorted((re.escape(w) for w in ROOM_WORDS - {"camera", "cam", "cctv"}), key=len, reverse=True))
+    # "near accounts cabin" when no camera is called accounts: report "accounts cabin".
+    named_room = r"(?<![\wऀ-ॿ])" + _PREP + r"([a-z][\w\-]{1,24})\s+(" + rooms + r")(?![\wऀ-ॿ])"
+    names = [(name or code or "") for _cid, code, name in cameras]
+    lowered = {_norm(n): n for n in names if n}
+    for pattern in (numbered, named_room, bare):
+        while True:
+            m = t.take(pattern)
+            if not m:
+                break
+            place = f"{m.group(1).lower()} {m.group(2).lower()}".strip()
+            if place in out.unknown_places:
+                continue
+            out.unknown_places.append(place)
+            close = difflib.get_close_matches(place, list(lowered), n=3, cutoff=0.5)
+            same_word = [n for k, n in lowered.items() if m.group(1).lower() in k.split()]
+            out.suggestions[place] = list(dict.fromkeys([lowered[c] for c in close] + same_word))[:3]
+
+
+def _day_start(d: dt.datetime) -> dt.datetime:
+    return d.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _parse_time(t: _Text, now: dt.datetime, out: ParsedQuery) -> None:
+    day: dt.datetime | None = None
+    since = until = None
+    label_day = ""
+
+    # "last 2 hours", "past 30 min", "पिछले 2 घंटे"
+    m = t.take(r"(?:last|past|पिछले|पिछली)\s+(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|days?|घंटे|घंटा|मिनट|दिन)\b")
+    if m:
+        n, unit = int(m.group(1)), m.group(2).lower()
+        delta = (dt.timedelta(hours=n) if unit[0] in "hघ" else dt.timedelta(days=n) if unit[0] in "dद"
+                 else dt.timedelta(minutes=n))
+        out.since, out.until = now - delta, now
+        out.chips.append(Chip("time", f"Last {m.group(1)} {m.group(2)}", [out.since, out.until]))
+        return
+
+    m = t.take(r"(?:last|past|पिछले|पिछली|पिछला)\s+(hour|minute|min|day|week|घंटे|घंटा|मिनट|दिन|हफ्ते)\b")
+    if m:
+        unit = m.group(1).lower()
+        delta = {"h": dt.timedelta(hours=1), "घ": dt.timedelta(hours=1), "d": dt.timedelta(days=1), "द": dt.timedelta(days=1),
+                 "w": dt.timedelta(days=7), "ह": dt.timedelta(days=7)}.get(unit[0], dt.timedelta(minutes=1))
+        out.since, out.until = now - delta, now
+        out.chips.append(Chip("time", f"Last {unit}", [out.since, out.until]))
+        return
+
+    if t.take(r"\blast night\b|\bकल रात\b"):
+        y = _day_start(now) - dt.timedelta(days=1)
+        out.since, out.until = y.replace(hour=18), _day_start(now).replace(hour=6)
+        out.chips.append(Chip("time", "Last night", [out.since, out.until]))
+        return
+
+    if t.take(r"\byesterday\b|(?<!\S)कल(?!\S)"):
+        day, label_day = _day_start(now) - dt.timedelta(days=1), "Yesterday "
+    elif t.take(r"\btoday\b|(?<!\S)आज(?!\S)"):
+        day, label_day = _day_start(now), "Today "
+    else:
+        m = t.take(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+        if m:
+            day = now.replace(year=int(m.group(1)), month=int(m.group(2)), day=int(m.group(3)), hour=0, minute=0,
+                              second=0, microsecond=0)
+        else:
+            m = t.take(r"\b(\d{1,2})\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b")
+            if m:
+                mon = "janfebmaraprmayjunjulaugsepoctnovdec".index(m.group(2).lower()) // 3 + 1
+                day = _day_start(now).replace(month=mon, day=int(m.group(1)))
+                if day > now:
+                    day = day.replace(year=day.year - 1)
+        if day is not None:
+            label_day = day.strftime("%d %b ")
+
+    # Part of day: "morning", "evening", "सुबह", "शाम", "रात", "दोपहर"
+    parts = {r"\bmorning\b|सुबह": (6, 12), r"\bafternoon\b|दोपहर": (12, 17), r"\bevening\b|शाम": (17, 21),
+             r"\bnight\b|(?<!\S)रात(?!\S)": (21, 30)}
+    hint = None
+    for pat, (h1, h2) in parts.items():
+        if t.take(pat):
+            base = day or _day_start(now)
+            since, until = base + dt.timedelta(hours=h1), base + dt.timedelta(hours=h2)
+            hint = "pm" if h1 >= 12 else "am"
+            break
+
+    # Ranges: "1-4 pm", "1 to 4pm", "13:00-16:00", "between 1 and 4 pm", "1 से 4 बजे"
+    m = t.take(r"(?:between\s+)?" + _TIME + r"\s*(?:-|–|to|and|till|until|से)\s*" + _TIME + r"(?:\s*बजे)?")
+    if m:
+        h1, m1, ap1, h2, m2, ap2 = m.groups()
+        base = day or _day_start(now)
+        e = _hour(int(h2), int(m2 or 0), ap2, hint)
+        s = _hour(int(h1), int(m1 or 0), ap1 or (ap2 if int(h1) <= int(h2) else None), hint)
+        since, until = base.replace(hour=s[0], minute=s[1]), base.replace(hour=e[0], minute=e[1])
+        if until <= since:
+            until += dt.timedelta(days=1)
+    else:
+        m = t.take(r"\b(after|since|before|by|around|at)\s+" + _TIME + r"|" + _TIME + r"\s*बजे\s*(के बाद|से पहले)?")
+        if m:
+            g = m.groups()
+            word = (g[0] or ("after" if g[7] == "के बाद" else "before" if g[7] else "at")).lower()
+            hh, mm, ap = (g[1], g[2], g[3]) if g[1] else (g[4], g[5], g[6])
+            base = day or _day_start(now)
+            h, mi = _hour(int(hh), int(mm or 0), ap, hint)
+            at = base.replace(hour=h, minute=mi)
+            if word in ("after", "since"):
+                since, until = at, base + dt.timedelta(days=1)
+            elif word in ("before", "by"):
+                since, until = base, at
+            else:
+                since, until = at - dt.timedelta(minutes=30), at + dt.timedelta(minutes=30)
+
+    if since is None and day is not None:
+        since, until = day, day + dt.timedelta(days=1)
+    if since is None:
+        return
+    if day is None and since > now:            # "2-4 pm" said at 11 am means yesterday
+        since -= dt.timedelta(days=1)
+        until -= dt.timedelta(days=1)
+        label_day = "Yesterday "
+    out.since, out.until = since, min(until, max(now, since))
+    until = out.until           # the label says what is searched: "today" ends now, not at midnight
+    label = f"{label_day}{_fmt(since)} – {_fmt(until)}" if since.date() == (until - dt.timedelta(seconds=1)).date() \
+        else f"{label_day}{since:%d %b} {_fmt(since)} – {until:%d %b} {_fmt(until)}"
+    out.chips.append(Chip("time", label.strip(), [out.since, out.until]))
