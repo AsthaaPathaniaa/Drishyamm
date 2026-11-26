@@ -175,21 +175,50 @@ export function detectorCapacity(health, countingNow = 0) {
 }
 
 /**
- * What to say before ticking a camera the detector has no room for, or null
- * when there is room.
+ * The cameras holding the detector's slots right now, as the dialog lists them.
+ *
+ * This is the whole point of the change this function belongs to. The cap is
+ * not the operator's to raise -- the per-recorder half of it is PROTECTIVE,
+ * because entry NVRs stop answering past a few concurrent RTSP sessions and
+ * take every camera on them offline -- but WHICH cameras hold the slots is
+ * entirely theirs, and the page already knows. Offering the allocation instead
+ * of the cap gives them a real decision and never offers the dangerous one.
+ *
+ * Ordered as the registry gave them, so the list reads the same way twice.
+ *
+ * @param camList    `GET /ai/cameras` rows
+ * @param runningIds Set of monitorIds the detector is serving
+ * @param exclude    the camera being ticked, which is not a holder
+ */
+export function capacityHolders(camList = [], runningIds = new Set(), exclude = null) {
+  const skip = exclude?.monitorId || null;
+  return (Array.isArray(camList) ? camList : [])
+    .filter((c) => c?.monitorId && c.monitorId !== skip && runningIds.has(c.monitorId))
+    .map((c) => ({ id: c.id, monitorId: c.monitorId, name: c.name || c.monitorId }));
+}
+
+/**
+ * What to say before ticking a camera the detector has no room for.
  *
  * WARNS, it does not block. The tick is still meaningful: it is a standing
  * instruction, and the camera starts the moment another is turned off. Refusing
  * it would make the operator remember to come back.
  *
- * It says who to ask rather than offering a control, because the limit is a
- * server setting and the per-recorder half of it is PROTECTIVE -- entry NVRs
- * stop answering past a few concurrent RTSP sessions and take every camera
- * offline with them. A UI that offered to raise that would be offering to
- * break the site.
+ * THE PER-HOST CAP IS DELIBERATELY NOT MENTIONED. It used to be, in every
+ * instance of this dialog. But this dialog is raised from exactly one
+ * condition -- `atCapacity(detector)`, which is `counting >= max` -- so the
+ * TOTAL cap is always the one that stopped this camera, and the per-recorder
+ * cap never is. A true sentence about the limit that is not binding makes the
+ * limit that IS binding harder to read, and on a deployment using relay URLs
+ * the per-host cap does not apply at all.
+ *
+ * The "ask whoever runs this deployment" line is kept but demoted to a
+ * footnote, for the case where they genuinely need more capacity. It is a
+ * footnote and not an action because raising the cap can take an NVR down, and
+ * a dialog should only ever offer the safe decision.
  */
 export function capacityCopy(cam, detector = {}) {
-  const { max, perHost, counting } = detectorCapacity(
+  const { max, counting } = detectorCapacity(
     { max_streams: detector.max, max_streams_per_host: detector.perHost },
     detector.counting,
   );
@@ -198,10 +227,16 @@ export function capacityCopy(cam, detector = {}) {
     title: 'The detector is already full',
     body: `It counts up to ${max} cameras at once and is counting ${counting}. `
       + `${name} will be saved as "should be counted", but nothing will count it `
-      + `until one of the others is turned off.`
-      + (perHost ? ` (A single recorder is limited to ${perHost} at once, separately, `
-        + 'to stop it dropping every camera on it.)' : '')
-      + ' Raising the limit is a server setting — ask whoever runs this deployment.',
+      + 'until a slot frees up.',
+    /** The two things the operator can actually do, in the order to try them. */
+    choices: {
+      untick: 'Turn one of these off to make room:',
+      hours: `Or give ${name} different counting hours from one of them, so the two `
+        + 'share a slot. Sixteen cameras fit eight slots if they do not all want '
+        + 'the same hours.',
+    },
+    footnote: 'Raising the limit itself is a server setting — ask whoever runs this '
+      + 'deployment.',
     confirmLabel: 'Tick it anyway',
   };
 }

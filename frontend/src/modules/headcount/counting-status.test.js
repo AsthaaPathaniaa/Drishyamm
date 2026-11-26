@@ -14,7 +14,7 @@ import {
   andList, fixable, zonesPending,
   consentCopy, saveFailureSummary,
   AT_CAPACITY, atCapacity, detectorCapacity, capacityCopy,
-  OUTSIDE_HOURS, faults, paused,
+  OUTSIDE_HOURS, faults, paused, capacityHolders,
 } from './counting-status.js';
 
 // A camera the way GET /ai/cameras serialises one. `ai.enabled` + mode are the
@@ -367,18 +367,65 @@ test('a camera the detector IS counting reports nothing, full or not', () => {
   assert.equal(notCountingReason(cam(), true, DET), null);
 });
 
-test('the full-detector note names the limit, the count, and who to ask', () => {
+test('the full-detector note names the limit, the count, and the camera', () => {
   const copy = capacityCopy(cam({ name: 'Dock 9' }), DET);
   assert.match(copy.title, /already full/);
   assert.match(copy.body, /counts up to 8 cameras/);
   assert.match(copy.body, /is counting 8/);
   assert.match(copy.body, /Dock 9/);
   // It must say the tick is NOT lost — that is why warning beats refusing.
-  assert.match(copy.body, /until one of the others is turned off/);
-  // The per-recorder cap is protective, so it is explained, not offered.
-  assert.match(copy.body, /single recorder is limited to 4/);
+  assert.match(copy.body, /until a slot frees up/);
+});
+
+test('it does NOT mention the per-recorder cap, which is never what stopped it', () => {
+  // This dialog is raised from one condition: atCapacity(), i.e. counting >=
+  // max. So the TOTAL cap is always the binding one and the per-host cap never
+  // is. A true sentence about the limit that is not binding makes the limit
+  // that IS binding harder to read — and on a relay deployment the per-host
+  // cap does not apply at all.
+  const copy = capacityCopy(cam({ name: 'Dock 9' }), DET);
+  assert.doesNotMatch(copy.body, /recorder|per host|per-host/i);
+  assert.doesNotMatch(copy.choices.untick + copy.choices.hours, /recorder|per-host/i);
+});
+
+test('it offers the two decisions that ARE the operator\'s', () => {
+  const copy = capacityCopy(cam({ name: 'Dock 9' }), DET);
+  // Which cameras hold the slots is theirs; the cap is not.
+  assert.match(copy.choices.untick, /Turn one of these off/);
+  assert.match(copy.choices.hours, /different counting hours/);
+  assert.match(copy.choices.hours, /Dock 9/);
+});
+
+test('raising the cap is a footnote, never an action', () => {
+  const copy = capacityCopy(cam(), DET);
+  assert.match(copy.footnote, /ask whoever runs this deployment/);
+  // Raising it can take an NVR down, so it must never be offered as a button.
   assert.doesNotMatch(copy.body, /raise it here|increase the limit here/i);
-  assert.match(copy.body, /ask whoever runs this deployment/);
+  assert.doesNotMatch(copy.choices.untick + copy.choices.hours, /rais(e|ing) the limit/i);
+});
+
+test('capacityHolders lists who holds the slots, excluding the camera being ticked', () => {
+  const list = [
+    cam({ id: 'a', monitorId: 'm1', name: 'Reception' }),
+    cam({ id: 'b', monitorId: 'm2', name: 'Dock 1' }),
+    cam({ id: 'c', monitorId: 'm9', name: 'Dock 9' }),
+  ];
+  const held = capacityHolders(list, new Set(['m1', 'm2']), { monitorId: 'm9' });
+  assert.deepEqual(held.map((h) => h.name), ['Reception', 'Dock 1']);
+  assert.deepEqual(held.map((h) => h.id), ['a', 'b']);
+});
+
+test('capacityHolders never lists the camera being ticked, even if it is running', () => {
+  // Unticking the camera you are trying to tick is not an offer, it is a loop.
+  const list = [cam({ id: 'a', monitorId: 'm1', name: 'Reception' })];
+  assert.deepEqual(capacityHolders(list, new Set(['m1']), { monitorId: 'm1' }), []);
+});
+
+test('capacityHolders survives an empty or malformed list', () => {
+  assert.deepEqual(capacityHolders(), []);
+  assert.deepEqual(capacityHolders(null, new Set(['m1'])), []);
+  assert.deepEqual(capacityHolders([null, {}, { monitorId: 'm1' }], new Set(['m1'])),
+    [{ id: undefined, monitorId: 'm1', name: 'm1' }]);
 });
 
 test('the button says the tick still happens', () => {

@@ -39,6 +39,10 @@ export function ConfirmDialog({
   onOpenChange,
   title,
   description,
+  // Anything the question needs beyond a sentence -- a list of the things the
+  // operator can act on, typically. Optional, and every existing caller passes
+  // nothing, so a dialog without it is unchanged.
+  children,
   confirmLabel = 'Delete',
   cancelLabel = 'Cancel',
   tone = 'danger',
@@ -74,6 +78,8 @@ export function ConfirmDialog({
             </div>
           </div>
         </DialogHeader>
+
+        {children}
 
         {error && (
           <p className="rounded-lg border border-danger-line bg-danger-soft px-3 py-2 text-small font-medium text-danger-ink">

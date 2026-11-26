@@ -67,7 +67,7 @@ import {
   notCounting, notCountingReason, notCountingSummary, fixable, faults, paused,
   zonesPending, ZONE_PENDING_LABEL,
   consentCopy, saveFailureSummary,
-  detectorCapacity, atCapacity, capacityCopy,
+  detectorCapacity, atCapacity, capacityCopy, capacityHolders,
 } from './counting-status';
 
 const PAGE_DESCRIPTION =
@@ -576,7 +576,16 @@ export default function HeadCount() {
       {/* The detector has no room for another camera. A WARNING, not a
           refusal: the tick is a standing instruction and the camera starts the
           moment another is switched off, so refusing it would only make the
-          operator remember to come back. */}
+          operator remember to come back.
+
+          It also OFFERS something, which it did not before. The cap is not the
+          operator's to raise -- the per-recorder half of it is protective, and
+          a UI that offered to raise it would be offering to break the site --
+          but WHICH cameras hold the slots is entirely theirs, and this page
+          already knows. So the dialog lists the holders with an Untick beside
+          each, names the hours as the second way out, and leaves "ask whoever
+          runs this deployment" as a footnote rather than the only sentence
+          with anything to do in it. */}
       <ConfirmDialog
         cancelLabel="Cancel"
         confirmLabel={askingFull ? capacityCopy(askingFull, detector).confirmLabel : 'Tick it anyway'}
@@ -590,7 +599,28 @@ export default function HeadCount() {
         open={Boolean(askingFull)}
         title={askingFull ? capacityCopy(askingFull, detector).title : ''}
         tone="warning"
-      />
+      >
+        {askingFull ? (
+          <CapacityChoices
+            busy={Boolean(savingId)}
+            cam={askingFull}
+            copy={capacityCopy(askingFull, detector)}
+            holders={capacityHolders(camList, runningIds, askingFull)}
+            onUntick={async (holderId) => {
+              const holder = camList.find((c) => c.id === holderId);
+              const wanted_ = askingFull;
+              if (!holder || !wanted_) return;
+              setAskingFull(null);
+              // Free the slot, then do what was asked. `roomChecked` is true
+              // on the second call because the room was just made -- asking
+              // again would be asking about a limit the operator has already
+              // dealt with.
+              await toggleHeadcount(holder, false);
+              await toggleHeadcount(wanted_, true, false, true);
+            }}
+          />
+        ) : null}
+      </ConfirmDialog>
 
       {/* Asked before anything is sent, and again if a save is ever refused
           for want of an answer. One question, one place. */}
@@ -706,6 +736,42 @@ function FailureNote({ note, onDismiss }) {
  * Amber, not red: a camera deliberately taken out of AI is a legitimate state,
  * and the operator may simply have forgotten this page also depends on it.
  */
+/**
+ * The two decisions an operator has when the detector is full.
+ *
+ * Neither is "raise the cap": that is a server setting, and its per-recorder
+ * half exists to stop an NVR being asked for more concurrent streams than it
+ * can serve, which takes every camera on it offline. Both of these are safe.
+ */
+function CapacityChoices({ cam, copy, holders, onUntick, busy }) {
+  if (!holders.length) return null;
+  return (
+    <div className="rounded-xl border border-line bg-surface-sunken p-3">
+      <p className="mb-2 text-small font-semibold text-fg">{copy.choices.untick}</p>
+      <ul className="mb-3 flex flex-col gap-1">
+        {holders.map((h) => (
+          <li className="flex items-center justify-between gap-3" key={h.id || h.monitorId}>
+            <span className="min-w-0 truncate text-small text-fg-secondary">{h.name}</span>
+            <button
+              className="shrink-0 rounded-lg border border-line px-2 py-1 text-small font-medium text-fg hover:border-brand hover:text-brand disabled:opacity-60"
+              disabled={busy}
+              onClick={() => onUntick(h.id)}
+              type="button"
+            >
+              Untick
+            </button>
+          </li>
+        ))}
+      </ul>
+      <p className="text-small text-fg-muted">{copy.choices.hours}</p>
+      <p className="mt-1 text-small text-fg-muted">
+        Set them on {cam?.name || 'the camera'}&#x27;s own card, behind the clock.
+      </p>
+      <p className="mt-2 text-[11px] leading-relaxed text-fg-subtle">{copy.footnote}</p>
+    </div>
+  );
+}
+
 /**
  * The cameras that are off duty by their own counting hours.
  *
