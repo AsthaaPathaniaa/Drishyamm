@@ -74,7 +74,11 @@ export function gatePurpose(row) {
  * setting the camera already had is carried, not reset to a default.
  */
 export function enableAiPayload(row) {
-  return buildEnablePayload(row, { purpose: gatePurpose(row) });
+  // `faceRecognition: true` is deliberate and not a default. Footfall
+  // counting runs inside the FACE pipeline, so a gate without it counts
+  // nothing -- this is the one caller for which true is the answer on its
+  // merits rather than on what the camera happened to have.
+  return buildEnablePayload(row, { purpose: gatePurpose(row), faceRecognition: true });
 }
 
 /**

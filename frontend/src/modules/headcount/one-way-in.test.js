@@ -1,31 +1,39 @@
 /**
- * There is ONE way to switch a camera's AI on from this module, and this test
- * is what keeps it that way.
+ * This module asks before it switches a camera's AI on, and these tests are
+ * what keep that promise.
  *
- * WHY A TEST ABOUT IMPORTS
+ * WHAT USED TO BE HERE, AND WHY IT IS NOT
  *
- * The worst defect in this feature was not a wrong value, it was two routes to
- * the same outcome. The consent dialog promised, in so many words, "faces are
- * not matched, and no other AI feature is started". The repair button two
- * inches away went through the per-camera LIFECYCLE route with
- * `buildEnablePayload`, which carries `faceRecognition: ai.faceRecognition
- * !== false` -- TRUE for a camera that has never been configured. So the
- * button started face recognition and spent a face licence, while the dialog
- * promised the opposite. Both call sites were individually correct. Nothing
- * was testing that they agreed.
+ * The consent dialog promises, in so many words, "faces are not matched, and
+ * no other AI feature is started". The repair button two inches away went
+ * through the per-camera LIFECYCLE route with `buildEnablePayload`, which
+ * carried `faceRecognition: ai.faceRecognition !== false` -- TRUE for a camera
+ * that had never been configured. So the button started face recognition and
+ * spent a face licence while the dialog promised the opposite.
  *
- * Fixing the button fixed that instance. It did not stop the next person
- * reaching for the obvious helper, because the only thing standing in the way
- * was a comment. So:
+ * This file used to guard that by READING SOURCE TEXT: it scanned every file
+ * in the module for `buildEnablePayload` and `updateCameraAiLifecycle` and
+ * failed if either appeared. It was honest about its own cost -- blind to a
+ * re-export, a dynamic import, or a helper in another module calling on this
+ * module's behalf -- and both of those blind spots turned out to be real:
+ * ZoneSetup hands `buildEnablePayload` to zone-detector as `buildPayload`,
+ * which calls it later, and a text scan could never have seen it.
  *
- *   The master AI switch is turned on from this module through ONE door --
- *   aiService.setHeadcount with `enableAi: true` -- which is the endpoint that
- *   applies masterOnForFeature: master on, face explicitly off, nothing else
- *   started. Reaching for the lifecycle route here fails this test.
+ * So the rule moved into the function. `buildEnablePayload` now THROWS unless
+ * the caller states `faceRecognition`, which no re-export or indirect call can
+ * walk past, and the proof lives beside it in core/services/aiCamera.test.js.
+ * The scan is gone rather than kept alongside: a source-text test maintained
+ * for a rule it no longer protects is worse than no test, because it still
+ * fails on a rename and still looks like the guard.
  *
- * It is a source-text test, which is unusual and deliberate: the rule is about
- * which code may exist, not about what a function returns, and there is no
- * value to assert. The cost of that is listed at the bottom.
+ * WHAT REMAINS, AND WHY
+ *
+ * Consent is a different promise from the face flag, and nothing enforces it
+ * but these two assertions: that `enableAi: true` is sent from at most the two
+ * places entitled to send it, and that it is still sent from somewhere at all.
+ * They are source-text tests for the same reason as before -- the rule is
+ * about which code may exist -- and that trade is still worth making here,
+ * because there is no value to assert and no signature to put it in.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -50,39 +58,6 @@ function sources() {
 //
 // `buildEnablePayload` is its body builder, and is the specific thing that
 // made the promise false.
-const FORBIDDEN = [
-  {
-    needle: 'updateCameraAiLifecycle',
-    why: 'the Camera Setup lifecycle route decides the face flag from stored '
-      + 'settings, where ABSENT MEANS ON — so it starts face recognition on a '
-      + 'camera that has never been configured, and spends a face licence. '
-      + 'Use aiService.setHeadcount({ enableAi: true }).',
-  },
-  {
-    needle: 'buildEnablePayload',
-    why: 'it carries `faceRecognition: ai.faceRecognition !== false`, which is '
-      + 'true for an unconfigured camera. This is the exact line that made the '
-      + 'consent dialog\'s promise false. Use aiService.setHeadcount({ enableAi: true }).',
-  },
-];
-
-test('no file in this module reaches for the lifecycle route', () => {
-  const offences = [];
-  for (const { file, text } of sources()) {
-    for (const { needle, why } of FORBIDDEN) {
-      // Comments are allowed to NAME it — the fix's own comment explains why
-      // the lifecycle route was wrong, and that explanation is worth keeping.
-      // Only real code counts, so comment lines are stripped first.
-      const code = text
-        .split('\n')
-        .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
-        .join('\n');
-      if (code.includes(needle)) offences.push(`${file} uses ${needle}: ${why}`);
-    }
-  }
-  assert.deepEqual(offences, [], `\n${offences.join('\n\n')}\n`);
-});
-
 test('and the one door it does use is the head-count endpoint with consent', () => {
   // The positive half. Without it, deleting the only correct call site would
   // leave the test above passing on a module that cannot switch AI on at all.
@@ -105,17 +80,15 @@ test('the module asks before it consents — the dialog is not bypassed', () => 
 });
 
 /*
- * WHAT THIS TEST COSTS, SO THE NEXT PERSON CAN JUDGE IT
+ * WHAT THESE TESTS COST, SO THE NEXT PERSON CAN JUDGE THEM
  *
- * It reads source text, so it is blind to anything indirect: a re-export, a
- * dynamic import, a helper in another module that calls the lifecycle route on
- * this module's behalf. It is a tripwire on the obvious mistake, not a proof.
+ * They read source text, so they are blind to anything indirect, and they fail
+ * if the files are renamed. That is the intended trade for the consent rule:
+ * it is about which code may exist, there is no return value to assert, and no
+ * function signature to hide it in -- unlike the face flag, which had one and
+ * now uses it.
  *
- * It also fails if the files are renamed, which is the intended trade: the rule
- * should be re-read when the module is restructured, not silently carried over.
- *
- * If this module ever legitimately needs the lifecycle route -- to switch AI
- * OFF, say, which has none of these problems -- add the call and the exemption
- * in the same commit, with the reason. Deleting the test to make it pass is
- * deleting the only thing holding the promise up.
+ * If this module ever legitimately needs a third place to send `enableAi`,
+ * raise the count and say why in the same commit. Deleting the assertion to
+ * make it pass is deleting the only thing holding the promise up.
  */

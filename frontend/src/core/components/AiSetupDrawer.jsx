@@ -440,5 +440,8 @@ function draftFromCamera(camera) {
   // settings.headcount and has its own route -- so it is stripped before save
   // and sent separately. It rides in the draft so the row has somewhere to put
   // the toggle's state.
-  return { ...buildEnablePayload(camera), headcountEnabled: camera?.headcount?.enabled === true };
+  return {
+    ...buildEnablePayload(camera, { faceRecognition: camera?.ai?.faceRecognition !== false }),
+    headcountEnabled: camera?.headcount?.enabled === true,
+  };
 }

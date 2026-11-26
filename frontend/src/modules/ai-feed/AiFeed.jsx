@@ -297,7 +297,12 @@ export default function AiFeed() {
   // the same body. Zones are only sent where AI Feed edits them.
   const lifecyclePayload = (camera, ai, enabled) => {
     const row = { name: camera.name, groupName: camera.groupName, ai };
-    return enabled ? buildEnablePayload(row) : buildDisablePayload(row);
+    // `faceRecognition` is stated, not defaulted. This control means "use
+    // this camera for AI", and on this page that has always included faces;
+    // what changed is that the payload now has to say so out loud.
+    return enabled
+      ? buildEnablePayload(row, { faceRecognition: row?.ai?.faceRecognition !== false })
+      : buildDisablePayload(row);
   };
 
   const ensureCameraLifecycle = useCallback(async (monitorId) => {

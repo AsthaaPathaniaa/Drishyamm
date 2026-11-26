@@ -107,6 +107,31 @@ export function inferPurpose(row) {
  * an area drawn in AI Feed.
  */
 export function buildEnablePayload(row, overrides = {}) {
+  // `faceRecognition` MUST be stated. It used to default to
+  // `ai.faceRecognition !== false` -- absent means ON -- so a caller that had
+  // not thought about faces started the face pipeline on a camera nobody had
+  // configured and spent a face licence. That is not hypothetical: it is how
+  // the head-count repair button came to contradict the consent dialog beside
+  // it, and how turning on body detection for a zone came to switch face
+  // recognition on as well. Two instances, months apart, same default.
+  //
+  // A required argument is the only guard that survives the indirect call.
+  // modules/headcount/one-way-in.test.js guarded this by reading source text
+  // and said so about itself: blind to a re-export, a dynamic import, or a
+  // helper in another module calling on its behalf. Both of those existed --
+  // ZoneSetup hands this function to zone-detector as `buildPayload`, which
+  // calls it later -- so the text scan could not have caught either.
+  //
+  // The key is the payload's own name rather than a shorter alias, because
+  // two names for one flag is the defect this guard exists to prevent.
+  if (overrides.faceRecognition !== true && overrides.faceRecognition !== false) {
+    throw new Error(
+      'buildEnablePayload: state `faceRecognition` explicitly. Absent used to mean ON, '
+      + 'so a caller that did not decide about faces started the face pipeline and spent '
+      + 'a licence. Pass true, false, or the camera\'s current value '
+      + '(`row.ai.faceRecognition !== false`) if you mean to preserve it.',
+    );
+  }
   const ai = row?.ai || {};
   return {
     enabled: true,
@@ -115,10 +140,10 @@ export function buildEnablePayload(row, overrides = {}) {
     detectionInputSize: Number(ai.detectionInputSize) || DEFAULT_INPUT_SIZE,
     purpose: ai.purpose || inferPurpose(row),
     priority: ai.priority || 'normal',
-    // Absent means on, so a camera saved before this flag existed keeps
-    // recognising faces. `enabled` above is the MASTER -- "use this camera for
-    // AI" -- and this is the face feature under it.
-    faceRecognition: ai.faceRecognition !== false,
+    // Always overwritten by `overrides` below, which is now required to carry
+    // it. Kept as the documented shape of the payload rather than deleted, so
+    // the object literal still reads as the whole body being sent.
+    faceRecognition: overrides.faceRecognition,
     unknownAlerts: ai.unknownAlerts !== false,
     watchlistAlerts: ai.watchlistAlerts !== false,
     journeyMapping: ai.journeyMapping !== false,
@@ -142,7 +167,15 @@ export function faceRecognitionOn(row) {
 
 /** The lifecycle body that switches AI OFF, keeping the stored choices. */
 export function buildDisablePayload(row) {
-  return { ...buildEnablePayload(row), enabled: false, mode: 'off' };
+  // Supplies `faceRecognition` itself so that switching AI OFF never became
+  // harder than switching it on. It is the camera's current setting, which is
+  // what preserves every stored choice across an off/on cycle -- the
+  // behaviour an operator expects, and the reason this function exists.
+  return {
+    ...buildEnablePayload(row, { faceRecognition: row?.ai?.faceRecognition !== false }),
+    enabled: false,
+    mode: 'off',
+  };
 }
 
 const hasDrawn = (list) => Array.isArray(list) && list.some((z) => z && z.enabled !== false);

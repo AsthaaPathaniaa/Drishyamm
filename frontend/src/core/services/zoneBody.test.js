@@ -77,11 +77,11 @@ test('the other flag still reads absent as ON, which is the whole contrast', () 
 });
 
 test('the enable payload defaults it to false and carries a true through', () => {
-  assert.equal(buildEnablePayload(row()).zoneBodyDetection, false);
-  assert.equal(buildEnablePayload(row({ zoneBodyDetection: true })).zoneBodyDetection, true);
+  assert.equal(buildEnablePayload(row(), { faceRecognition: true }).zoneBodyDetection, false);
+  assert.equal(buildEnablePayload(row({ zoneBodyDetection: true }), { faceRecognition: true }).zoneBodyDetection, true);
   // An override wins, which is what the zone editor's inline switch sends.
   assert.equal(
-    buildEnablePayload(row(), { zoneBodyDetection: true }).zoneBodyDetection,
+    buildEnablePayload(row(), { zoneBodyDetection: true, faceRecognition: true }).zoneBodyDetection,
     true,
   );
 });
