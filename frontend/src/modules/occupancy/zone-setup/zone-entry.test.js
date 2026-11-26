@@ -17,7 +17,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  zoneEntry, USE_FACE, USE_BODY, hasProducer,
+  zoneEntry, applyZoneEntry, USE_FACE, USE_BODY, hasProducer,
 } from './zone-detector.js';
 
 /** A camera's GET /ai/cameras row. AI on, face on, body off by default. */
@@ -82,8 +82,21 @@ test('body is offered FIRST and marked for lockout', () => {
   assert.equal(second.id, USE_FACE);
 });
 
-test('with no camera name it still reads as a sentence', () => {
-  assert.match(zoneEntry(anonymous()).title, /Nothing is detecting people on this camera/);
+test('a camera is named by its own row, and falls back to a sentence', () => {
+  // The row carries the name, so the caller does not have to pass one.
+  assert.match(zoneEntry(anonymous()).title, /Nothing is detecting people on Server room/);
+  // Nothing knows what it is called: still a sentence, not a blank or an id.
+  assert.match(
+    zoneEntry({ id: 'c9', ai: { enabled: true, faceRecognition: false } }).title,
+    /Nothing is detecting people on this camera/,
+  );
+});
+
+test('the operator\'s own label wins over the row name when one is given', () => {
+  // ZoneSetup resolves a monitor id to the label shown in the rail and the
+  // canvas bar. The dialog must name the camera the same way the page does.
+  const entry = zoneEntry([anonymous()], () => 'Loading bay (east)');
+  assert.match(entry.title, /Loading bay \(east\)/);
 });
 
 test('a missing row is treated as having no producer, not as fine', () => {
@@ -144,4 +157,200 @@ test('what each option promises matches what it sets', () => {
       );
     }
   }
+});
+
+// ── the whole zone, not one camera ─────────────────────────────────────────
+//
+// A zone writes its counting config to EVERY camera it is drawn on (`touched`
+// in room-settings' saveRoom), and the master AI switch gates that write. So
+// checking only the camera the operator happened to be looking at let a
+// three-camera zone sail through the door and die at the save -- which is the
+// exact round trip this dialog exists to prevent, one camera along.
+
+test('a zone whose every camera has a producer asks nothing', () => {
+  assert.equal(zoneEntry([cam(), cam({ zoneBodyDetection: true })]), null);
+});
+
+test('an empty camera list asks nothing — a zone with no cameras is not this question', () => {
+  // The editor reports "this zone has no camera" itself; answering it with a
+  // detector dialog would be the wrong question about a real problem.
+  assert.equal(zoneEntry([]), null);
+});
+
+test('one bad camera in a three-camera zone is caught, and only it is named', () => {
+  const rows = [
+    cam({}),                                                   // fine
+    { id: 'c2', name: 'Vault', ai: { enabled: false } },        // master off
+    cam({ zoneBodyDetection: true }),                           // fine
+  ];
+  const entry = zoneEntry(rows);
+  assert.ok(entry, 'the zone cannot be carried, so it must ask');
+  // The cameras that are already fine are NOT in the dialog: changing them
+  // would be switching detectors on nobody asked about.
+  assert.deepEqual(entry.cameras.map((c) => c.name), ['Vault']);
+  assert.match(entry.title, /Vault is not being used by AI yet/);
+});
+
+test('two blocked cameras are ONE dialog that names both', () => {
+  const entry = zoneEntry([
+    { id: 'c1', name: 'Dock', ai: { enabled: true, faceRecognition: false } },
+    { id: 'c2', name: 'Gate', ai: { enabled: true, faceRecognition: false } },
+  ]);
+  assert.equal(entry.code, 'no-detector');
+  assert.match(entry.body, /both off on Dock and Gate/);
+  // The count is said, so "all of them" is never ambiguous.
+  assert.match(entry.body, /applied to all 2/);
+  assert.match(entry.title, /2 of this zone's cameras/);
+  assert.equal(entry.cameras.length, 2);
+});
+
+test('three are listed as a person would write them', () => {
+  const entry = zoneEntry(['Dock', 'Vault', 'Gate'].map((name, i) => ({
+    id: `c${i}`, name, ai: { enabled: true, faceRecognition: false },
+  })));
+  assert.match(entry.body, /Dock, Vault and Gate/);
+});
+
+test('one camera with AI off among several makes it the AI-off question', () => {
+  // Mixed: one needs the master switch, one only needs a detector. The master
+  // is the bigger fact, and the wording has to cover both without claiming
+  // every camera is off.
+  const entry = zoneEntry([
+    { id: 'c1', name: 'Dock', ai: { enabled: true, faceRecognition: false } },
+    { id: 'c2', name: 'Vault', ai: { enabled: false, mode: 'off' } },
+  ]);
+  assert.equal(entry.code, 'ai-off');
+  assert.match(entry.body, /switches AI on where it is off/);
+  assert.match(entry.body, /Dock and Vault/);
+  assert.equal(entry.cameras.length, 2);
+});
+
+test('a single row still works, because the door only ever has one', () => {
+  // The side panel's "Draw a zone" gates the camera the drawer is open on.
+  const entry = zoneEntry(cam({ faceRecognition: false }));
+  assert.equal(entry.code, 'no-detector');
+  assert.equal(entry.cameras.length, 1);
+});
+
+test('no option asks the backend for consent — this dialog IS the consent', () => {
+  // The lifecycle route may switch the master on because the operator is
+  // choosing here. `enableAi` is the head-count route's retry flag and has no
+  // business in this payload; a stray one would be a second, quieter way to
+  // turn AI on.
+  for (const option of zoneEntry(anonymous()).options) {
+    assert.equal('enableAi' in option.overrides, false, `${option.id} must not send enableAi`);
+  }
+});
+
+test('the face option no longer recommends a mode that cannot be chosen', () => {
+  // `allow-list` is `unavailable` in access-data.js: with a nameless body box
+  // it excuses nobody, so the mode is not offered. A hint pointing at it would
+  // point an operator at a choice the editor does not let them make.
+  const face = zoneEntry(anonymous()).options.find((o) => o.id === USE_FACE);
+  assert.equal(face.recommendedFor, undefined);
+  // Body keeps its hint: strict lockout IS selectable, and is the case where
+  // the wrong detector means a zone that misses the person it was drawn for.
+  const body = zoneEntry(anonymous()).options.find((o) => o.id === USE_BODY);
+  assert.equal(body.recommendedFor, 'lockout');
+});
+
+// ── applying the answer to every camera it named ───────────────────────────
+
+/** Records what the lifecycle route was asked for, per camera. */
+const recorder = (behaviour = () => ({})) => {
+  const calls = [];
+  return {
+    calls,
+    buildPayload: (row, overrides) => ({ forCamera: row.id, ...overrides }),
+    enableCamera: async (id, payload) => {
+      calls.push({ id, payload });
+      return behaviour(id);
+    },
+  };
+};
+
+const twoBlocked = () => zoneEntry([
+  { id: 'c1', name: 'Dock', ai: { enabled: true, faceRecognition: false } },
+  { id: 'c2', name: 'Gate', ai: { enabled: false, mode: 'off' } },
+]);
+
+test('the choice is applied to EVERY camera the dialog named', () => {
+  const entry = twoBlocked();
+  const option = entry.options.find((o) => o.id === USE_BODY);
+  const api = recorder();
+
+  return applyZoneEntry({ entry, option, ...api }).then((res) => {
+    assert.deepEqual(api.calls.map((c) => c.id), ['c1', 'c2']);
+    // Each camera gets the option's overrides, built against its OWN row.
+    for (const call of api.calls) {
+      assert.equal(call.payload.faceRecognition, false);
+      assert.equal(call.payload.zoneBodyDetection, true);
+      assert.equal(call.payload.enabled, true);
+      assert.equal(call.payload.forCamera, call.id);
+    }
+    assert.equal(res.failed.length, 0);
+    assert.equal(res.applied.length, 2);
+    assert.equal(res.note, '');
+  });
+});
+
+test('one camera failing does not leave the others unchanged', async () => {
+  // Stopping at the first failure would switch one camera on, leave the rest
+  // off, and report neither -- the worst of the three outcomes.
+  const entry = twoBlocked();
+  const api = recorder((id) => {
+    if (id === 'c1') throw new Error('the camera is unreachable');
+    return {};
+  });
+
+  const res = await applyZoneEntry({ entry, option: entry.options[0], ...api });
+  assert.deepEqual(api.calls.map((c) => c.id), ['c1', 'c2']);
+  assert.deepEqual(res.applied.map((a) => a.name), ['Gate']);
+  assert.deepEqual(res.failed, [{ name: 'Dock', why: 'the camera is unreachable' }]);
+  // The note names the camera and the reason, and says the drawing is safe.
+  assert.match(res.note, /^Dock could not be changed: the camera is unreachable\./);
+  assert.match(res.note, /nothing is lost/);
+});
+
+test('the server\'s own sentence is what the operator is shown', async () => {
+  const entry = twoBlocked();
+  const api = recorder(() => {
+    const err = new Error('Request failed');
+    err.response = { data: { message: 'Your face recognition licence is used up.' } };
+    throw err;
+  });
+  const res = await applyZoneEntry({ entry, option: entry.options[0], ...api });
+  // Both failed for ONE reason: said once, with both cameras named.
+  assert.match(res.note, /Dock and Gate could not be changed: Your face recognition licence is used up\./);
+});
+
+test('a camera missing from the AI registry is reported, not skipped silently', async () => {
+  const entry = zoneEntry([{ name: 'Nowhere', ai: { enabled: false } }]);
+  const api = recorder();
+  const res = await applyZoneEntry({ entry, option: entry.options[0], ...api });
+  assert.deepEqual(api.calls, [], 'there is no camera id to call with');
+  assert.match(res.note, /Nowhere could not be changed: it is not in the AI camera list/);
+});
+
+test('a flag saved but a camera not started is a notice, not a failure', async () => {
+  // The setting is right and the service retries, so the zone is not refused
+  // -- but nothing is detected until it starts, so it is said.
+  const entry = zoneEntry([{ id: 'c1', name: 'Dock', ai: { enabled: true, faceRecognition: false } }]);
+  const api = recorder(() => ({ reconcile: { ok: false, error: 'the AI service timed out' } }));
+  const res = await applyZoneEntry({ entry, option: entry.options[0], ...api });
+  assert.equal(res.failed.length, 0);
+  assert.equal(res.applied.length, 1);
+  assert.match(res.notices[0], /Dock: saved, but the AI service did not start it \(the AI service timed out\)/);
+});
+
+test('applying never throws, whatever the API does', async () => {
+  const entry = twoBlocked();
+  const api = recorder(() => { throw new Error('boom'); });
+  const res = await applyZoneEntry({ entry, option: entry.options[0], ...api });
+  assert.equal(res.failed.length, 2);
+  // And called with nothing at all it still answers rather than crashing the
+  // dialog the operator is looking at.
+  const empty = await applyZoneEntry({});
+  assert.deepEqual(empty.applied, []);
+  assert.deepEqual(empty.failed, []);
 });

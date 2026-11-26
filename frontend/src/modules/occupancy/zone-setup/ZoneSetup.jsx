@@ -85,7 +85,10 @@ import { defaultRoom, removeRoom, saveRoom } from '../room-settings';
 import {
   boundaryOn, colorsOnCamera, hasShape, newZoneId, zoneProblems, zonesOnCamera,
 } from '../zone-model';
-import { enableBodyDetection, zoneDetectorProblem } from './zone-detector';
+import {
+  applyZoneEntry, enableBodyDetection, zoneDetectorProblem, zoneEntry,
+} from './zone-detector';
+import { ZoneDetectorDialog } from '@/core/components/ZoneDetectorDialog';
 import ZoneRail from './ZoneRail';
 import CanvasBar from './CanvasBar';
 import { ZoneIdentityFields } from './StepBehaviour';
@@ -538,6 +541,10 @@ function ZoneEditorPage({
   // camera's area when they did: the same empty array also means "the camera's
   // shape had not loaded when this opened", and that must not wipe it.
   const [boundaryEdited, setBoundaryEdited] = useState(false);
+  // The cameras on this zone that nothing is watching yet, held while the
+  // operator answers which detector they should use. The save that raised the
+  // question resumes once they have.
+  const [zoneGate, setZoneGate] = useState(null);
 
   const dirty = JSON.stringify(draft) !== baseline;
   // An entry line moved but not saved is unsaved work too.
@@ -671,7 +678,7 @@ function ZoneEditorPage({
     if (res.status === 'turned-on') await onRefreshRegistry?.();
   };
 
-  const save = async () => {
+  const save = async ({ detectorChosen = false, carried = [] } = {}) => {
     const problems = zoneProblems(draft, saved, nameOf);
     // A zone cannot be ARMED on a camera with nothing detecting people: the
     // backend refuses it with a 409, and an operator should never have to send
@@ -685,6 +692,34 @@ function ZoneEditorPage({
       setResult({ blocked: problems });
       return;
     }
+
+    // The camera whose master AI switch is off is the one the check above
+    // deliberately passes over -- AI off is the operator's own choice, not a
+    // detector fault. But this save writes counting config to every camera the
+    // zone is drawn on (room-settings' `pushCameras`), and that write is
+    // refused for a camera with AI off. Until now it was refused one camera at
+    // a time, after the zone itself had been stored, and came back as "a camera
+    // still has the old boundary and limit".
+    //
+    // So it is asked here instead, once, for all of them -- and answering it
+    // switches the master on, which is why the counting write afterwards is no
+    // longer refused.
+    //
+    // Only the zone's OWN cameras. A camera being REMOVED from the zone is
+    // written to as well (`touched` in saveRoom), but asking an operator to
+    // switch AI on for a camera they are taking this zone off would be the
+    // wrong question about the right event.
+    if (!detectorChosen) {
+      const gate = zoneEntry(
+        (draft.cameras || []).map((m) => camByMonitor[m]).filter(Boolean),
+        (row) => nameOf(row.monitorId),
+      );
+      if (gate) {
+        setZoneGate(gate);
+        return;
+      }
+    }
+
     setSaving(true);
     setResult(null);
     const res = await saveRoom({
@@ -700,7 +735,13 @@ function ZoneEditorPage({
       cameraName: nameOf,
     });
     setSaving(false);
-    setResult(res);
+    // Anything the detector dialog had to report comes out HERE, with the save
+    // it interrupted, rather than in the drawer it was asked from -- a camera
+    // whose flag saved but which the AI service did not start is a fact about
+    // this save, and the drawer may well be shut by now.
+    setResult(carried.length
+      ? { ...res, error: [res.error, ...carried].filter(Boolean).join(' ') }
+      : res);
     setBoundaryEdited(false);
     // The server id comes back on the first save. Without it in the draft the
     // next save would create a second copy of this zone instead of updating it.
@@ -719,6 +760,7 @@ function ZoneEditorPage({
   const remove = () => onAskDelete({ id: draft.id, name: draft.name || zone.label, cameras: draft.cameras });
 
   return (
+    <>
     <OperationsPage>
       <SetupHeader
         onCancel={onCancel}
@@ -761,7 +803,7 @@ function ZoneEditorPage({
                 dirty ? 'ring-2 ring-brand/35 ring-offset-1 ring-offset-surface' : ''
               }`}
               disabled={saving}
-              onClick={save}
+              onClick={() => save()}
               title={dirty ? 'This zone has unsaved changes' : 'Everything on this zone is saved'}
               type="button"
             >
@@ -944,6 +986,38 @@ function ZoneEditorPage({
         />
       </PageContent>
     </OperationsPage>
+
+    {/* Which detector should watch the cameras this zone is drawn on. Asked
+        by the save, and the save finishes itself once it is answered -- the
+        operator pressed Save, so the question is an interruption, not a
+        replacement for what they asked for. */}
+    <ZoneDetectorDialog
+      entry={zoneGate}
+      onChoose={async (option) => {
+        const res = await applyZoneEntry({
+          entry: zoneGate,
+          option,
+          buildPayload: buildEnablePayload,
+          enableCamera: (id, payload) => aiService.updateCameraAiLifecycle(id, payload),
+          nameOf: (row) => nameOf(row.monitorId),
+        });
+        // Thrown, because that is how the dialog stays open and shows why. A
+        // camera that did not change is a camera whose half of the zone still
+        // cannot fire, so saving the zone now would be saving a known lie.
+        if (res.failed.length) throw new Error(res.note);
+        // Re-read, so the editor's own warnings stop describing a camera that
+        // has just changed underneath them.
+        await onRefreshRegistry?.();
+        setZoneGate(null);
+        // The cameras were switched on a moment ago and the registry in this
+        // closure is still the old one, so the gate is not asked again -- it
+        // would ask about cameras it has already fixed.
+        await save({ detectorChosen: true, carried: res.notices });
+      }}
+      onOpenChange={(open) => { if (!open) setZoneGate(null); }}
+      open={Boolean(zoneGate)}
+    />
+    </>
   );
 }
 
