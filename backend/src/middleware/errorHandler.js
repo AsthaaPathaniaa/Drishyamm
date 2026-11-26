@@ -56,9 +56,19 @@ const errorHandler = (err, req, res, next) => {
   const safeMessage = statusCode >= 500 && !(err instanceof AppError && err.expose === true)
     ? 'Internal Server Error' : message;
 
+  // A machine-readable reason, for the few refusals a client must act on
+  // differently from other refusals of the same status -- without it a UI ends
+  // up matching on English prose, which a copy edit silently breaks. Only
+  // present when the thrower set one, and never on a 5xx: an internal error's
+  // code is as much of a leak as its message.
+  const code = statusCode < 500 && typeof err.code === 'string' && err.isOperational
+    ? err.code
+    : undefined;
+
   res.status(statusCode).json({
     success: false,
     message: safeMessage,
+    ...(code ? { code } : {}),
   });
 };
 

@@ -378,6 +378,104 @@ describe('headcountCameras', () => {
     expect(monitorsOf(await headcountCameras())).toEqual(['cam-a']);
   });
 
+  /* ─────────────── counting hours: the only control that SAVES ───────────
+   *
+   * Every other per-camera setting spends something. This one stops the model
+   * for the hours nobody is there, and it works by DROPPING THE CAMERA FROM
+   * THIS LIST: the detector reconciles its workers to whatever comes back
+   * (manager.reconcile stops the ones that have gone), so a camera that falls
+   * out has its decode and its YOLO worker stopped within one poll, and gives
+   * its stream slot back.
+   *
+   * Which makes these the tests that decide whether the feature saves anything
+   * at all. A window honoured in the UI and ignored here would be a schedule
+   * that costs exactly as much as no schedule -- and would look correct on
+   * screen, which is the shape of every other bug found in this feature.
+   */
+  describe('counting hours', () => {
+    const clockAt = (hh, mm = 0) => {
+      jest.useFakeTimers().setSystemTime(new Date(Date.UTC(2026, 10, 23, hh, mm, 0)));
+    };
+    afterEach(() => jest.useRealTimers());
+
+    /** Ticked for counting, with hours. ALERT_TIMEZONE is UTC for this file. */
+    const hc = (over) => ({ ai: { enabled: true, mode: 'continuous' }, headcount: over });
+    const withHours = (monitorId, from, to) => counting(monitorId, {
+      settings: hc({ enabled: true, countWindow: { from, to }, schedule: 'window' }),
+    });
+
+    test('inside its hours it is listed', async () => {
+      clockAt(12);
+      Camera.findAll.mockResolvedValue([withHours('cam-a', '09:00', '18:00')]);
+      expect(monitorsOf(await headcountCameras())).toEqual(['cam-a']);
+    });
+
+    test('OUTSIDE its hours it is dropped, which is what stops the model', async () => {
+      clockAt(3);
+      Camera.findAll.mockResolvedValue([withHours('cam-a', '09:00', '18:00')]);
+      expect(await headcountCameras()).toEqual([]);
+    });
+
+    test('a night-shift window counts across midnight and not at noon', async () => {
+      // The wrap. A loading bay watched 22:00-06:00 must be counted at 2am and
+      // must not be counted at lunchtime.
+      Camera.findAll.mockResolvedValue([withHours('bay', '22:00', '06:00')]);
+      clockAt(2);
+      expect(monitorsOf(await headcountCameras())).toEqual(['bay']);
+      clockAt(12);
+      expect(await headcountCameras()).toEqual([]);
+    });
+
+    test('a camera with NO hours counts around the clock', async () => {
+      // What every camera configured before this feature existed carries. If
+      // this ever fails, the change stopped counting on a live deployment.
+      clockAt(3);
+      Camera.findAll.mockResolvedValue([counting('cam-a')]);
+      expect(monitorsOf(await headcountCameras())).toEqual(['cam-a']);
+    });
+
+    test("schedule 'always' keeps the hours stored but ignores them", async () => {
+      clockAt(3);
+      Camera.findAll.mockResolvedValue([counting('cam-a', {
+        settings: hc({
+          enabled: true, countWindow: { from: '09:00', to: '18:00' }, schedule: 'always',
+        }),
+      })]);
+      expect(monitorsOf(await headcountCameras())).toEqual(['cam-a']);
+    });
+
+    test('hours do not rescue a camera whose AI is off', async () => {
+      // The master switch outranks the schedule: being inside its hours is not
+      // a reason to count a camera an operator took out of AI.
+      clockAt(12);
+      Camera.findAll.mockResolvedValue([counting('cam-a', {
+        settings: {
+          ai: { enabled: false, mode: 'off' },
+          headcount: { enabled: true, countWindow: { from: '09:00', to: '18:00' } },
+        },
+      })]);
+      expect(await headcountCameras()).toEqual([]);
+    });
+
+    test('a malformed window counts rather than going silent', async () => {
+      // Losing an hour of numbers cannot be undone; spending the GPU can.
+      clockAt(3);
+      Camera.findAll.mockResolvedValue([counting('cam-a', {
+        settings: hc({ enabled: true, countWindow: { from: '09:00' } }),
+      })]);
+      expect(monitorsOf(await headcountCameras())).toEqual(['cam-a']);
+    });
+
+    test('one camera on duty and one off, so the slot really does move', async () => {
+      clockAt(3);
+      Camera.findAll.mockResolvedValue([
+        withHours('day-door', '09:00', '18:00'),
+        withHours('night-bay', '22:00', '06:00'),
+      ]);
+      expect(monitorsOf(await headcountCameras())).toEqual(['night-bay']);
+    });
+  });
+
   test('every camera is considered, not a pre-filtered subset', async () => {
     Camera.findAll.mockResolvedValue([counting('cam-a')]);
     await headcountCameras();

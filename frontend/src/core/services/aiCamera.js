@@ -39,35 +39,28 @@ export const AI_FEATURES = [
   // (PIPELINE_PERSON_DETECTION_ENABLED), off by default and off here, not
   // something this toggle turns on.
   { key: 'face', kind: 'flag', flag: 'faceRecognition', label: 'Face recognition', short: 'Face', note: 'Detects faces and matches them against enrolled people. Counting and zones do not need this — switch it off to count people without identifying them.' },
-  // The two alerts the FACE model produces, shown under it rather than
-  // beside it: an alert is not a model, it is what a model can tell you. Both
-  // are `notEnforced` -- the alerts themselves work end to end (the AI service
-  // emits them, alertEngine raises them), but NOTHING reads these per-camera
-  // flags, so switching one off does not stop the alert. Disabled rather than
-  // deleted, because the stored values are real and the fix is to make a
-  // service read them, not to hide the control.
-  {
-    key: 'unknown_alerts', kind: 'flag', flag: 'unknownAlerts', parent: 'face', needsFace: true,
-    notEnforced: 'Nothing reads this flag yet, so unknown-person alerts are raised whether it is on or off.',
-    label: 'Unknown person alerts', short: 'Unknown', note: 'Alert when someone who is not enrolled is seen.',
-  },
-  {
-    key: 'watchlist_alerts', kind: 'flag', flag: 'watchlistAlerts', parent: 'face', needsFace: true,
-    notEnforced: 'Nothing reads this flag yet, so watchlist alerts are raised whether it is on or off.',
-    label: 'Watchlist alerts', short: 'Watchlist', note: 'High-priority alert when a watchlisted person is seen.',
-  },
+  // The alert rows are deliberately NOT here either, for the same reason as
+  // journey mapping below: this panel lists the MODELS a camera runs, and an
+  // alert is not a model -- it is what a model can tell you. `unknownAlerts`
+  // and `watchlistAlerts` were shown here, disabled, because no service reads
+  // them; a disabled control for something that belongs on another screen is
+  // clutter twice over. Both alerts work end to end (the AI service emits
+  // them, alertEngine raises them); only the per-camera flags are unread, and
+  // they are still carried through every payload so nothing is lost. Alert
+  // categories and severity belong on the Alerts screen, chosen once rather
+  // than per camera.
   // Journey mapping is deliberately NOT here. This panel lists the MODELS a
   // camera runs; journey mapping is a feature built on top of the face model's
   // output, and Person Tracker already sets `journeyMapping` per camera
   // (PersonTracker.jsx, backed by personTracker.controller.js). Two screens
   // writing one flag is how the two drift apart. The flag itself is untouched
   // and still carried through every payload.
-  { key: 'head_count', kind: 'setup', label: 'Head count / footfall', short: 'Count', note: 'Counts people crossing a gate line. Footfall counting is part of the face pipeline, so it needs face recognition on; the live head count in a room does not.', setupLabel: 'Draw a gate line', setupPath: '/occupancy/zone-setup' },
+  { key: 'head_count', kind: 'setup', label: 'Head count / footfall', short: 'Count', note: 'Counts people crossing a gate line. Footfall counting is part of the face pipeline, so it needs face recognition on; the live head count in a room does not.', setupLabel: 'Draw a gate line', setupPath: '/occupancy/zone-setup', setupParam: 'gate' },
   // Restricted zones are created on the counting-areas page, which is the only
   // writer of /restricted-zones. /ai-feed draws AI DETECTION areas — a
   // different thing on a near-identical canvas, which saves successfully and
   // arms nothing.
-  { key: 'restricted_zone', kind: 'setup', label: 'Restricted zone', short: 'Zone', note: 'Alerts when someone enters an area you draw.', setupLabel: 'Draw a zone', setupPath: '/occupancy/zone-setup' },
+  { key: 'restricted_zone', kind: 'setup', label: 'Restricted zone', short: 'Zone', note: 'Alerts when someone enters an area you draw.', setupLabel: 'Draw a zone', setupPath: '/occupancy/zone-setup', setupParam: 'cam' },
   // A CHILD of the row above, and labelled for what it DOES rather than for
   // the service that implements it: an operator choosing this is deciding
   // whether a hooded or turned-away person sets the zone off, not whether to
@@ -114,6 +107,31 @@ export function inferPurpose(row) {
  * an area drawn in AI Feed.
  */
 export function buildEnablePayload(row, overrides = {}) {
+  // `faceRecognition` MUST be stated. It used to default to
+  // `ai.faceRecognition !== false` -- absent means ON -- so a caller that had
+  // not thought about faces started the face pipeline on a camera nobody had
+  // configured and spent a face licence. That is not hypothetical: it is how
+  // the head-count repair button came to contradict the consent dialog beside
+  // it, and how turning on body detection for a zone came to switch face
+  // recognition on as well. Two instances, months apart, same default.
+  //
+  // A required argument is the only guard that survives the indirect call.
+  // modules/headcount/one-way-in.test.js guarded this by reading source text
+  // and said so about itself: blind to a re-export, a dynamic import, or a
+  // helper in another module calling on its behalf. Both of those existed --
+  // ZoneSetup hands this function to zone-detector as `buildPayload`, which
+  // calls it later -- so the text scan could not have caught either.
+  //
+  // The key is the payload's own name rather than a shorter alias, because
+  // two names for one flag is the defect this guard exists to prevent.
+  if (overrides.faceRecognition !== true && overrides.faceRecognition !== false) {
+    throw new Error(
+      'buildEnablePayload: state `faceRecognition` explicitly. Absent used to mean ON, '
+      + 'so a caller that did not decide about faces started the face pipeline and spent '
+      + 'a licence. Pass true, false, or the camera\'s current value '
+      + '(`row.ai.faceRecognition !== false`) if you mean to preserve it.',
+    );
+  }
   const ai = row?.ai || {};
   return {
     enabled: true,
@@ -122,10 +140,10 @@ export function buildEnablePayload(row, overrides = {}) {
     detectionInputSize: Number(ai.detectionInputSize) || DEFAULT_INPUT_SIZE,
     purpose: ai.purpose || inferPurpose(row),
     priority: ai.priority || 'normal',
-    // Absent means on, so a camera saved before this flag existed keeps
-    // recognising faces. `enabled` above is the MASTER -- "use this camera for
-    // AI" -- and this is the face feature under it.
-    faceRecognition: ai.faceRecognition !== false,
+    // Always overwritten by `overrides` below, which is now required to carry
+    // it. Kept as the documented shape of the payload rather than deleted, so
+    // the object literal still reads as the whole body being sent.
+    faceRecognition: overrides.faceRecognition,
     unknownAlerts: ai.unknownAlerts !== false,
     watchlistAlerts: ai.watchlistAlerts !== false,
     journeyMapping: ai.journeyMapping !== false,
@@ -149,7 +167,15 @@ export function faceRecognitionOn(row) {
 
 /** The lifecycle body that switches AI OFF, keeping the stored choices. */
 export function buildDisablePayload(row) {
-  return { ...buildEnablePayload(row), enabled: false, mode: 'off' };
+  // Supplies `faceRecognition` itself so that switching AI OFF never became
+  // harder than switching it on. It is the camera's current setting, which is
+  // what preserves every stored choice across an off/on cycle -- the
+  // behaviour an operator expects, and the reason this function exists.
+  return {
+    ...buildEnablePayload(row, { faceRecognition: row?.ai?.faceRecognition !== false }),
+    enabled: false,
+    mode: 'off',
+  };
 }
 
 const hasDrawn = (list) => Array.isArray(list) && list.some((z) => z && z.enabled !== false);
@@ -232,11 +258,11 @@ export function cameraFeatures(row) {
     // all. `needsZone` is the only such rule today and it is explicit rather
     // than derived from `parent`, so adding a child row cannot accidentally
     // hide itself.
-    // A child row whose parent produces nothing on this camera is hidden: an
-    // alert from a model that is not running is not a choice, it is noise.
-    const faceOn = ai.faceRecognition !== false;
-    const hidden = (f.needsZone === true && !drawn.restricted_zone)
-      || (f.needsFace === true && !faceOn);
+    // A child row whose parent is not set up on this camera does nothing at
+    // all. `needsZone` is the only such rule today and it is explicit rather
+    // than derived from `parent`, so adding a child row cannot accidentally
+    // hide itself.
+    const hidden = f.needsZone === true && !drawn.restricted_zone;
     if (f.kind === 'core') return { ...f, on: aiOn, needsSetup: false, hidden: false };
     if (f.kind === 'flag') {
       // `defaultOff` inverts the absent-means-on reading every other flag
@@ -256,6 +282,28 @@ export function cameraFeatures(row) {
 }
 
 /** The features worth showing a control for on this camera, in display order. */
+/**
+ * Where a setup row sends the operator, ON THE CAMERA THEY CAME FROM.
+ *
+ * Both rows used to link to a bare `/occupancy/zone-setup`, which opens on
+ * whichever camera that page picks by itself -- so an operator who clicked
+ * "Draw a gate line" from a camera's panel arrived somewhere else and had to
+ * find their camera again. The page has understood deep links all along
+ * (ZoneSetup.jsx reads `gate`, `cam`, `zone` and `group`); the panel simply
+ * never used them.
+ *
+ * `gate` opens the gate-line editor on that camera directly; `cam` selects it
+ * in the zone rail, which is the right landing place for drawing a zone
+ * because a zone can span cameras and the rail is where that is decided.
+ * Both take the monitorId, which is what ZoneSetup matches on.
+ */
+export function featureSetupPath(feature, row) {
+  const base = feature?.setupPath || '';
+  const monitorId = row?.monitorId;
+  if (!base || !feature?.setupParam || !monitorId) return base;
+  return `${base}?${feature.setupParam}=${encodeURIComponent(monitorId)}`;
+}
+
 export function visibleFeatures(row) {
   return cameraFeatures(row).filter((f) => !f.hidden);
 }

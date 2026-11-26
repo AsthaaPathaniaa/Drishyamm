@@ -66,19 +66,22 @@ test('only an explicit true turns it on', () => {
   assert.equal(bodyRow(row({ zoneBodyDetection: 'yes' })).on, false);
 });
 
-test('the other flags still read absent as ON, which is the whole contrast', () => {
+test('the other flag still reads absent as ON, which is the whole contrast', () => {
+  // `unknown_alerts` used to stand here too. It is no longer a row: the panel
+  // lists models, and an alert is not one. `face` carries the contrast alone
+  // now -- absent means ON for a feature a camera has always had, and OFF for
+  // a second detector that costs GPU and must be opted into.
   const f = cameraFeatures(row());
   assert.equal(find(f, 'face').on, true);
-  assert.equal(find(f, 'unknown_alerts').on, true);
   assert.equal(find(f, 'zone_body').on, false);
 });
 
 test('the enable payload defaults it to false and carries a true through', () => {
-  assert.equal(buildEnablePayload(row()).zoneBodyDetection, false);
-  assert.equal(buildEnablePayload(row({ zoneBodyDetection: true })).zoneBodyDetection, true);
+  assert.equal(buildEnablePayload(row(), { faceRecognition: true }).zoneBodyDetection, false);
+  assert.equal(buildEnablePayload(row({ zoneBodyDetection: true }), { faceRecognition: true }).zoneBodyDetection, true);
   // An override wins, which is what the zone editor's inline switch sends.
   assert.equal(
-    buildEnablePayload(row(), { zoneBodyDetection: true }).zoneBodyDetection,
+    buildEnablePayload(row(), { zoneBodyDetection: true, faceRecognition: true }).zoneBodyDetection,
     true,
   );
 });
@@ -229,9 +232,10 @@ test('an anonymous camera cannot be read as having the zone covered', () => {
 
 test('every other feature keeps its shape', () => {
   const f = cameraFeatures(row());
-  // 'journey' is deliberately absent: journey mapping left this panel for
-  // Person Tracker, which already owns the per-camera flag.
-  for (const key of ['face', 'unknown_alerts', 'watchlist_alerts', 'head_count', 'restricted_zone']) {
+  // 'journey' and the two alert rows are deliberately absent: this panel
+  // lists the models a camera runs. Journey mapping belongs to Person
+  // Tracker, and an alert is not a model.
+  for (const key of ['face', 'head_count', 'restricted_zone']) {
     assert.equal(find(f, key).hidden, false, `${key} must stay visible`);
     assert.equal(find(f, key).forced, undefined, `${key} must not be forced`);
   }

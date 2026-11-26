@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   DEFAULT_FPS, activeFeatureLabels, aiSetupPath, buildDisablePayload, buildEnablePayload, cameraFeatures,
+  featureSetupPath,
 } from './aiCamera.js';
 
 const row = ({ ai, ...over } = {}) => ({
@@ -11,8 +12,8 @@ const row = ({ ai, ...over } = {}) => ({
 });
 
 test('enable payload uses one default fps and carries stored settings', () => {
-  assert.equal(buildEnablePayload(row()).fps, DEFAULT_FPS);
-  const p = buildEnablePayload(row({ ai: { fps: 8, purpose: 'Reception', watchlistAlerts: false } }));
+  assert.equal(buildEnablePayload(row(), { faceRecognition: true }).fps, DEFAULT_FPS);
+  const p = buildEnablePayload(row({ ai: { fps: 8, purpose: 'Reception', watchlistAlerts: false } }), { faceRecognition: true });
   assert.equal(p.enabled, true);
   assert.equal(p.fps, 8);
   assert.equal(p.purpose, 'Reception');
@@ -20,13 +21,13 @@ test('enable payload uses one default fps and carries stored settings', () => {
 });
 
 test('enable payload never sends detectionZones unless asked', () => {
-  const p = buildEnablePayload(row({ ai: { detectionZones: [{ id: 'z' }] } }));
+  const p = buildEnablePayload(row({ ai: { detectionZones: [{ id: 'z' }] } }), { faceRecognition: true });
   assert.equal('detectionZones' in p, false);
-  assert.deepEqual(buildEnablePayload(row(), { detectionZones: [] }).detectionZones, []);
+  assert.deepEqual(buildEnablePayload(row(), { detectionZones: [], faceRecognition: true }).detectionZones, []);
 });
 
 test('purpose is inferred from the camera name when never set', () => {
-  assert.equal(buildEnablePayload(row()).purpose, 'Main gate');
+  assert.equal(buildEnablePayload(row(), { faceRecognition: true }).purpose, 'Main gate');
 });
 
 test('disable payload keeps choices but turns off', () => {
@@ -49,7 +50,7 @@ test('features: flags and drawn shapes show when AI is on', () => {
   });
   // No 'Journey': journey mapping is a feature built on the face model's
   // output, not a model, and Person Tracker owns the per-camera choice.
-  assert.deepEqual(activeFeatureLabels(r), ['Face', 'Unknown', 'Count', 'Zone']);
+  assert.deepEqual(activeFeatureLabels(r), ['Face', 'Count', 'Zone']);
 });
 
 test('features: head count is READY only when a gate line is drawn', () => {
@@ -71,23 +72,88 @@ test('features: a drawn gate on a camera with AI off needs setup', () => {
   assert.equal(count.needsSetup, true);
 });
 
-test('features: the alert rows hang off the face model and say they do nothing', () => {
+test('features: this panel lists models, so alerts and journey are not rows', () => {
+  // An alert is not a model, it is what a model can tell you; journey mapping
+  // is a feature built on the face model's output and Person Tracker owns it.
   const f = cameraFeatures(row({ ai: { enabled: true } }));
-  for (const key of ['unknown_alerts', 'watchlist_alerts']) {
-    const r = f.find((x) => x.key === key);
-    assert.equal(r.parent, 'face', `${key} belongs under the model that produces it`);
-    assert.ok(r.notEnforced, `${key} must state that no service reads it`);
+  for (const key of ['unknown_alerts', 'watchlist_alerts', 'journey']) {
+    assert.equal(f.find((x) => x.key === key), undefined, `${key} must not be a row`);
   }
-  // Face off hides them: an alert from a model that is not running is not a
-  // choice an operator can meaningfully make.
-  const anon = cameraFeatures(row({ ai: { enabled: true, faceRecognition: false } }));
-  assert.equal(anon.find((x) => x.key === 'unknown_alerts').hidden, true);
-  assert.equal(anon.find((x) => x.key === 'watchlist_alerts').hidden, true);
+  assert.deepEqual(f.map((x) => x.key), ['face', 'head_count', 'restricted_zone', 'zone_body']);
 });
 
-test('features: journey mapping is not a model, so it is not a row', () => {
+test('the flags the panel stopped showing are still carried through a save', () => {
+  // Removing a row must not quietly clear the value on the camera.
+  const p = buildEnablePayload(row({ ai: { unknownAlerts: false, watchlistAlerts: false, journeyMapping: false } }), { faceRecognition: true });
+  assert.equal(p.unknownAlerts, false);
+  assert.equal(p.watchlistAlerts, false);
+  assert.equal(p.journeyMapping, false);
+});
+
+test('a setup row links to the camera it was opened from', () => {
   const f = cameraFeatures(row({ ai: { enabled: true } }));
-  assert.equal(f.find((x) => x.key === 'journey'), undefined);
+  const gate = f.find((x) => x.key === 'head_count');
+  const zone = f.find((x) => x.key === 'restricted_zone');
+  // Both used to link to a bare /occupancy/zone-setup, which opens on whatever
+  // camera that page picks for itself.
+  assert.equal(featureSetupPath(gate, row()), '/occupancy/zone-setup?gate=m1');
+  assert.equal(featureSetupPath(zone, row()), '/occupancy/zone-setup?cam=m1');
+});
+
+test('a setup link falls back to the bare page rather than a broken one', () => {
+  const f = cameraFeatures(row({ ai: { enabled: true } }));
+  const gate = f.find((x) => x.key === 'head_count');
+  assert.equal(featureSetupPath(gate, {}), '/occupancy/zone-setup');
+  assert.equal(featureSetupPath(gate, undefined), '/occupancy/zone-setup');
+  assert.equal(featureSetupPath({}, row()), '');
+});
+
+test('a monitorId with URL characters is encoded', () => {
+  const f = cameraFeatures(row({ ai: { enabled: true } }));
+  const gate = f.find((x) => x.key === 'head_count');
+  assert.equal(
+    featureSetupPath(gate, { monitorId: 'cam 1&x=2' }),
+    '/occupancy/zone-setup?gate=cam%201%26x%3D2',
+  );
+});
+
+test('buildEnablePayload REFUSES a caller that has not decided about faces', () => {
+  // The guard this replaces read source text and said so about itself: blind
+  // to a re-export, a dynamic import, or a helper calling on another module's
+  // behalf. A required argument catches all three, because it is the function
+  // that refuses rather than a scan of the files around it.
+  assert.throws(() => buildEnablePayload(row()), /state `faceRecognition` explicitly/);
+  assert.throws(() => buildEnablePayload(row(), {}), /faceRecognition/);
+  assert.throws(() => buildEnablePayload(row(), { faceRecognition: undefined }), /faceRecognition/);
+  assert.throws(() => buildEnablePayload(row(), { faceRecognition: null }), /faceRecognition/);
+  // Not truthiness: a stored string must not be read as a decision.
+  assert.throws(() => buildEnablePayload(row(), { faceRecognition: 'true' }), /faceRecognition/);
+  // And the message has to say WHY, because it is the only documentation the
+  // next caller will read.
+  assert.throws(() => buildEnablePayload(row()), /spent a licence|spends a licence|spent\s+a\s+licence/);
+});
+
+test('it accepts either decision and sends exactly that', () => {
+  assert.equal(buildEnablePayload(row(), { faceRecognition: true }).faceRecognition, true);
+  assert.equal(buildEnablePayload(row(), { faceRecognition: false }).faceRecognition, false);
+  // Explicit false WINS over a camera whose stored value is on, which is the
+  // anonymous-counting case and the whole reason the flag is separable.
+  assert.equal(
+    buildEnablePayload(row({ ai: { faceRecognition: true } }), { faceRecognition: false }).faceRecognition,
+    false,
+  );
+});
+
+test('buildDisablePayload still needs nothing, and still preserves everything', () => {
+  // Switching AI off has none of these problems and must not get harder.
+  const p = buildDisablePayload(row({ ai: { enabled: true, fps: 8, detectionInputSize: 1280 } }));
+  assert.equal(p.enabled, false);
+  assert.equal(p.mode, 'off');
+  assert.equal(p.fps, 8);
+  assert.equal(p.detectionInputSize, 1280);
+  // A camera matching faces keeps that across an off/on cycle.
+  assert.equal(buildDisablePayload(row({ ai: { faceRecognition: true } })).faceRecognition, true);
+  assert.equal(buildDisablePayload(row({ ai: { faceRecognition: false } })).faceRecognition, false);
 });
 
 test('setup path selects the camera', () => {

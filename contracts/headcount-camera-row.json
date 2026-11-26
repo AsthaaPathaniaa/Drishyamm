@@ -1,0 +1,113 @@
+{
+  "_README": [
+    "THE CONTRACT BETWEEN THE VMS AND THE HEAD-COUNT SERVICE.",
+    "",
+    "One camera row exactly as GET /api/internal/headcount/cameras emits it, and",
+    "exactly as ai/head-count/src/headcount/source.py reads it. Three tests read",
+    "this file and none of them can pass alone:",
+    "",
+    "  backend/test/headcountChain.test.js     the backend EMITS this shape",
+    "  ai/head-count/tests/test_vms_contract.py the service PARSES this shape",
+    "  frontend/.../zone-model.test.js          the editor BUILDS these zones",
+    "",
+    "It exists because every bug found in this feature has been a boundary bug --",
+    "two correct components disagreeing -- and a unit test on either side of a",
+    "boundary cannot see the boundary. A camera ticked for counting and excluded",
+    "by the master AI switch; a zone saved to the registry and never applied by",
+    "the detector. Both were invisible to full-green test suites on both sides.",
+    "",
+    "CHANGING THIS FILE IS CHANGING THE CONTRACT. If a field moves or is renamed,",
+    "all three tests fail, in all three languages, which is the entire point. Do",
+    "not edit it to make a test pass.",
+    "",
+    "`zones[]` is what the zone editor produces (frontend cameraPayload) after the",
+    "backend's sanitiseZones has validated it: normalised 0..1 points, >= 3 of",
+    "them, so a shape drawn on a preview keeps its meaning at any resolution.",
+    "",
+    "`threshold` is 0 BECAUSE there are two zones. A camera-level limit only has",
+    "a meaning when exactly one zone sits on exactly one camera -- then the zone",
+    "IS the camera and cameraPayload pushes its capacity here. With two rooms in",
+    "one view, \"12 people on this camera\" answers no question anybody asked, so",
+    "the capacity stays on each zone. Pinned here because a fixture carrying a",
+    "limit AND two zones would be a shape the product cannot produce."
+  ],
+
+  "camera": {
+    "id": "cam-uuid-1",
+    "userId": "owner-1",
+    "monitorId": "7",
+    "name": "Reception",
+    "status": "online",
+    "rtsp": "rtsp://relay:8554/cam_7",
+    "rtspSub": "rtsp://relay:8554/cam_7_sub",
+    "settings": {
+      "ai": {
+        "enabled": true,
+        "mode": "continuous",
+        "faceRecognition": false,
+        "journeyMapping": true,
+        "unknownAlerts": true,
+        "watchlistAlerts": true,
+        "activityMonitoring": false,
+        "zoneBodyDetection": false
+      },
+      "headcount": {
+        "enabled": true,
+        "threshold": 0,
+        "zones": [
+          {
+            "id": "zone-reception",
+            "name": "Reception",
+            "enabled": true,
+            "points": [[0.12, 0.30], [0.88, 0.30], [0.88, 0.95], [0.12, 0.95]]
+          },
+          {
+            "id": "zone-waiting",
+            "name": "Waiting area",
+            "enabled": true,
+            "points": [[0.05, 0.10], [0.45, 0.10], [0.45, 0.28]]
+          }
+        ]
+      }
+    }
+  },
+
+  "countingOnlyPromise": {
+    "_README": [
+      "WHAT WE PROMISE AN OPERATOR WHEN WE SWITCH A CAMERA'S AI ON FOR COUNTING.",
+      "",
+      "This is here because the worst defect in this feature was a BROKEN PROMISE,",
+      "not a wrong value. The consent dialog said, in these words, that faces are",
+      "not matched -- while the repair button two inches away went through a route",
+      "that started face recognition and spent a face licence. Both call sites were",
+      "individually correct. Nothing tested that the promise and the code agreed,",
+      "because the promise was English in a React file and the code was a function",
+      "in a Node service.",
+      "",
+      "So the promise is written down once, and both ends assert against it:",
+      "",
+      "  backend/test/headcountTurnsAiOn.js   masterOnForFeature HONOURS it",
+      "  frontend .../counting-status.test.js the dialog SAYS it",
+      "",
+      "Weaken the code and the backend test fails. Quietly drop the sentence from",
+      "the dialog and the frontend test fails. Change your mind about the promise",
+      "and you have to change it here, which makes both ends move together and",
+      "leaves a diff that says what was decided."
+    ],
+    "ai": {
+      "enabled": true,
+      "faceRecognition": false
+    },
+    "notStarted": ["activityMonitoring", "zoneBodyDetection"],
+    "saidToTheOperator": "faces are not matched"
+  },
+
+  "expect": {
+    "rowKeys": ["id", "userId", "monitorId", "name", "status", "settings", "rtsp", "rtspSub"],
+    "zoneNames": ["Reception", "Waiting area"],
+    "zoneCount": 2,
+    "streamPreferred": "rtspSub",
+    "threshold": 0,
+    "aiFlagsAllExplicit": true
+  }
+}

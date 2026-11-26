@@ -4,6 +4,7 @@ import {
   X, Archive, Database, Download, Clock, FileArchive, RefreshCw, Search,
   GraduationCap, Briefcase, Shield, UserCheck, Info, Zap,
 } from 'lucide-react';
+import { mayForget, removalMessage, removalOutcome } from './watchlist-removal';
 import { Card } from '@/core/ui/card';
 import { Button } from '@/core/ui/button';
 import { Input } from '@/core/ui/input';
@@ -105,6 +106,11 @@ export default function Watchlist() {
   const [indivStatus, setIndivStatus] = useState({ kind: 'idle', msg: '' });
   const [indivPct, setIndivPct]       = useState(0);
   const [filter, setFilter]           = useState('');
+  // A removal that did not land. Held separately from `indivStatus`, which
+  // belongs to the add form on the other side of the page -- an error about
+  // deleting Aastha has no business appearing under the upload button.
+  const [rosterStatus, setRosterStatus] = useState({ kind: 'idle', msg: '' });
+  const [deleting, setDeleting]       = useState(null);
   const fileRef = useRef(null);
 
   /* bulk */
@@ -172,11 +178,52 @@ export default function Watchlist() {
       setIndivPct(0);
     }
   };
+  /**
+   * Remove one face from the watchlist.
+   *
+   * THE LIST ON SCREEN IS NOT THE AUTHORITY. `roster` is this browser's
+   * localStorage; the faces that are actually MATCHED live in the AI service's
+   * gallery, and `aiService.deleteFace` is what removes one from it. There is
+   * no endpoint that lists the gallery, so the two can only be kept in step by
+   * never writing one without the other.
+   *
+   * This used to swallow the server's refusal and delete locally anyway:
+   *
+   *     try { await aiService.deleteFace(entry.name); } catch { }
+   *     saveRoster(roster.filter(...));          // ran regardless
+   *
+   * So a failed removal LOOKED like a successful one. The person vanished from
+   * the screen and went on being recognised -- the operator believing they had
+   * taken someone off a watchlist while the system kept identifying them. On a
+   * privacy control that is the worst possible failure: silent, and in the
+   * direction of doing more surveillance than was asked for.
+   *
+   * Now the local list is only written once the gallery has let the face go.
+   * The decision and the wording live in watchlist-removal.js, pure and
+   * tested: this file cannot be tested at all (no DOM test library in the
+   * project), and "may the screen say it is gone?" is exactly the question
+   * that must not be decided in untestable code.
+   */
   const deleteFace = async entry => {
     if (!confirm(`Remove "${entry.name}" from the watchlist?`)) return;
-    try { await aiService.deleteFace(entry.name); } catch { /* removed locally */ }
-    const updated = roster.filter(r => r.name !== entry.name);
-    saveRoster(updated); setRoster(updated);
+    setRosterStatus({ kind: 'idle', msg: '' });
+    setDeleting(entry.name);
+
+    let outcome; let failure;
+    try {
+      await aiService.deleteFace(entry.name);
+      outcome = removalOutcome();
+    } catch (err) {
+      failure = err;
+      outcome = removalOutcome(err);
+    }
+
+    if (mayForget(outcome)) {
+      const updated = roster.filter(r => r.name !== entry.name);
+      saveRoster(updated); setRoster(updated);
+    }
+    setRosterStatus(removalMessage(entry.name, outcome, failure));
+    setDeleting(null);
   };
 
   /* ── bulk ── */
@@ -469,6 +516,33 @@ export default function Watchlist() {
                 </div>
               </div>
               <Separator />
+              {/* Beside the list it is about, not under the upload form on the
+                  other side of the page. A removal that did not land is the
+                  one thing an operator must not miss here: the face is still
+                  being matched. */}
+              {rosterStatus.kind !== 'idle' && (
+                <div
+                  role={rosterStatus.kind === 'error' ? 'alert' : 'status'}
+                  className={`mx-6 mt-4 flex items-start gap-2 rounded-lg border px-3 py-2 text-small font-medium ${
+                    rosterStatus.kind === 'error'
+                      ? 'border-danger-line bg-danger-soft text-danger-ink'
+                      : 'border-success-line bg-success-soft text-success-ink'
+                  }`}
+                >
+                  {rosterStatus.kind === 'error'
+                    ? <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                    : <CheckCircle2 size={14} className="mt-0.5 shrink-0" />}
+                  <span className="min-w-0 flex-1">{rosterStatus.msg}</span>
+                  <button
+                    aria-label="Dismiss"
+                    className="shrink-0 opacity-70 transition hover:opacity-100"
+                    onClick={() => setRosterStatus({ kind: 'idle', msg: '' })}
+                    type="button"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              )}
               <div className="max-h-[600px] overflow-y-auto pr-1 min-[1284px]:min-h-0 min-[1284px]:flex-1">
                 {roster.length === 0 ? (
                   <EmptyState
@@ -500,8 +574,11 @@ export default function Watchlist() {
                         </div>
                         <button
                           onClick={() => deleteFace(entry)}
-                          className="rounded-md p-1.5 text-fg-muted opacity-0 transition hover:bg-danger/10 hover:text-danger-ink group-hover:opacity-100"
-                          title="Remove"
+                          disabled={deleting === entry.name}
+                          className="rounded-md p-1.5 text-fg-muted opacity-0 transition hover:bg-danger/10
+                                     hover:text-danger-ink focus-visible:opacity-100 disabled:cursor-wait
+                                     disabled:opacity-60 group-hover:opacity-100"
+                          title={deleting === entry.name ? 'Removing…' : 'Remove'}
                         >
                           <Trash2 size={13} />
                         </button>

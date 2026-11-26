@@ -291,24 +291,45 @@ router.post('/ai/occupancy', asyncHandler(async (req, res) => {
 
 // ── AI live overlay (ephemeral — bounding boxes only) ─────────────────────────
 //
-// High-frequency, display-only frames that drive the on-video AIOverlay. Unlike
-// /ai/events these are NEVER persisted and NEVER become alerts — they're fanned
-// straight out to the viewing user's socket and dropped. This is what stops the
-// "continuous alerts" flood: routine face boxes ride this channel, not ai_events.
+// High-frequency frames that drive the on-video AIOverlay. Unlike /ai/events
+// these are never PERSISTED — they're fanned out to the viewing user's socket
+// and dropped. This is what stops the "continuous alerts" flood: routine face
+// boxes ride this channel, not ai_events.
+//
+// This comment used to say they "NEVER become alerts". That stopped being true
+// when zoneIntrusion.service.js subscribed to AI_LIVE_OVERLAY: a box inside a
+// restricted zone becomes a zone.intrusion event. The channel is still
+// ephemeral in the sense that matters here (nothing is written for its own
+// sake), but it is no longer display-only, and anything that decides to stop
+// sending on it is deciding to stop a security control. See /ai/viewers below.
 //
 // Body (smart-cam-ai backend_forwarder, one message per camera frame):
 //   { userId, monitorId, ts?, frameW, frameH,
 //     boxes: [ { bbox:[x1,y1,x2,y2], trackId?, name?, gender?, age?, conf? } ] }
-// ── Live-overlay viewers ─────────────────────────────────────────────────────
-// Which cameras have at least one browser drawing the AI overlay right now.
-// The AI's forwarder polls this every couple of seconds: cameras nobody is
-// watching get their boxes published at a 1 Hz keep-alive instead of 5 Hz and
-// no overlay POST at all — measured at ~1.2 cores on the AI primary at 37
-// cameras, all of it for pictures nobody was looking at.
-router.get('/ai/viewers', (_req, res) => {
+// ── Which cameras' overlay boxes somebody needs ──────────────────────────────
+//
+// NOT just "who has a browser open". The AI's forwarder polls this every couple
+// of seconds and drops the overlay POST entirely for any camera missing from
+// the answer, so a camera left out of this list stops producing boxes — and a
+// restricted zone on that camera stops firing, because AI_LIVE_OVERLAY is the
+// zone engine's only input.
+//
+// Two reasons a camera belongs here:
+//   1. a browser is drawing its overlay           (ws.service)
+//   2. it carries an armed restricted zone        (zoneIntrusion.service)
+//
+// The second was missing. The saving the gating buys is real and was measured
+// — about 1.2 cores on the AI primary at 37 cameras, all of it for pictures
+// nobody was looking at — but it was reasoned about when a browser was the only
+// consumer, and the comment that justified it ("the POST would be thrown away
+// by the browser side") has not been true since the zone engine subscribed.
+// Whatever is added here next: dropping a camera from this list is not a
+// display optimisation, it is a decision to stop watching that camera.
+router.get('/ai/viewers', asyncHandler(async (_req, res) => {
   const { getWatchedMonitors } = require('../services/ws.service');
-  res.json({ ok: true, monitorIds: getWatchedMonitors() });
-});
+  const { overlayNeededMonitorIds } = require('../services/zoneIntrusion.service');
+  res.json({ ok: true, monitorIds: await overlayNeededMonitorIds(getWatchedMonitors()) });
+}));
 
 router.post('/ai/overlay', (req, res) => {
   const f = req.body || {};

@@ -47,6 +47,9 @@ function parts(draft, lockedOut) {
         : access.mode === 'restricted' ? `Restricted · ${roles} role${roles === 1 ? '' : 's'}, ${people} ${people === 1 ? 'person' : 'people'}`
           : 'Public',
     ],
+    // Identity moved out of the access section, so it needs its own line. A
+    // closed section with no summary reads as empty rather than as unenforced.
+    identity: [draft.privacy ? `${draft.privacy} (not enforced)` : 'not set'],
   };
 }
 

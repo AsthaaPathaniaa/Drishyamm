@@ -4,6 +4,7 @@ const config = require('../config/env');
 const logger = require('../config/logger');
 const { Camera, CameraGroup } = require('../models');
 const { getAiEntitledUserIds } = require('./entitlements.service');
+const { flag } = require('./aiFlags');
 const { recordAiClock } = require('./aiClockSkew');
 const nvrLoad = require('./nvrLoad.service');
 
@@ -31,7 +32,11 @@ const _paused = new Set();   // monitorIds we stopped for playback (for logging)
  */
 function isAiEnabled(camera) {
   const ai = camera.settings?.ai || {};
-  return ai.enabled === true && ai.mode !== 'off';
+  // `flag` rather than `=== true`, so what absent means lives in ONE table
+  // (aiFlags.js) instead of being restated by each reader. Identical for every
+  // stored value -- see that file's docblock and its tests. `mode` stays a
+  // separate test: it is not a boolean, and 'off' is a third state.
+  return flag(ai, 'enabled') && ai.mode !== 'off';
 }
 
 /**
@@ -47,7 +52,112 @@ function isAiEnabled(camera) {
  * which stopped the counting with it.
  */
 function faceRecognitionOn(camera) {
-  return (camera.settings?.ai || {}).faceRecognition !== false;
+  return flag(camera.settings?.ai, 'faceRecognition');
+}
+
+/**
+ * ON MEANS ON: the `settings.ai` a camera needs for ONE feature to actually
+ * run, and for nothing else to start.
+ *
+ * Every feature is gated on the master switch. But the switch an operator is
+ * given for a feature is the feature's own toggle -- the tick on the Head
+ * Count page (`settings.headcount.enabled`), the tick on the activity page
+ * (`settings.ai.activityMonitoring`) -- and those toggles used to write their
+ * own flag and nothing else. So a camera could be ticked for a feature and
+ * excluded by the master switch at the same time: the feature never started,
+ * and no page said why.
+ *
+ * Turning the master on IS what the toggle means -- "use this camera for AI,
+ * for this" -- so the endpoint that takes the toggle does it. One rule for
+ * every feature toggle, which is the point: a toggle that reads ON must mean
+ * the thing is running.
+ *
+ * THAT FEATURE ONLY, and that is the whole care taken here. Switching the
+ * master on is switching on the thing every feature hangs off, so each one is
+ * checked against what this returns (one test per feature):
+ *
+ *   face          `faceRecognitionOn` -- ABSENT MEANS ON, so it is set
+ *                 explicitly FALSE. This is the anonymous case the
+ *                 master/face split was built for: people detected, no face
+ *                 matched. Left absent, ticking a camera for counting would
+ *                 start matching faces against the org's gallery and spend a
+ *                 face licence -- not asked for, and not undone by unticking.
+ *   activity      `activityMonitoring` -- absent, so off unless its own
+ *                 toggle is what brought us here.
+ *   zone-guard    `zoneBodyDetection` -- absent, so off, likewise.
+ *   head count    `settings.headcount.enabled`, written by its own endpoint.
+ *
+ * A camera whose master is ALREADY on is not passed through here at all: its
+ * settings are its own and the feature needs nothing changed. Turning a
+ * feature OFF never comes here either -- other features hang off the master,
+ * and unticking one is not a request to stop them.
+ *
+ * An explicit `faceRecognition: true` on a camera whose master is OFF is
+ * overridden rather than honoured. Nothing was running, honouring it would
+ * spend a face licence that can be REFUSED -- failing a toggle the feature's
+ * page cannot act on -- and turning it back on in Camera Setup is one switch,
+ * additively.
+ *
+ * Does NOT reconcile the face runtime: with face off the reconcile loop does
+ * not want this camera (`isAiEnabled && faceRecognitionOn`), so starting it
+ * here would be a start followed at once by a stop. Each feature's own service
+ * reads the flag on its own registry poll.
+ */
+function masterOnForFeature(previousAi = {}, now = new Date().toISOString()) {
+  const prev = previousAi || {};
+  return {
+    ...prev,
+    enabled: true,
+    // A stored mode is kept unless it is the off state we are leaving.
+    mode: prev.mode && prev.mode !== 'off' ? prev.mode : 'continuous',
+    faceRecognition: false,
+    updatedAt: now,
+    createdAt: prev.createdAt || now,
+    disabledAt: null,
+    lastError: null,
+  };
+}
+
+/**
+ * Said where the toggle was, when the toggle also switched the master on.
+ *
+ * Both halves matter. The first is why the camera's AI is suddenly on; the
+ * second is what stops that reading as a privacy surprise.
+ */
+function aiTurnedOnFor(what) {
+  return `This camera's AI was switched on so it can be ${what}. It detects people only `
+    + '— faces are not matched. Turn on face recognition in Camera Setup → AI Detection '
+    + 'if you want that too.';
+}
+
+const AI_TURNED_ON_FOR_COUNTING = aiTurnedOnFor('counted');
+const AI_TURNED_ON_FOR_ACTIVITY = aiTurnedOnFor('monitored for activity');
+
+/**
+ * The code a refusal carries when a feature cannot start until someone agrees
+ * to switch the camera's AI on.
+ *
+ * ASKED, NOT REPORTED. An earlier version of this switched the master on by
+ * itself and said so afterwards, which made the feature work but took a
+ * decision that is not the endpoint's to take: using a camera for AI at all is
+ * a privacy and a cost decision, and "I ticked counting" is not the same
+ * sentence as "yes, run AI on this camera". Reporting it after the fact leaves
+ * an operator reading about a change they did not choose -- the same class of
+ * fault as doing it silently, one step quieter.
+ *
+ * So the server refuses, names what it would do, and waits. `enableAi: true`
+ * on the retry is the consent. The UI asks in a dialog before it ever sends;
+ * this is what makes it impossible for ANY caller -- that dialog, Zone Setup,
+ * a script, a future page -- to turn a camera's AI on without someone saying
+ * so.
+ */
+const AI_CONSENT_REQUIRED = 'AI_CONSENT_REQUIRED';
+
+/** What to ask, when a feature needs the master switch on first. */
+function aiConsentQuestion(what, cameraName = 'this camera') {
+  return `${cameraName} has AI switched off, so it cannot be ${what} yet. `
+    + 'Switch AI on for it? It will detect people only — faces are not matched, '
+    + 'and no other AI feature is started.';
 }
 
 async function getRuntime() {
@@ -235,5 +345,14 @@ module.exports = {
   isAiEnabled,
   // The face-recognition half of what `ai.enabled` used to mean on its own.
   faceRecognitionOn,
+  // Turning the master ON for one feature, without turning anything else on.
+  // One rule for every feature toggle: ON means the thing is running.
+  masterOnForFeature,
+  aiTurnedOnFor,
+  AI_TURNED_ON_FOR_COUNTING,
+  AI_TURNED_ON_FOR_ACTIVITY,
+  // Switching the master on is ASKED FOR, not reported afterwards.
+  AI_CONSENT_REQUIRED,
+  aiConsentQuestion,
   _internals: { yieldsToPlayback, paused: _paused },
 };

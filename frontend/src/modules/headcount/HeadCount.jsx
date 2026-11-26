@@ -49,7 +49,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Users, Cpu, Clock, Video, Settings, Search, AlertTriangle,
-  Crop, RefreshCw, Check, X, Download,
+  Crop, RefreshCw, Check, X, Download, TriangleAlert, Power,
 } from 'lucide-react';
 import { aiService } from '@/core/services/ai';
 import {
@@ -59,6 +59,16 @@ import { Button } from '@/core/ui/button';
 import { CameraEmptyState } from '@/core/components/CameraEmptyState';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/core/ui/tooltip';
 import { pointsToSvg } from './zone-geometry';
+import { ConfirmDialog } from '@/core/ui/confirm-dialog';
+import {
+  needsAiConsent, isConsentRefusal, errorText,
+} from '@/core/services/aiConsent';
+import {
+  notCounting, notCountingReason, notCountingSummary, fixable, faults, paused,
+  zonesPending, ZONE_PENDING_LABEL,
+  consentCopy, saveFailureSummary,
+  detectorCapacity, atCapacity, capacityCopy, capacityHolders,
+} from './counting-status';
 
 const PAGE_DESCRIPTION =
   'Live people count per camera. Choose which cameras count here; zones and their capacity are set in Zone Setup. A camera with no zone counts its whole view. Counts come from the head-count detector; a camera turns amber as it approaches its limit and red once it reaches it.';
@@ -98,6 +108,21 @@ export default function HeadCount() {
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [fixingAi, setFixingAi] = useState(false);
+  // What a save did beyond what was asked. Cleared by the next save, and by
+  // the operator, so it never becomes furniture.
+  const [notices, setNotices] = useState([]);
+  // The cameras waiting on an answer to "switch AI on?" — a LIST, because
+  // "Turn all on" can need consent for several and a queue of identical
+  // dialogs is not a question, it is an obstacle. null = nothing asked.
+  const [askingAi, setAskingAi] = useState(null);
+  // Saves that did not land, as [{cam, message}]. A tick that springs back
+  // with no message is the fault this whole page exists to fix, so a refusal
+  // the operator can act on -- an exhausted licence, a deleted camera -- is
+  // never swallowed. Cleared by the next save.
+  const [failures, setFailures] = useState([]);
+  // The camera waiting on an answer to "the detector is full, tick it anyway?".
+  const [askingFull, setAskingFull] = useState(null);
 
   const poll = useCallback(async () => {
     try {
@@ -174,17 +199,65 @@ export default function HeadCount() {
     return true;
   }), [enriched, filter]);
 
-  const toggleHeadcount = useCallback(async (cam, next) => {
+  /**
+   * Tick or untick one camera.
+   *
+   * `consented` is an answer to the dialog, and is only ever true on the path
+   * that comes back from it. Ticking a camera whose AI is off opens the dialog
+   * instead of saving: counting cannot start without the master switch, and
+   * switching that on is a privacy and a cost decision that belongs to the
+   * operator, not to this handler. The backend refuses too (409
+   * AI_CONSENT_REQUIRED), so the question cannot be skipped by any caller --
+   * the check here just means the operator is asked BEFORE a failed save
+   * rather than after one.
+   */
+  const toggleHeadcount = useCallback(async (cam, next, consented = false, roomChecked = false) => {
+    if (next && !consented && needsAiConsent(cam)) { setAskingAi([cam]); return null; }
+    // Asked AFTER consent, and only once: AI being off stops the camera
+    // counting at all, while the detector being full only delays it. Two
+    // dialogs back to back would be a worse answer than either alone, so this
+    // one is skipped for a camera that has just come through the AI question
+    // -- `consented` means the operator has already said yes to this camera.
+    if (next && !roomChecked && !consented && atCapacity(detector)) {
+      setAskingFull(cam);
+      return null;
+    }
     setSavingId(cam.id);
+    setFailures([]);
     setCamList((list) => list.map((c) => (c.id === cam.id
       ? { ...c, headcount: { ...(c.headcount || {}), enabled: next } } : c)));
     try {
-      await aiService.setHeadcount(cam.id, { enabled: next, threshold: cam.headcount?.threshold || 0 });
-    } catch {
+      const res = await aiService.setHeadcount(cam.id, {
+        enabled: next,
+        threshold: cam.headcount?.threshold || 0,
+        ...(consented ? { enableAi: true } : {}),
+      });
+      // The tick can do more than it says: on a camera whose AI was off, the
+      // backend switches the master on so counting can actually start (see
+      // aiLifecycle.service countingOnlyAi). It did it, so it says it -- here,
+      // where the tick was, and only on the save that changed it.
+      setNotices(Array.isArray(res?.notices) ? res.notices : []);
+      // The master switch just changed, so re-read the registry rather than
+      // waiting up to 10s for the poll: the "not counting" note and this
+      // camera's own card are both derived from it.
+      if (res?.notices?.length) loadCams();
+      return null;
+    } catch (err) {
       setCamList((list) => list.map((c) => (c.id === cam.id
         ? { ...c, headcount: { ...(c.headcount || {}), enabled: !next } } : c)));
+      // The server asking rather than failing: anything that reached a save
+      // without asking (a stale registry row, another tab, a future caller)
+      // still ends up at the same question instead of a silent no-op.
+      if (isConsentRefusal(err)) { setAskingAi([cam]); return null; }
+      // Anything else is a refusal the operator has to be TOLD about -- an
+      // exhausted licence is the common one, and it is not guessable from a
+      // tick that springs back. Returned as well as shown, so a bulk caller
+      // can collect every failure instead of each one overwriting the last.
+      const failure = { cam, message: errorText(err) };
+      setFailures([failure]);
+      return failure;
     } finally { setSavingId(null); }
-  }, []);
+  }, [loadCams, detector]);
 
   // Detail level = how much of the picture the detector examines. Measured on
   // identical footage: 640 -> 1280 found 71% more people, all of them distant.
@@ -193,17 +266,156 @@ export default function HeadCount() {
   const saveDetail = useCallback(async (cam, imgsz) => {
     setCamList((list) => list.map((c) => (c.id === cam.id
       ? { ...c, headcount: { ...(c.headcount || {}), imgsz } } : c)));
+    setFailures([]);
     try {
       await aiService.setHeadcount(cam.id, {
         enabled: cam.headcount?.enabled === true,
         threshold: cam.headcount?.threshold || 0,
         imgsz,
       });
-    } catch { /* next poll corrects */ }
+    } catch (err) {
+      // `/* next poll corrects */` is what this used to be, and it is the same
+      // silence as a tick springing back: the new level shows, the save is
+      // refused, and ten seconds later the registry poll quietly puts the old
+      // one back. An operator sees their choice undo itself for no reason.
+      // Correct it now rather than waiting for the poll, and say why.
+      setCamList((list) => list.map((c) => (c.id === cam.id
+        ? { ...c, headcount: { ...(c.headcount || {}), imgsz: cam.headcount?.imgsz || 640 } } : c)));
+      setFailures([{ cam, message: errorText(err) }]);
+    }
+  }, []);
+
+  /**
+   * The camera's counting hours — the one per-camera control that SAVES money
+   * rather than spending it.
+   *
+   * A door nobody walks through between 22:00 and 07:00 was holding a decode
+   * and a YOLO worker open all night, and one of the detector's eight stream
+   * slots with it. The hours are applied in the backend's camera selector, so
+   * a camera outside them drops out of the registry list the detector polls and
+   * its worker is stopped within about 15 seconds.
+   *
+   * `null` CLEARS the hours (count around the clock); a window sets them.
+   *
+   * `countingNow` IS NOT GUESSED HERE, and that is deliberate. It is the
+   * server's answer -- it needs the midnight-wrap maths and the deployment's
+   * timezone -- and a page that worked it out for itself would be a second
+   * reading of the same schedule, free to disagree with the selector about
+   * whether this camera is on duty. So:
+   *
+   *   clearing  sets it true, which needs no maths at all: a camera with no
+   *             window counts always, and leaving the old `false` behind would
+   *             leave the paused strip claiming hours that no longer exist.
+   *   setting   DELETES it, because absent means "unknown" to
+   *             notCountingReason and an unknown is simply not reported. The
+   *             pause appears when the next poll brings the real answer, which
+   *             is a few seconds of saying nothing rather than a few seconds of
+   *             possibly saying something false.
+   */
+  const saveHours = useCallback(async (cam, countWindow) => {
+    const before = cam.headcount?.countWindow || null;
+    const patch = (c, w, nowKnown) => {
+      const hc = { ...(c.headcount || {}), countWindow: w };
+      if (nowKnown === undefined) delete hc.countingNow;
+      else hc.countingNow = nowKnown;
+      return { ...c, headcount: hc };
+    };
+    setCamList((list) => list.map((c) => (c.id === cam.id
+      ? patch(c, countWindow, countWindow ? undefined : true) : c)));
+    setFailures([]);
+    try {
+      await aiService.setHeadcount(cam.id, {
+        enabled: cam.headcount?.enabled === true,
+        threshold: cam.headcount?.threshold || 0,
+        countWindow,
+        // Storing a window and then ignoring it is the odd case and has to be
+        // asked for, so a window that has just been set is a window to obey.
+        schedule: countWindow ? 'window' : undefined,
+      });
+    } catch (err) {
+      // Put the old hours back AND SAY SO, rather than letting the registry
+      // poll silently undo the operator's choice ten seconds later -- the same
+      // defect the detail picker had, and the reason this page exists.
+      setCamList((list) => list.map((c) => (c.id === cam.id
+        ? patch(c, before, undefined) : c)));
+      setFailures([{ cam, message: errorText(err) }]);
+    }
   }, []);
 
   const enabledCount = camList.filter((c) => c.headcount?.enabled === true).length;
   const runningIds = useMemo(() => new Set(streams.map((x) => x.id)), [streams]);
+
+  // Every camera the operator ticked that the detector is NOT serving. The
+  // wall is built from the detector, so without this those cameras have no
+  // tile and no mention: the header reads "6/20" and four tiles are on screen.
+  // See counting-status.js for why the gap exists at all.
+  // How many cameras this detector will open, and how many it has open. Comes
+  // from GET /health, so an older detector that does not send the caps simply
+  // reports no capacity problem rather than a guessed one.
+  const detector = useMemo(
+    () => detectorCapacity(health, runningIds.size), [health, runningIds],
+  );
+  const stranded = useMemo(
+    () => notCounting(camList, runningIds, detector), [camList, runningIds, detector],
+  );
+  // TWO STRIPS, because two different things are being said. A camera that is
+  // broken asks the operator for something; a camera that is off duty by its
+  // own schedule is confirming that it obeyed them. Both must be accounted for
+  // -- the wall is built from the detector's streams, so neither has a tile --
+  // but an amber warning that appears every night at ten o'clock is how an
+  // operator learns to stop reading amber warnings.
+  const strandedNote = useMemo(
+    () => notCountingSummary(faults(stranded), (c) => c?.name || c?.monitorId),
+    [stranded],
+  );
+  const pausedNote = useMemo(
+    () => notCountingSummary(paused(stranded), (c) => c?.name || c?.monitorId),
+    [stranded],
+  );
+  const canFix = useMemo(() => fixable(stranded), [stranded]);
+  const failureNote = useMemo(() => saveFailureSummary(failures), [failures]);
+
+  /**
+   * Turn the camera's master AI switch on, for the cameras whose only problem
+   * is that it is off.
+   *
+   * Goes through the SAME per-camera lifecycle route the AI Detection tab
+   * uses, with every setting the camera already has carried over, so a camera
+   * switched on from here is indistinguishable from one switched on there --
+   * in particular it does not quietly turn face recognition on or off.
+   *
+   * Never throws: a failure changes what the next poll says, not what the
+   * operator has set. The note is re-derived from the registry, so it corrects
+   * itself either way.
+   */
+  const turnAiOn = useCallback(async (cams) => {
+    setFixingAi(true);
+    setFailures([]);
+    const failed = [];
+    // Through the HEAD-COUNT endpoint with consent, not the lifecycle route.
+    //
+    // These cameras are already ticked for counting; what they are missing is
+    // the master switch, and this is the one rule that turns it on for
+    // counting only. The lifecycle route was wrong here: buildEnablePayload
+    // carries `faceRecognition: ai.faceRecognition !== false`, which is TRUE
+    // for a camera that has never been configured -- so this button started
+    // face recognition and spent a face licence, while the dialog two inches
+    // away promised "faces are not matched". One rule, one promise.
+    for (const c of cams || []) {
+      try {
+        await aiService.setHeadcount(c.id, {
+          enabled: true,
+          threshold: c.headcount?.threshold || 0,
+          enableAi: true,
+        });
+      } catch (err) {
+        failed.push({ cam: c, message: errorText(err) });
+      }
+    }
+    setFailures(failed);
+    await loadCams();
+    setFixingAi(false);
+  }, [loadCams]);
 
   return (
     <>
@@ -280,6 +492,25 @@ export default function HeadCount() {
             tiles is on screen the moment the page opens. Smaller screens
             scroll as a whole. */}
         <PageContent className="gap-2 xl:overflow-hidden" scroll>
+          {/* Above the wall and outside the empty-state branch, because the
+              commonest version of this problem is EVERY selected camera
+              stranded -- and that renders as "No cameras are being counted
+              yet", which is true and tells the operator nothing. */}
+          {failureNote && (
+            <FailureNote note={failureNote} onDismiss={() => setFailures([])} />
+          )}
+          {notices.map((n) => (
+            <DidMoreNote key={n} note={n} onDismiss={() => setNotices([])} />
+          ))}
+          {loaded && strandedNote && (
+            <StrandedNote
+              note={strandedNote}
+              fixable={canFix}
+              busy={fixingAi}
+              onFix={() => turnAiOn(canFix)}
+            />
+          )}
+          {loaded && pausedNote && <PausedNote note={pausedNote} />}
           {!loaded ? (
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
               {[0, 1, 2].map((i) => (
@@ -342,11 +573,91 @@ export default function HeadCount() {
         </PageContent>
       </OperationsPage>
 
+      {/* The detector has no room for another camera. A WARNING, not a
+          refusal: the tick is a standing instruction and the camera starts the
+          moment another is switched off, so refusing it would only make the
+          operator remember to come back.
+
+          It also OFFERS something, which it did not before. The cap is not the
+          operator's to raise -- the per-recorder half of it is protective, and
+          a UI that offered to raise it would be offering to break the site --
+          but WHICH cameras hold the slots is entirely theirs, and this page
+          already knows. So the dialog lists the holders with an Untick beside
+          each, names the hours as the second way out, and leaves "ask whoever
+          runs this deployment" as a footnote rather than the only sentence
+          with anything to do in it. */}
+      <ConfirmDialog
+        cancelLabel="Cancel"
+        confirmLabel={askingFull ? capacityCopy(askingFull, detector).confirmLabel : 'Tick it anyway'}
+        description={askingFull ? capacityCopy(askingFull, detector).body : null}
+        onConfirm={async () => {
+          const cam = askingFull;
+          setAskingFull(null);
+          if (cam) await toggleHeadcount(cam, true, false, true);
+        }}
+        onOpenChange={(open) => { if (!open) setAskingFull(null); }}
+        open={Boolean(askingFull)}
+        title={askingFull ? capacityCopy(askingFull, detector).title : ''}
+        tone="warning"
+      >
+        {askingFull ? (
+          <CapacityChoices
+            busy={Boolean(savingId)}
+            cam={askingFull}
+            copy={capacityCopy(askingFull, detector)}
+            holders={capacityHolders(camList, runningIds, askingFull)}
+            onUntick={async (holderId) => {
+              const holder = camList.find((c) => c.id === holderId);
+              const wanted_ = askingFull;
+              if (!holder || !wanted_) return;
+              setAskingFull(null);
+              // Free the slot, then do what was asked. `roomChecked` is true
+              // on the second call because the room was just made -- asking
+              // again would be asking about a limit the operator has already
+              // dealt with.
+              await toggleHeadcount(holder, false);
+              await toggleHeadcount(wanted_, true, false, true);
+            }}
+          />
+        ) : null}
+      </ConfirmDialog>
+
+      {/* Asked before anything is sent, and again if a save is ever refused
+          for want of an answer. One question, one place. */}
+      <ConfirmDialog
+        cancelLabel="Leave AI off"
+        confirmLabel={askingAi ? consentCopy(askingAi).confirmLabel : 'Switch AI on'}
+        description={askingAi ? consentCopy(askingAi).body : null}
+        onConfirm={async () => {
+          const cams = askingAi || [];
+          setAskingAi(null);
+          // Sequential, not Promise.all: each one is a camera licence check
+          // and a settings write, and a burst of twenty is how a batch
+          // half-lands. The dialog stays busy until they are all done.
+          //
+          // Every failure is collected, because the licence runs out PART WAY
+          // through: two cameras start, ten are refused, and reporting only
+          // the last one would leave ten ticks springing back unexplained.
+          const failed = [];
+          for (const cam of cams) {
+            const f = await toggleHeadcount(cam, true, true);
+            if (f) failed.push(f);
+          }
+          setFailures(failed);
+        }}
+        onOpenChange={(open) => { if (!open) setAskingAi(null); }}
+        open={Boolean(askingAi?.length)}
+        title={askingAi ? consentCopy(askingAi).title : ''}
+        tone="warning"
+      />
+
       {pickerOpen && (
         <CameraPicker
           camList={camList} query={query} setQuery={setQuery}
           savingId={savingId} onToggle={toggleHeadcount}
+          onAskAi={setAskingAi}
           onDetail={saveDetail}
+          onHours={saveHours}
           runningIds={runningIds} enabledCount={enabledCount}
           onClose={() => setPickerOpen(false)}
         />
@@ -357,6 +668,160 @@ export default function HeadCount() {
 }
 
 /* ── pieces ────────────────────────────────────────────────── */
+
+/**
+ * What a save did beyond what was asked.
+ *
+ * Ticking a camera for counting also switches its AI on when it was off,
+ * because counting is gated on that switch and the tick is the only one an
+ * operator is given (backend aiLifecycle.service countingOnlyAi). Doing it
+ * silently would be the same class of fault as not doing it at all: a setting
+ * changed that nobody was told about. Informational, not a warning — it is the
+ * save working.
+ *
+ * Dismissible, and replaced by the next save, so it cannot become furniture.
+ */
+function DidMoreNote({ note, onDismiss }) {
+  return (
+    <div className="flex shrink-0 items-start gap-2.5 rounded-xl border border-brand/35 bg-brand-soft px-3 py-2">
+      <Check className="mt-0.5 h-4 w-4 shrink-0 text-brand-ink" strokeWidth={2.5} />
+      <p className="min-w-0 flex-1 text-caption leading-relaxed text-brand-ink">{note}</p>
+      <button
+        aria-label="Dismiss"
+        className="shrink-0 cursor-pointer rounded p-0.5 text-brand-ink/70 transition hover:text-brand-ink"
+        onClick={onDismiss}
+        type="button"
+      >
+        <X size={14} strokeWidth={2.5} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A save that did not land, and why.
+ *
+ * Danger, not warning: something the operator asked for did not happen. An
+ * exhausted licence is the common case and the only way they can find out --
+ * the tick springs back on its own and a bouncing tick explains nothing.
+ */
+function FailureNote({ note, onDismiss }) {
+  return (
+    <div className="flex shrink-0 items-start gap-2.5 rounded-xl border border-danger-line
+                    bg-danger-soft px-3 py-2">
+      <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-danger-ink" strokeWidth={2.25} />
+      <p className="min-w-0 flex-1 text-caption leading-relaxed text-danger-ink">{note}</p>
+      <button
+        aria-label="Dismiss"
+        className="shrink-0 cursor-pointer rounded p-0.5 text-danger-ink/70 transition hover:text-danger-ink"
+        onClick={onDismiss}
+        type="button"
+      >
+        <X size={14} strokeWidth={2.5} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * One line accounting for every camera the operator selected that the detector
+ * is not counting — and, when the reason is the camera's own AI switch, the
+ * switch.
+ *
+ * A strip rather than a per-camera tile on purpose. The wall's subject is the
+ * live picture, and a grid of grey placeholders explaining themselves would
+ * push the real tiles down to make room for cameras showing nothing. One
+ * sentence costs a row and names them all.
+ *
+ * Amber, not red: a camera deliberately taken out of AI is a legitimate state,
+ * and the operator may simply have forgotten this page also depends on it.
+ */
+/**
+ * The two decisions an operator has when the detector is full.
+ *
+ * Neither is "raise the cap": that is a server setting, and its per-recorder
+ * half exists to stop an NVR being asked for more concurrent streams than it
+ * can serve, which takes every camera on it offline. Both of these are safe.
+ */
+function CapacityChoices({ cam, copy, holders, onUntick, busy }) {
+  if (!holders.length) return null;
+  return (
+    <div className="rounded-xl border border-line bg-surface-sunken p-3">
+      <p className="mb-2 text-small font-semibold text-fg">{copy.choices.untick}</p>
+      <ul className="mb-3 flex flex-col gap-1">
+        {holders.map((h) => (
+          <li className="flex items-center justify-between gap-3" key={h.id || h.monitorId}>
+            <span className="min-w-0 truncate text-small text-fg-secondary">{h.name}</span>
+            <button
+              className="shrink-0 rounded-lg border border-line px-2 py-1 text-small font-medium text-fg hover:border-brand hover:text-brand disabled:opacity-60"
+              disabled={busy}
+              onClick={() => onUntick(h.id)}
+              type="button"
+            >
+              Untick
+            </button>
+          </li>
+        ))}
+      </ul>
+      <p className="text-small text-fg-muted">{copy.choices.hours}</p>
+      <p className="mt-1 text-small text-fg-muted">
+        Set them on {cam?.name || 'the camera'}&#x27;s own card, behind the clock.
+      </p>
+      <p className="mt-2 text-[11px] leading-relaxed text-fg-subtle">{copy.footnote}</p>
+    </div>
+  );
+}
+
+/**
+ * The cameras that are off duty by their own counting hours.
+ *
+ * Deliberately NOT amber and deliberately button-less. This strip exists for
+ * one reason only: the wall is built from the detector's streams, so a paused
+ * camera has no tile, and "8 cameras selected" over six tiles is the gap this
+ * page was written to close. It closes it by confirming the camera is
+ * behaving, which is the opposite of a warning.
+ *
+ * No control, because the fix for "it is doing what you told it" is to change
+ * the hours, and those live on the camera's own card beside the number they
+ * govern. One button here would have to choose whose schedule to open.
+ */
+function PausedNote({ note }) {
+  return (
+    <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-line
+                    bg-surface-muted/50 px-3 py-2">
+      <Clock className="h-4 w-4 shrink-0 text-ink-subtle" strokeWidth={2.25} />
+      <p className="min-w-0 flex-1 text-caption leading-relaxed text-ink-subtle">
+        {note}
+      </p>
+    </div>
+  );
+}
+
+function StrandedNote({ note, fixable: fixableCams = [], busy, onFix }) {
+  return (
+    <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-warning-line
+                    bg-warning-soft px-3 py-2">
+      <TriangleAlert className="h-4 w-4 shrink-0 text-warning-ink" strokeWidth={2.25} />
+      <p className="min-w-0 flex-1 text-caption leading-relaxed text-warning-ink">
+        {note}
+      </p>
+      {fixableCams.length > 0 && (
+        <Button
+          disabled={busy}
+          onClick={onFix}
+          size="xs"
+          type="button"
+          variant="outline"
+        >
+          <Power strokeWidth={2.25} />
+          {busy
+            ? 'Turning on…'
+            : fixableCams.length === 1 ? 'Turn AI on' : `Turn AI on for ${fixableCams.length}`}
+        </Button>
+      )}
+    </div>
+  );
+}
 
 // Four summary components used to live here -- Metric (already dead: zero call
 // sites), Kpi (the six-card strip), OccupancyTile (a per-camera count + bar)
@@ -451,6 +916,95 @@ const DETAIL_LEVELS = [
 ];
 
 /**
+ * The camera's counting hours.
+ *
+ * THE ONLY CONTROL ON THIS PAGE THAT MAKES A CAMERA CHEAPER. Detail spends
+ * more per frame; zones narrow what a number means; this one stops the model
+ * outright for the hours nobody is there. An entrance counted 09:00-18:00
+ * instead of around the clock costs roughly a third of the GPU and gives its
+ * stream slot back to a camera that needs it -- the detector opens eight.
+ *
+ * OFF BY DEFAULT, AND SILENT WHEN OFF. Every camera that exists today counts
+ * around the clock, and that must keep being what "no hours" means: a default
+ * window would stop counting on somebody's night shift the day this shipped.
+ *
+ * `<input type="time">` rather than a dropdown of hours: it emits exactly the
+ * zero-padded HH:MM the backend stores and the browser renders it in the
+ * operator's own locale, so a 12-hour-clock user types 10:00 PM and the server
+ * still receives "22:00".
+ *
+ * A window whose end is before its start WRAPS, and the hint says so, because
+ * 22:00-07:00 is the commonest reason anybody opens this control and reading it
+ * as an empty set would be the obvious wrong guess.
+ */
+function HoursPicker({ value, onChange }) {
+  const on = !!(value?.from && value?.to);
+  // Seeded with a night-shift pause rather than 00:00-00:00: the operator is
+  // here to stop counting at night, and a zero-length window is both the
+  // likeliest typo and a shape the backend refuses.
+  const [draft, setDraft] = useState({
+    from: value?.from || '09:00', to: value?.to || '18:00',
+  });
+
+  const set = (part) => {
+    const next = { ...draft, ...part };
+    setDraft(next);
+    // Saved only once both ends are real times. A half-typed window would be
+    // rejected as "no window" by the backend and would read on the way back as
+    // the operator's hours having been thrown away.
+    if (next.from && next.to && next.from !== next.to) onChange(next);
+  };
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between gap-2">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="inline-flex items-center gap-1 text-micro font-semibold uppercase tracking-wide text-fg-muted">
+              <Clock size={10} /> Hours
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-[260px]">
+            When this camera is counted. Outside these hours the detector stops its
+            model for this camera — no GPU spent, and its stream slot goes to another
+            camera. An end before the start crosses midnight (22:00-07:00 is a night).
+          </TooltipContent>
+        </Tooltip>
+        <button
+          type="button"
+          onClick={() => (on ? onChange(null) : onChange(draft))}
+          className={`cursor-pointer rounded border px-1.5 py-0.5 text-micro font-semibold transition duration-200
+            ${on
+            ? 'border-brand/40 bg-brand-soft text-brand-ink'
+            : 'border-line text-fg-muted hover:border-brand/40'}`}
+        >
+          {on ? 'Set hours' : 'All day'}
+        </button>
+      </div>
+      {on && (
+        <div className="flex items-center gap-1">
+          <input
+            aria-label="Start counting at"
+            className="min-w-0 flex-1 rounded border border-line bg-surface px-1 py-0.5 text-micro text-fg"
+            onChange={(e) => set({ from: e.target.value })}
+            type="time"
+            value={draft.from}
+          />
+          <span className="text-micro text-fg-muted">to</span>
+          <input
+            aria-label="Stop counting at"
+            className="min-w-0 flex-1 rounded border border-line bg-surface px-1 py-0.5 text-micro text-fg"
+            onChange={(e) => set({ to: e.target.value })}
+            type="time"
+            value={draft.to}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * The three detail levels as a segmented control rather than a dropdown: all
  * three are visible at once, each is its own hover target, and hovering (or
  * focusing) one says in a sentence what it reaches and what it costs. The row
@@ -504,8 +1058,8 @@ function DetailPicker({ value, onChange }) {
   );
 }
 
-function CameraPicker({ camList, query, setQuery, savingId, onToggle,
-                        onDetail, runningIds, enabledCount, onClose }) {
+function CameraPicker({ camList, query, setQuery, savingId, onToggle, onAskAi,
+                        onDetail, onHours, runningIds, enabledCount, onClose }) {
   const [group, setGroup] = useState('all');
 
   useEffect(() => {
@@ -572,9 +1126,21 @@ function CameraPicker({ camList, query, setQuery, savingId, onToggle,
           </div>
         )}
         <button
-          onClick={() => filtered.forEach((c) => {
-            if ((c.headcount?.enabled === true) !== !allOn) onToggle(c, !allOn);
-          })}
+          onClick={() => {
+            const changing = filtered.filter((c) => (c.headcount?.enabled === true) !== !allOn);
+            if (!allOn) {
+              // Turning on: the cameras whose AI is already on just start. The
+              // rest are ONE question rather than a dialog each -- see
+              // consentCopy. Asked here rather than inside the per-camera
+              // handler, which would otherwise ask about the last one only.
+              const ready = changing.filter((c) => !needsAiConsent(c));
+              const ask = changing.filter((c) => needsAiConsent(c));
+              ready.forEach((c) => onToggle(c, true));
+              if (ask.length) onAskAi(ask);
+              return;
+            }
+            changing.forEach((c) => onToggle(c, false));
+          }}
           className="cursor-pointer rounded-lg border border-line px-3 py-1.5 text-small font-semibold text-fg-muted
                      transition duration-200 hover:bg-surface-muted hover:text-fg">
           {allOn ? 'Turn all off' : 'Turn all on'}
@@ -591,6 +1157,10 @@ function CameraPicker({ camList, query, setQuery, savingId, onToggle,
           {filtered.map((cam) => {
             const on = cam.headcount?.enabled === true;
             const counting = runningIds.has(cam.monitorId);
+            // Ticked here and not counted there. The tick used to be the whole
+            // story, so this card showed a grey rectangle and a confident
+            // check mark for a camera that would never produce a number.
+            const stuck = notCountingReason(cam, counting);
             const hasZone = (cam.headcount?.zones || []).length > 0;
             const limit = cam.headcount?.threshold || 0;
             return (
@@ -612,8 +1182,19 @@ function CameraPicker({ camList, query, setQuery, savingId, onToggle,
                       <img src={`${HC}/video/${encodeURIComponent(cam.monitorId)}`} alt=""
                            className="h-full w-full object-cover" />
                     ) : (
-                      <div className="grid h-full w-full place-items-center bg-surface-muted/30">
-                        <Video size={20} className="text-fg-muted/40" />
+                      <div className="grid h-full w-full place-items-center gap-1 bg-surface-muted/30 px-2 text-center">
+                        {stuck ? (
+                          <>
+                            <TriangleAlert className="h-4 w-4 text-warning-ink" strokeWidth={2.25} />
+                            {/* The reason reads as a clause after the camera's
+                                name, which is directly beneath it. */}
+                            <span className="text-micro font-medium leading-tight text-warning-ink">
+                              Not counting: {stuck.line}
+                            </span>
+                          </>
+                        ) : (
+                          <Video size={20} className="text-fg-muted/40" />
+                        )}
                       </div>
                     )}
 
@@ -650,6 +1231,13 @@ function CameraPicker({ camList, query, setQuery, savingId, onToggle,
                     <DetailPicker
                       value={cam.headcount?.imgsz || 640}
                       onChange={(v) => onDetail(cam, v)}
+                    />
+                    {/* Under detail on purpose: they are the two halves of what
+                        this camera costs -- how hard the model looks, and for
+                        how many hours a day it looks at all. */}
+                    <HoursPicker
+                      onChange={(w) => onHours(cam, w)}
+                      value={cam.headcount?.countWindow || null}
                     />
                     <Link to={zoneSetupHref(cam.monitorId)}
                       title="Draw the counting zone and set its capacity in Zone Setup"
@@ -692,6 +1280,12 @@ function Tile({ s }) {
   const reliable = s?.count_reliable !== false;
   const zoneCounts = Object.entries(s?.zone_counts || {});
   const scoped = zones.length > 0;
+  // A shape the registry has and the detector does not. The detector seeds
+  // every area it holds at 0, so an empty breakdown under a drawn outline
+  // means the shape has not reached it -- and the big number is therefore the
+  // WHOLE VIEW, which is the one thing the outline says it is not. See
+  // counting-status.js.
+  const pending = zonesPending(s);
 
   // Label each shape at its highest corner, so an operator can tell which
   // outline is which zone. With one zone the camera's limit IS that zone's
@@ -781,12 +1375,16 @@ function Tile({ s }) {
               </span>
             ))
           ) : (
-            <span className={`rounded px-1.5 py-0.5 text-micro font-medium ring-1
-                              ${scoped ? 'bg-[#4CC9F0]/15 text-[#7FD8F0] ring-[#4CC9F0]/35'
-                                       : 'bg-white/10 text-white/60 ring-white/15'}`}>
+            <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-micro font-medium ring-1
+                              ${pending ? 'bg-[#F59E0B]/20 text-[#FCD34D] ring-[#F59E0B]/45'
+                                : scoped ? 'bg-[#4CC9F0]/15 text-[#7FD8F0] ring-[#4CC9F0]/35'
+                                         : 'bg-white/10 text-white/60 ring-white/15'}`}>
               {/* A limit with no shape is a zone that covers the whole view
                   (saved in Zone Setup without drawing), not "no zone". */}
-              {scoped ? 'Counting zone' : limit > 0 ? `Whole camera view · limit ${limit}` : 'Whole camera view · no zones set up'}
+              {pending && <AlertTriangle size={10} />}
+              {pending ? ZONE_PENDING_LABEL
+                : scoped ? 'Counting zone'
+                  : limit > 0 ? `Whole camera view · limit ${limit}` : 'Whole camera view · no zones set up'}
             </span>
           )}
           <span className="text-micro tabular-nums text-white/45">

@@ -31,7 +31,13 @@ const config         = require('../config/env');
 const s3Service      = require('../services/s3.service');
 const { aiAuthHeader } = require('../utils/aiTenant');
 const { assertAiLicence, getAiEntitledUserIds } = require('../services/entitlements.service');
-const { isAiEnabled } = require('../services/aiLifecycle.service');
+const {
+  isAiEnabled, masterOnForFeature,
+  AI_TURNED_ON_FOR_COUNTING, AI_TURNED_ON_FOR_ACTIVITY,
+  AI_CONSENT_REQUIRED, aiConsentQuestion,
+} = require('../services/aiLifecycle.service');
+const { parseWindow } = require('../services/timeWindow');
+const { withinCountWindow } = require('../services/headcountWindow');
 const { AIEvent, Camera, CameraGroup, RestrictedZone } = require('../models');
 const {
   bodyDetectionRequired, nextZoneBodyFlag, NO_PRODUCER_REASON,
@@ -850,6 +856,20 @@ function serializeAiCamera(camera, runtimeByMonitor = {}, armedZonesByMonitor = 
       zones: Array.isArray(camera.settings?.headcount?.zones)
         ? camera.settings.headcount.zones : [],
       imgsz: Number(camera.settings?.headcount?.imgsz) || null,
+      // COUNTING HOURS. The window itself goes back so the page can render the
+      // control and name the hours in a sentence; `countingNow` is the ANSWER,
+      // computed by the same function the camera selector filters on
+      // (headcountWindow.withinCountWindow).
+      //
+      // The browser is told the answer rather than left to work it out. Doing
+      // it client-side would need a second copy of the midnight-wrap maths and
+      // the server's ALERT_TIMEZONE, and a page that disagreed with the
+      // selector about whether a camera is on duty would be a page that cannot
+      // explain its own missing tile -- which is the defect this whole module
+      // was written to remove.
+      schedule: camera.settings?.headcount?.schedule || null,
+      countWindow: camera.settings?.headcount?.countWindow || null,
+      countingNow: withinCountWindow(camera.settings?.headcount),
     },
     runtime: {
       running: runtime.running === true,
@@ -1412,17 +1432,93 @@ const setCameraHeadcount = asyncHandler(async (req, res) => {
     ? (ALLOWED_DETAIL.includes(Number(req.body.imgsz)) ? Number(req.body.imgsz) : null)
     : (prev.imgsz ?? null);
 
+  // COUNTING HOURS -- the operator's control over what this camera costs.
+  //
+  // A door nobody walks through between 22:00 and 07:00 was holding a decode
+  // and a YOLO worker open for nine hours a night, and one of the detector's
+  // eight stream slots with it. The hours are applied in the camera SELECTOR,
+  // so a camera outside them drops out of the registry list and the detector
+  // stops its worker within one poll. See aiFeatureCameras.headcountCameras.
+  //
+  // THE TICK AND THE HOURS ARE DIFFERENT SENTENCES. Un-ticking a camera says
+  // "do not count this"; a window says "count this, during these hours". So
+  // the hours never clear the tick and the tick never clears the hours -- an
+  // operator who sets 09:00-17:00, un-ticks for a week and ticks again gets
+  // their hours back, because losing a typed-in schedule to an unrelated
+  // click is the kind of silent loss this page has been fixing all week.
+  //
+  // A BAD WINDOW IS NO WINDOW, NOT A REFUSAL. parseWindow returns null for
+  // anything that is not two real times, and null means "count always". The
+  // field is optional and arrives alongside the tick, the threshold and the
+  // zones: failing the whole save over a mistyped time would throw away work
+  // the operator can see, to protect a field they may not have touched.
+  // Counting always is also the recoverable direction -- it spends GPU, where
+  // the other way round loses hours of numbers that cannot be got back.
+  const windowSent = req.body?.countWindow !== undefined;
+  const countWindow = windowSent
+    ? parseWindow(req.body.countWindow)
+    : parseWindow(prev.countWindow);
+  // `schedule` only means anything with a window to obey or ignore, so it is
+  // dropped with the window rather than left behind pointing at nothing.
+  let schedule;
+  if (countWindow) {
+    const sent = req.body?.schedule;
+    if (sent !== undefined) schedule = sent === 'always' ? 'always' : 'window';
+    else schedule = prev.schedule === 'always' ? 'always' : 'window';
+  }
+
+  // THE TICK IS THE WHOLE SWITCH -- ONCE SOMEBODY HAS AGREED TO IT.
+  //
+  // Counting is gated on the camera's master AI switch like every other
+  // feature, and this endpoint is the only switch an operator is given for
+  // counting (the Head Count page's tick, and Zone Setup's save, both land
+  // here). So counting cannot start while the master is off, and a camera used
+  // to sit ticked here and excluded by aiFeatureCameras `eligible`, counting
+  // nothing, with no page able to say why.
+  //
+  // But switching the master on is not this endpoint's decision to take on its
+  // own: using a camera for AI at all is a privacy and a cost choice, and "I
+  // ticked counting" is not the same sentence as "yes, run AI on this camera".
+  // So it is REFUSED and named, and `enableAi: true` on the retry is the
+  // consent -- see AI_CONSENT_REQUIRED. The counting flag is not written
+  // either: a save that half-lands here would leave the camera ticked and
+  // still not counting, which is the exact state this whole path exists to
+  // make impossible.
+  //
+  // Turning counting OFF never comes here. Other features hang off the master,
+  // and un-ticking a camera is not a request to stop them.
+  const now = new Date().toISOString();
+  const startAi = enabled && !isAiEnabled(camera);
+  if (startAi && req.body?.enableAi !== true) {
+    throw new AppError(
+      aiConsentQuestion('counted', camera.name || 'This camera'),
+      409,
+      AI_CONSENT_REQUIRED,
+    );
+  }
+
   const next = {
     ...current,
+    ...(startAi ? { ai: masterOnForFeature(current.ai, now) } : {}),
     headcount: {
       ...prev, enabled, threshold, zones,
       ...(detail ? { imgsz: detail } : { imgsz: undefined }),
-      updatedAt: new Date().toISOString(),
+      // Both written every time, so clearing the window really clears it: left
+      // to `...prev` a removed window would survive its own deletion.
+      countWindow: countWindow || undefined,
+      schedule,
+      updatedAt: now,
     },
   };
   await camera.update({ settings: next });
 
-  return res.json({ success: true, data: { id: camera.id, headcount: next.headcount } });
+  return res.json({
+    success: true,
+    data: { id: camera.id, headcount: next.headcount, ai: next.ai || current.ai || {} },
+    // Said where the tick was, because the tick did more than it said. One
+    // notice, only on the save that actually changed the master switch.
+    notices: startAi ? [AI_TURNED_ON_FOR_COUNTING] : [],
+  });
 });
 
 /**
@@ -2140,21 +2236,56 @@ const setActivityCameras = asyncHandler(async (req, res) => {
   }
 
   const results = [];
+  let turnedAiOn = 0;
   for (const id of ids) {
     const camera = await Camera.findOne({ where: { id, userId: req.user.id } });
     if (!camera) { results.push({ id, ok: false, error: 'not found' }); continue; }
     const current = camera.settings || {};
+    const now = new Date().toISOString();
+    // ON MEANS ON, once somebody has agreed to it. Activity monitoring is
+    // gated on the camera's master AI switch (aiFeatureCameras `eligible`), and
+    // this toggle is the only switch an operator is given for it -- so a camera
+    // used to sit ticked for activity and excluded by the master, analysing
+    // nothing, with no page able to say why: the same fault head count had.
+    //
+    // Switching the master on needs consent, like head count. This is a BULK
+    // route, so a refusal is per camera and does not fail the batch: the ones
+    // that can start do, and the ones that need AI come back flagged for the
+    // UI to ask about. Failing all twenty because one needs a question would
+    // make the common case hostage to the rare one.
+    //
+    // Turning activity OFF leaves the master alone: other features hang off it.
+    const needsAi = enabled && !isAiEnabled(camera);
+    const startAi = needsAi && req.body?.enableAi === true;
+    if (needsAi && !startAi) {
+      results.push({
+        id,
+        monitorId: camera.monitorId,
+        ok: false,
+        needsAi: true,
+        name: camera.name,
+        error: aiConsentQuestion('monitored for activity', camera.name || 'This camera'),
+      });
+      continue;
+    }
+    if (startAi) turnedAiOn += 1;
     const nextAi = {
-      ...(current.ai || {}),
+      ...(startAi ? masterOnForFeature(current.ai, now) : (current.ai || {})),
       activityMonitoring: enabled,
-      updatedAt: new Date().toISOString(),
+      updatedAt: now,
     };
     await camera.update({ settings: { ...current, ai: nextAi } });
-    results.push({ id, monitorId: camera.monitorId, ok: true, activityMonitoring: enabled });
+    results.push({
+      id, monitorId: camera.monitorId, ok: true, activityMonitoring: enabled, aiTurnedOn: startAi,
+    });
   }
 
   const push = await pushActivityCameras();
-  res.json({ success: true, count: results.length, enabled, data: results, push });
+  res.json({
+    success: true, count: results.length, enabled, data: results, push,
+    // Said where the toggle was, because the toggle did more than it said.
+    notices: turnedAiOn ? [AI_TURNED_ON_FOR_ACTIVITY] : [],
+  });
 });
 
 // GET /api/ai/activity-cameras → which cameras are enabled (DB truth) + live
@@ -2665,6 +2796,12 @@ const exportZoneBreaches = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  // Not a route. Exported so the contract between the zone editor and the
+  // head-count detector can be tested across the boundary: the editor builds
+  // the polygons, this validates them, the detector parses what survives.
+  // Every bug in this feature has lived in a boundary like that one, invisible
+  // to a green suite on either side -- see contracts/headcount-camera-row.json.
+  sanitiseZones,
   listEvents,
   listZoneBreaches,
   exportZoneBreaches,

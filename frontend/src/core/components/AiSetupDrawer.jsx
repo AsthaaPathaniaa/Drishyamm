@@ -1,16 +1,27 @@
 import { useState } from 'react';
 import { AlertTriangle, Check, ChevronDown, Loader2 } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { aiService } from '@/core/services/ai';
 import {
   buildDisablePayload,
   buildEnablePayload,
   cameraFeatures,
+  featureSetupPath,
   lifecycleCopy,
   visibleFeatures,
 } from '@/core/services/aiCamera';
 import { Button } from '@/core/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/core/ui/sheet';
+// The producer rules live in ONE file. They used to live in
+// modules/occupancy/zone-setup, and this import was a layering inversion --
+// core reaching into a feature -- taken deliberately because the alternative
+// was a fourth copy of "what feeds a zone", and a second reading of that
+// question is exactly how the feeder and the engine came to disagree before.
+// The file has since moved here, which is where a rule three screens share
+// belongs; occupancy now imports it from core like everyone else.
+import { zoneEntry } from '@/core/services/zoneDetector';
+import { ZoneDetectorDialog } from './ZoneDetectorDialog';
+import { planHeadcountChange } from './ai-setup-headcount.js';
 
 /**
  * The "Set up AI" drawer: which features, where the camera is, start.
@@ -45,6 +56,47 @@ const INPUT_SIZES = [
 ];
 
 /** The drawer: pick features, say where the camera is, start. */
+/**
+ * "Draw a zone", but checked before it navigates.
+ *
+ * A zone applies its rules to boxes a PRODUCER publishes, so a camera with
+ * neither face nor body detection on carries a zone that can never fire. This
+ * link used to navigate anyway: the operator drew a shape, named it, set its
+ * rules, pressed Save, and learned from a 409 that none of it could work.
+ *
+ * Only the ZONE row is gated. A gate line for counting needs no producer at
+ * all -- head count runs its own model -- so gating that too would be an
+ * obstacle in front of something that works.
+ */
+function SetupLink({ camera, feature, onBlocked }) {
+  const href = featureSetupPath(feature, camera);
+  const label = feature.setupLabel.replace(/^Draw a /, 'Draw ');
+  // One camera, because that is all the drawer is open on. The zone editor
+  // asks the same question about every camera a zone covers.
+  const gate = feature.key === 'restricted_zone'
+    ? zoneEntry([camera])
+    : null;
+
+  if (!gate) {
+    return (
+      <Link className="text-small font-medium text-brand-ink hover:underline" to={href}>
+        {label}
+      </Link>
+    );
+  }
+  // A button, not a Link: it leads to a question rather than to a page, and a
+  // link an operator middle-clicks into a new tab would skip the question.
+  return (
+    <button
+      className="text-small font-medium text-brand-ink hover:underline"
+      onClick={() => onBlocked({ ...gate, href })}
+      type="button"
+    >
+      {label}
+    </button>
+  );
+}
+
 function SetupDrawer({ camera, onClose, onSaved }) {
   // Keyed on camera.id by the parent, so each camera starts a fresh draft.
   const [draft, setDraft] = useState(() => draftFromCamera(camera));
@@ -56,22 +108,40 @@ function SetupDrawer({ camera, onClose, onSaved }) {
   // Shown rather than discarded: a security control that was switched on for
   // the operator has to be something they are told about.
   const [notices, setNotices] = useState([]);
+  // The zone the operator is trying to draw on a camera that cannot carry one.
+  // Holds the pending navigation, so the answer resumes it.
+  const [zoneGate, setZoneGate] = useState(null);
+  const navigate = useNavigate();
 
   const submit = async (payload, headcountEnabled) => {
-    setSaving(true);
     setError('');
     setNotices([]);
+    // Counting is a separate route (settings.headcount, not settings.ai), so
+    // the toggle is a second call. What it should do is decided HERE, from the
+    // payload about to be sent -- before anything is sent at all. Counting
+    // cannot start on a camera whose master AI switch is off, and this drawer
+    // will not send the `enableAi` consent flag on an operator's behalf, so
+    // "AI off + counting on" is a submit that can only come back refused. It
+    // is answered in the drawer instead, beside the two controls that
+    // disagree, rather than saving the AI half and reporting the failure of a
+    // request that never had a chance. See ai-setup-headcount.js.
+    const headcount = planHeadcountChange({ camera, payload, headcountEnabled });
+    if (headcount.refuse) {
+      setError(headcount.refuse);
+      return;
+    }
+    setSaving(true);
     try {
       const res = await aiService.updateCameraAiLifecycle(camera.id, payload);
-      // Counting is a separate route (settings.headcount, not settings.ai), so
-      // the toggle is a second call -- made only when it actually changed, and
-      // AFTER the AI save, so a failure here cannot lose the main edit. `zones`
-      // is deliberately not sent: the backend keeps the counting area already
-      // drawn, so switching counting off and on again never wipes it.
-      if (headcountEnabled !== undefined && headcountEnabled !== (camera.headcount?.enabled === true)) {
+      // Made AFTER the AI save, so a failure here cannot lose the main edit --
+      // and so that a submit which turns the master ON has already turned it
+      // on by the time counting is asked for. `zones` is deliberately not
+      // sent: the backend keeps the counting area already drawn, so switching
+      // counting off and on again never wipes it.
+      if (headcount.send) {
         try {
           await aiService.setHeadcount(camera.id, {
-            enabled: headcountEnabled,
+            enabled: headcount.enabled,
             threshold: Number(camera.headcount?.threshold) || 0,
           });
         } catch (err) {
@@ -144,23 +214,6 @@ function SetupDrawer({ camera, onClose, onSaved }) {
                 </FeatureLine>
               );
             }
-            // Stored, saved, and read by nothing. Shown disabled with the
-            // reason rather than deleted: the value on the camera is real, and
-            // the fix is to make a service read it -- see alertEngine.js.
-            if (f.notEnforced) {
-              return (
-                <FeatureLine child={Boolean(f.parent)} key={f.key} feature={f} note={f.notEnforced}>
-                  <fieldset className="m-0 flex shrink-0 items-center gap-2 border-0 p-0" disabled title={f.notEnforced}>
-                    <span className="rounded border border-line bg-surface-sunken px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">
-                      Not enforced
-                    </span>
-                    <span className="pointer-events-none opacity-55">
-                      <Switch label={f.label} value={draft[f.flag] === true} onChange={() => {}} />
-                    </span>
-                  </fieldset>
-                </FeatureLine>
-              );
-            }
             if (f.kind === 'flag') {
               // Forced on, with the reason shown. Not merely pre-ticked: an
               // anonymous camera with a zone and no detector is a zone that
@@ -185,7 +238,7 @@ function SetupDrawer({ camera, onClose, onSaved }) {
               <FeatureLine key={f.key} feature={f}>
                 {drawn[f.key] ? (
                   <span className="flex shrink-0 items-center gap-3">
-                    <Link to={f.setupPath} className="inline-flex items-center gap-1 text-small font-medium text-success-ink hover:underline">
+                    <Link to={featureSetupPath(f, camera)} className="inline-flex items-center gap-1 text-small font-medium text-success-ink hover:underline">
                       <Check className="h-3.5 w-3.5" /> Ready
                     </Link>
                     {f.key === 'head_count' ? (
@@ -197,9 +250,11 @@ function SetupDrawer({ camera, onClose, onSaved }) {
                     ) : null}
                   </span>
                 ) : (
-                  <Link to={f.setupPath} className="text-small font-medium text-brand-ink hover:underline">
-                    {f.setupLabel.replace(/^Draw a /, 'Draw ')}
-                  </Link>
+                  <SetupLink
+                    camera={camera}
+                    feature={f}
+                    onBlocked={setZoneGate}
+                  />
                 )}
               </FeatureLine>
             );
@@ -278,6 +333,32 @@ function SetupDrawer({ camera, onClose, onSaved }) {
           </button>
         ) : null}
       </div>
+
+      {/* Asked instead of navigating, and the navigation resumes once a
+          detector is on. A failure keeps the dialog open: a camera that did
+          not change is a camera whose zone still cannot fire, so sending the
+          operator to draw one would put them back where they started. */}
+      <ZoneDetectorDialog
+        entry={zoneGate}
+        onChoose={async (option) => {
+          const res = await aiService.updateCameraAiLifecycle(
+            camera.id, buildEnablePayload(camera, option.overrides),
+          );
+          // The drawer's own row is re-read, so closing it does not leave the
+          // panel claiming the detector is still off.
+          if (res?.data) onSaved?.(res.data);
+          // The AI service may have saved the flag and failed to START the
+          // camera. That is not a reason to refuse the zone -- the setting is
+          // right and it retries -- but it IS worth carrying forward.
+          if (res?.reconcile && res.reconcile.ok === false) {
+            setNotices([`Saved, but the AI service did not start this camera: ${
+              res.reconcile.error || 'it did not respond.'} Nothing is detected until it does.`]);
+          }
+          navigate(zoneGate.href);
+        }}
+        onOpenChange={(open) => { if (!open) setZoneGate(null); }}
+        open={Boolean(zoneGate)}
+      />
     </>
   );
 }
@@ -359,5 +440,8 @@ function draftFromCamera(camera) {
   // settings.headcount and has its own route -- so it is stripped before save
   // and sent separately. It rides in the draft so the row has somewhere to put
   // the toggle's state.
-  return { ...buildEnablePayload(camera), headcountEnabled: camera?.headcount?.enabled === true };
+  return {
+    ...buildEnablePayload(camera, { faceRecognition: camera?.ai?.faceRecognition !== false }),
+    headcountEnabled: camera?.headcount?.enabled === true,
+  };
 }

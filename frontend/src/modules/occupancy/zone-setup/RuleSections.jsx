@@ -31,6 +31,9 @@ import {
 } from './StepBehaviour';
 import StepAccess from './StepAccess';
 import { summaries } from './rule-summary';
+import {
+  groupSections, isEnforced, PENDING_HEADING, PENDING_NOTE,
+} from './rule-enforcement';
 
 const OPEN_KEY = 'drishyam.zoneSetup.openSections';
 const DEFAULT_OPEN = ['capacity'];
@@ -76,64 +79,96 @@ export default function RuleSections({
       body: <StaffingRules draft={draft} set={set} />,
     },
     {
-      id: 'access', icon: ShieldCheck, title: 'Access & identity',
+      id: 'access', icon: ShieldCheck, title: 'Access & who may enter',
       body: (
-        <div className="flex flex-col gap-3">
-          <StepAccess
-            access={access}
-            alertAfterSec={draft.alertAfterSec ?? 5}
-            bodyNote={bodyNote}
-            camera={camera}
-            enablingBody={enablingBody}
-            onChange={(a) => set({ access: a })}
-            onEnableBodyDetection={onEnableBodyDetection}
-            onRule={set}
-            severity={draft.severity || 'critical'}
-            suggestions={suggestions}
-          />
-          <IdentityTracking draft={draft} set={set} />
-        </div>
+        <StepAccess
+          access={access}
+          alertAfterSec={draft.alertAfterSec ?? 5}
+          bodyNote={bodyNote}
+          camera={camera}
+          enablingBody={enablingBody}
+          onChange={(a) => set({ access: a })}
+          onEnableBodyDetection={onEnableBodyDetection}
+          onRule={set}
+          severity={draft.severity || 'critical'}
+          suggestions={suggestions}
+        />
       ),
     },
+    {
+      // Lifted OUT of Access & identity. Every other setting in that section
+      // reaches the engine; privacy reaches nothing. Sitting inside an
+      // enforced section, it borrowed that section's credibility -- which is
+      // the whole fault this split exists to fix.
+      id: 'identity', icon: ShieldCheck, title: 'Identity & privacy',
+      body: <IdentityTracking draft={draft} set={set} />,
+    },
   ];
+  const byId = Object.fromEntries(sections.map((x) => [x.id, x]));
+  const { working, pending } = groupSections(sections.map((x) => x.id));
+
+  /** One accordion section. Identical for both groups -- only the order and
+   *  the heading above them differ, so a pending rule is not a second-class
+   *  CONTROL, just an honestly labelled one. */
+  const renderSection = (id) => {
+    const { icon, title, body } = byId[id];
+    const Icon = icon;
+    const waits = locked && id !== 'capacity';
+    const isOpen = !waits && open.has(id);
+    const summary = waits ? 'Draw the boundary first' : (sum[id] || []).filter(Boolean).join(' · ');
+    const enforced = isEnforced(id);
+    return (
+      <section className={`overflow-hidden rounded-lg border border-line bg-surface ${waits ? 'opacity-55' : ''}`} key={id}>
+        <button
+          aria-controls={`rules-${id}`}
+          aria-expanded={isOpen}
+          className="flex w-full items-center gap-2 px-3 py-2 text-left transition enabled:hover:bg-surface-sunken focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand disabled:cursor-not-allowed"
+          disabled={waits}
+          onClick={() => toggle(id)}
+          type="button"
+        >
+          <Icon className={`h-4 w-4 shrink-0 ${enforced ? 'text-brand' : 'text-fg-subtle'}`} strokeWidth={2} />
+          <span className={`shrink-0 text-heading font-bold ${enforced ? 'text-fg' : 'text-fg-muted'}`}>{title}</span>
+          {!isOpen && summary ? (
+            <span className="min-w-0 flex-1 truncate text-right text-small text-fg-subtle" title={summary}>{summary}</span>
+          ) : <span className="flex-1" />}
+          {waits ? <Lock className="h-3.5 w-3.5 shrink-0 text-fg-subtle" strokeWidth={2.25} /> : (
+            <ChevronRight
+              className={`h-4 w-4 shrink-0 text-fg-subtle transition-transform ${isOpen ? 'rotate-90' : ''}`}
+              strokeWidth={2.25}
+            />
+          )}
+        </button>
+        {/* No reason is repeated in the body: every control in a pending
+            section is already wrapped in StepBehaviour's `NotEnforced`, which
+            carries the badge and the specific reason beside the control
+            itself. This split adds the ORDER and one heading, not a second
+            copy of what the section already says. */}
+        {isOpen ? (
+          <div className="border-t border-line-subtle px-3 py-2.5" id={`rules-${id}`}>{body}</div>
+        ) : null}
+      </section>
+    );
+  };
 
   return (
     <div className="flex flex-col gap-2">
-      {sections.map(({
-        id, icon, title, body,
-      }) => {
-        const Icon = icon;
-        const waits = locked && id !== 'capacity';
-        const isOpen = !waits && open.has(id);
-        const summary = waits ? 'Draw the boundary first' : sum[id].filter(Boolean).join(' · ');
-        return (
-          <section className={`overflow-hidden rounded-lg border border-line bg-surface ${waits ? 'opacity-55' : ''}`} key={id}>
-            <button
-              aria-controls={`rules-${id}`}
-              aria-expanded={isOpen}
-              className="flex w-full items-center gap-2 px-3 py-2 text-left transition enabled:hover:bg-surface-sunken focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand disabled:cursor-not-allowed"
-              disabled={waits}
-              onClick={() => toggle(id)}
-              type="button"
-            >
-              <Icon className="h-4 w-4 shrink-0 text-brand" strokeWidth={2} />
-              <span className="shrink-0 text-heading font-bold text-fg">{title}</span>
-              {!isOpen && summary ? (
-                <span className="min-w-0 flex-1 truncate text-right text-small text-fg-subtle" title={summary}>{summary}</span>
-              ) : <span className="flex-1" />}
-              {waits ? <Lock className="h-3.5 w-3.5 shrink-0 text-fg-subtle" strokeWidth={2.25} /> : (
-                <ChevronRight
-                  className={`h-4 w-4 shrink-0 text-fg-subtle transition-transform ${isOpen ? 'rotate-90' : ''}`}
-                  strokeWidth={2.25}
-                />
-              )}
-            </button>
-            {isOpen ? (
-              <div className="border-t border-line-subtle px-3 py-2.5" id={`rules-${id}`}>{body}</div>
-            ) : null}
-          </section>
-        );
-      })}
+      {/* WORKING FIRST. Someone reading top to bottom meets the controls that
+          do something before the ones that do not. */}
+      {working.map((sec) => renderSection(sec.id))}
+
+      {pending.length > 0 && (
+        <>
+          <div className="mt-2 flex items-center gap-2">
+            <span className="shrink-0 text-caption font-bold uppercase tracking-wider text-fg-subtle">
+              {PENDING_HEADING}
+            </span>
+            <span className="h-px min-w-0 flex-1 bg-line" />
+          </div>
+          <p className="text-caption leading-relaxed text-fg-muted">{PENDING_NOTE}</p>
+          {pending.map((sec) => renderSection(sec.id))}
+        </>
+      )}
     </div>
   );
 }
