@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 
 import {
   zoneEntry, applyZoneEntry, USE_FACE, USE_BODY, hasProducer,
-} from './zone-detector.js';
+} from './zoneDetector.js';
 
 /** A camera's GET /ai/cameras row. AI on, face on, body off by default. */
 const cam = (ai = {}) => ({

@@ -212,7 +212,7 @@ export async function syncRooms() {
  *
  * `needsAi` IS A BACKSTOP, NOT THE PRIMARY PATH. DO NOT "SIMPLIFY" IT AWAY.
  * ------------------------------------------------------------------------
- * The primary path is `zoneEntry` in zone-setup/zone-detector.js: it asks
+ * The primary path is `zoneEntry` in core/services/zoneDetector.js: it asks
  * which detector should watch a camera BEFORE a shape is drawn on it, and a
  * camera whose AI it switched on never reaches this refusal at all. So in
  * normal use this bucket stays empty, and a reader who finds it empty will be

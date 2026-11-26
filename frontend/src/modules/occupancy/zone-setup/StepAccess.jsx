@@ -21,7 +21,7 @@ import {
   ACCESS_MODES, DEFAULT_ROLES, SCHEDULE_MODES,
   SELECTABLE_ACCESS_MODES, accessModeUnavailable,
 } from './access-data';
-import { zoneCoverage } from './zone-detector';
+import { zoneCoverage } from '@/core/services/zoneDetector';
 
 const INPUT = 'mt-1 w-full rounded-lg border border-line bg-surface px-2.5 py-1.5 text-body text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/25';
 

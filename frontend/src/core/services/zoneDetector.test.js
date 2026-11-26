@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import {
   BODY_TURNED_ON, bodyProducing, bodyRequired, enableBodyDetection, faceProducing,
   hasProducer, zoneCoverage, zoneDetectorProblem,
-} from './zone-detector.js';
+} from './zoneDetector.js';
 
 const row = (ai = {}) => ({ id: 'cam-1', name: 'Server room', ai: { enabled: true, mode: 'continuous', ...ai } });
 

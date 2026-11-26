@@ -87,7 +87,7 @@ import {
 } from '../zone-model';
 import {
   applyZoneEntry, enableBodyDetection, zoneDetectorProblem, zoneEntry,
-} from './zone-detector';
+} from '@/core/services/zoneDetector';
 import { ZoneDetectorDialog } from '@/core/components/ZoneDetectorDialog';
 import ZoneRail from './ZoneRail';
 import CanvasBar from './CanvasBar';

@@ -12,13 +12,14 @@ import {
 } from '@/core/services/aiCamera';
 import { Button } from '@/core/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/core/ui/sheet';
-// The producer rules live in ONE file, and this is a layering inversion to
-// reach them: core importing from a module. Taken deliberately. The
-// alternative is a fourth copy of "what feeds a zone", and a second reading of
-// that question is exactly how the feeder and the engine came to disagree
-// before. zone-detector.js is pure with no imports, so moving it into core is
-// a trivial follow-up if the inversion ever bites.
-import { zoneEntry } from '@/modules/occupancy/zone-setup/zone-detector';
+// The producer rules live in ONE file. They used to live in
+// modules/occupancy/zone-setup, and this import was a layering inversion --
+// core reaching into a feature -- taken deliberately because the alternative
+// was a fourth copy of "what feeds a zone", and a second reading of that
+// question is exactly how the feeder and the engine came to disagree before.
+// The file has since moved here, which is where a rule three screens share
+// belongs; occupancy now imports it from core like everyone else.
+import { zoneEntry } from '@/core/services/zoneDetector';
 import { ZoneDetectorDialog } from './ZoneDetectorDialog';
 import { planHeadcountChange } from './ai-setup-headcount.js';
 
