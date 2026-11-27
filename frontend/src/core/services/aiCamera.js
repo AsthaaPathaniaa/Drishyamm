@@ -55,7 +55,33 @@ export const AI_FEATURES = [
   // (PersonTracker.jsx, backed by personTracker.controller.js). Two screens
   // writing one flag is how the two drift apart. The flag itself is untouched
   // and still carried through every payload.
-  { key: 'head_count', kind: 'setup', label: 'Head count / footfall', short: 'Count', note: 'Counts people crossing a gate line. Footfall counting is part of the face pipeline, so it needs face recognition on; the live head count in a room does not.', setupLabel: 'Draw a gate line', setupPath: '/occupancy/zone-setup', setupParam: 'gate' },
+  // TWO ROWS, because these are two features with two services, two shapes
+  // and two different requirements. They were one row called
+  // "Head count / footfall", whose note had to explain in a single sentence
+  // that one half needs face recognition and the other does not -- and whose
+  // single setup link could only serve one of them, so an operator who wanted
+  // a counting area was sent to draw a line.
+  //
+  //   footfall    people CROSSING a line. A gate line. Lives in the footfall
+  //               service (aiService.footfallPutConfig) and is part of the
+  //               FACE pipeline, so it needs face recognition on.
+  //   head count  how many people are INSIDE an area right now. A polygon.
+  //               Lives in the head-count service (aiService.setHeadcount)
+  //               and needs no face recognition at all.
+  //
+  // The page has always known they are different -- useOccupancy builds
+  // `gates`/`lineZones` from footfall and `regionZones` from the head-count
+  // streams -- so this row was the last place they were conflated.
+  {
+    key: 'head_count', kind: 'setup', label: 'Head count', short: 'Count',
+    note: 'Counts how many people are inside an area you draw, right now. Does not need face recognition — a camera can count people without identifying them.',
+    setupLabel: 'Draw a counting area', setupPath: '/occupancy/zone-setup', setupParam: 'zone',
+  },
+  {
+    key: 'footfall', kind: 'setup', label: 'Footfall', short: 'Footfall',
+    note: 'Counts people crossing a line, in and out. Part of the face pipeline, so it needs face recognition on.',
+    setupLabel: 'Draw a gate line', setupPath: '/occupancy/zone-setup', setupParam: 'gate',
+  },
   // Restricted zones are created on the counting-areas page, which is the only
   // writer of /restricted-zones. /ai-feed draws AI DETECTION areas — a
   // different thing on a near-identical canvas, which saves successfully and
@@ -242,12 +268,16 @@ export function cameraFeatures(row) {
   const zones = Array.isArray(ai.detectionZones) ? ai.detectionZones : [];
   const drawn = {
     // DRAWN, not enabled. `headcount.enabled` means "counting is switched on
-    // for this camera" -- a different question from "is there a gate line to
-    // count across", and reading it here made the row say "Ready" on a camera
-    // with nothing drawn at all. The flag is the row's TOGGLE now; this is its
-    // setup state.
-    head_count: hasDrawn(row?.headcount?.zones)
-      || zones.some((z) => z?.shape === 'line' && z.enabled !== false),
+    // for this camera" -- a different question from "is there an area to count
+    // inside", and reading it here made the row say "Ready" on a camera with
+    // nothing drawn at all. The flag is the row's TOGGLE; this is its setup
+    // state.
+    //
+    // The two halves of the old single row, now asked separately: a counting
+    // AREA for head count, a LINE for footfall. A camera can have either,
+    // both, or neither, which the one combined answer could not express.
+    head_count: hasDrawn(row?.headcount?.zones),
+    footfall: zones.some((z) => z?.shape === 'line' && z.enabled !== false),
     restricted_zone: hasRestrictedZone(row),
   };
   // Computed once: every flag row consults the same answer, so the row cannot
