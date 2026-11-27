@@ -551,6 +551,12 @@ function ZoneEditorPage({
   const [lineDirty, setLineDirty] = useState(false);
   useEffect(() => { dirtyRef.current = dirty || lineDirty; }, [dirty, lineDirty, dirtyRef]);
 
+  // `?cam=` SELECTS WITHIN THE OPEN ZONE. It does not choose which zone opens
+  // -- that is `?zone=` (which also accepts a monitorId and opens that camera
+  // on its own view) and `?gate=`. A camera not in this zone is ignored here
+  // rather than switching the page to it, which is correct for a rail
+  // selection and is why a link that meant "open this camera" must not use
+  // this parameter: it fails silently, landing on whatever zone was chosen.
   const activeCam = draft.cameras.includes(camParam) ? camParam : draft.cameras[0];
   const nameOf = (m) => cameras.find((c) => c.id === m)?.label || camByMonitor[m]?.name || m;
   const notCounting = cameras.find((c) => c.id === activeCam)?.counting === false;

@@ -60,7 +60,7 @@ export const AI_FEATURES = [
   // writer of /restricted-zones. /ai-feed draws AI DETECTION areas — a
   // different thing on a near-identical canvas, which saves successfully and
   // arms nothing.
-  { key: 'restricted_zone', kind: 'setup', label: 'Restricted zone', short: 'Zone', note: 'Alerts when someone enters an area you draw.', setupLabel: 'Draw a zone', setupPath: '/occupancy/zone-setup', setupParam: 'cam' },
+  { key: 'restricted_zone', kind: 'setup', label: 'Restricted zone', short: 'Zone', note: 'Alerts when someone enters an area you draw.', setupLabel: 'Draw a zone', setupPath: '/occupancy/zone-setup', setupParam: 'zone' },
   // A CHILD of the row above, and labelled for what it DOES rather than for
   // the service that implements it: an operator choosing this is deciding
   // whether a hooded or turned-away person sets the zone off, not whether to
@@ -292,10 +292,22 @@ export function cameraFeatures(row) {
  * (ZoneSetup.jsx reads `gate`, `cam`, `zone` and `group`); the panel simply
  * never used them.
  *
- * `gate` opens the gate-line editor on that camera directly; `cam` selects it
- * in the zone rail, which is the right landing place for drawing a zone
- * because a zone can span cameras and the rail is where that is decided.
- * Both take the monitorId, which is what ZoneSetup matches on.
+ * `gate` opens the gate-line editor on that camera directly.
+ *
+ * `zone` is the one for drawing a zone, and the choice is not obvious. It
+ * normally carries a ZONE id, but ZoneSetup's lookup chain falls through to
+ * `cameraZone(cameras.find((c) => c.id === editing))` -- a camera with no zone
+ * yet is opened on its own whole view, "where its first zone gets drawn". That
+ * is exactly the intent here, and it is why HeadCount.jsx links the same way.
+ *
+ * NOT `cam`, which was the first answer here and was wrong. `cam` selects
+ * which camera WITHIN an already-chosen zone is shown
+ * (ZoneSetup.jsx: `draft.cameras.includes(camParam) ? camParam : ...`); it has
+ * no say in which zone the page opens, so the link silently landed on
+ * whichever zone the page picked for itself. A parameter that is ignored when
+ * it does not fit is the worst kind to guess at.
+ *
+ * All three take the monitorId, which is what ZoneSetup matches on.
  */
 export function featureSetupPath(feature, row) {
   const base = feature?.setupPath || '';

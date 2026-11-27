@@ -97,7 +97,13 @@ test('a setup row links to the camera it was opened from', () => {
   // Both used to link to a bare /occupancy/zone-setup, which opens on whatever
   // camera that page picks for itself.
   assert.equal(featureSetupPath(gate, row()), '/occupancy/zone-setup?gate=m1');
-  assert.equal(featureSetupPath(zone, row()), '/occupancy/zone-setup?cam=m1');
+  // `zone`, NOT `cam`. ZoneSetup's zone lookup falls through to opening a
+  // camera on its own whole view when no zone has that id, which is exactly
+  // "draw the first zone on this camera". `cam` only picks which camera
+  // inside an ALREADY-CHOSEN zone is shown, so it was silently ignored and
+  // the link landed on whichever zone the page defaulted to.
+  assert.equal(featureSetupPath(zone, row()), '/occupancy/zone-setup?zone=m1');
+  assert.notEqual(featureSetupPath(zone, row()), '/occupancy/zone-setup?cam=m1');
 });
 
 test('a setup link falls back to the bare page rather than a broken one', () => {
