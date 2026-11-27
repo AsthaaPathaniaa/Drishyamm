@@ -254,7 +254,7 @@ services:
       INSIGHTFACE_DET_ASPECT: "1.7778"
       # One model instance per replica so cameras detect in parallel instead of
       # queuing on a single lock. 1 measured 1512ms detect; 3 measured 454ms.
-      INSIGHTFACE_RUNTIME_REPLICAS: "3"
+      INSIGHTFACE_RUNTIME_REPLICAS: "1"
       # 4 fps/camera is ample for face detection and halves detector demand
       # vs the old 8; people do not move far in 250ms and the client overlay
       # predicts between updates. Cuts oversubscription on a shared GPU.
@@ -343,7 +343,7 @@ services:
       INSIGHTFACE_DET_ASPECT: "1.7778"
       # One model instance per replica so cameras detect in parallel instead of
       # queuing on a single lock. 1 measured 1512ms detect; 3 measured 454ms.
-      INSIGHTFACE_RUNTIME_REPLICAS: "3"
+      INSIGHTFACE_RUNTIME_REPLICAS: "1"
       # 4 fps/camera is ample for face detection and halves detector demand
       # vs the old 8; people do not move far in 250ms and the client overlay
       # predicts between updates. Cuts oversubscription on a shared GPU.
