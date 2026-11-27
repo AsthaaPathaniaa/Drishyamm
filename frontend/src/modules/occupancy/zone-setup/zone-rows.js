@@ -42,6 +42,7 @@ import { ACCESS_MODE_BY_ID } from './access-data.js';
 // Relative, not '@/', for the same reason the rest of this file is pure: it
 // has to run under `node --test`. zoneDetector has no imports of its own.
 import { faceProducing, bodyProducing } from '../../../core/services/zoneDetector.js';
+import { aiOn } from '../../../core/services/aiConsent.js';
 
 /**
  * WHY a zone is not working, or null when it is -- and whether the operator
@@ -83,7 +84,12 @@ function blockedBy(cams, byMon, plan, needs) {
   const rows = cams.map((m) => byMon?.[m]).filter(Boolean);
   if (!rows.length) return null;            // nothing known yet; say nothing
 
-  const off = rows.find((c) => c?.ai?.enabled !== true);
+  // `aiOn`, not `enabled !== true`: the master switch is enabled AND a mode
+  // that is not 'off', which is what the backend means by isAiEnabled. Read
+  // the flag alone and a camera parked at mode 'off' reports "nothing is
+  // detecting here" -- a true sentence that sends the operator to the wrong
+  // switch -- or, on a counting zone, reports nothing at all.
+  const off = rows.find((c) => !aiOn(c));
   if (off) return { code: 'ai-off', label: 'AI is off', cameraId: off.id || null };
 
   if (needs === 'restricted') {

@@ -324,6 +324,7 @@ export default function ZoneSetup() {
             <ZoneRail
               activeGate={gateCam}
               cameras={cameras}
+              camByMonitor={camByMonitor}
               gates={gates}
               mode={group}
               onAddZone={addZone}
@@ -837,6 +838,7 @@ function ZoneEditorPage({
               activeCam={activeCam}
               activeZoneId={draft.id}
               cameras={cameras}
+              camByMonitor={camByMonitor}
               gates={gates}
               mode={group}
               onAddZone={onAddZone}
